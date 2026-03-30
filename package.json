@@ -1,0 +1,23 @@
+{
+  "name": "on-token-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Orochi Network Token (ON) Hyperlane Warp Route - ETH <-> BSC",
+  "scripts": {
+    "warp:init": "hyperlane warp init --out ./configs/warp-route-deploy.yaml",
+    "warp:init:advanced": "hyperlane warp init --advanced --out ./configs/warp-route-deploy.yaml",
+    "warp:deploy": "hyperlane warp deploy",
+    "warp:check": "hyperlane warp check",
+    "warp:verify": "hyperlane warp verify",
+    "warp:send:test": "hyperlane warp send --relay --amount 1",
+    "warp:read": "hyperlane warp read",
+    "warp:read:save": "hyperlane warp read --out ./configs/warp-route-current.yaml",
+    "warp:apply": "hyperlane warp apply",
+    "warp:fees": "hyperlane warp get-fees",
+    "forge:build": "forge build",
+    "forge:test": "forge test -vv"
+  },
+  "dependencies": {
+    "@hyperlane-xyz/cli": "29.1.0"
+  }
+}

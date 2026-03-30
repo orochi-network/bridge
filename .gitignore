@@ -1,0 +1,22 @@
+# Compiler files
+cache/
+out/
+
+# Broadcast logs (may contain deployer addresses, RPC URLs, nonces)
+/broadcast/
+
+# Docs
+docs/
+
+# Dotenv file
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+
+# Hyperlane
+.hyperlane/
+lib

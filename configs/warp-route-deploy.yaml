@@ -1,0 +1,27 @@
+# Hyperlane Warp Route: ON Token (Ethereum <-> BSC)
+#
+# Architecture:
+#   Ethereum: HypERC20Collateral — locks canonical ON
+#   BSC:      HypERC20 Synthetic — mint/burn + 100M pre-minted to deployer
+#
+# The 100M pre-mint represents the existing 100M old BSC ON supply.
+# These tokens are seeded into ONSwap for 1:1 migration.
+#
+# NOTE: Pre-minted tokens are BSC-only until ETH ON is bridged to create
+# collateral backing. Only collateral-backed synthetic ON can bridge BSC → ETH.
+#
+# Deploy: hyperlane warp init → populate registry → hyperlane warp deploy
+
+ethereum:
+  type: collateral
+  token: "0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d"  # OrochiNetworkToken on Ethereum
+  owner: "0xDA5E5Be8f9C5fCdd30f2ee08D6b3F794511C2B48"
+  mailbox: "0xc005dc82818d67AF737725bD4bf75435d065D239"
+
+bsc:
+  type: synthetic
+  initialSupply: "100000000000000000000000000"  # 100M * 1e18 — quoted to prevent YAML precision loss
+  name: "Orochi Network Token"
+  symbol: "ON"
+  owner: "0xDA5E5Be8f9C5fCdd30f2ee08D6b3F794511C2B48"
+  mailbox: "0x2971b9Aec44bE4eb673DF1B88cDB57b96eefe8a4"
