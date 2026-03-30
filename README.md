@@ -40,5 +40,4 @@ script/DeploySwap.s.sol          # Atomic deploy + seed script
 
 - [GUIDE.md](./GUIDE.md) — Full production deployment guide (Phases 0-8)
 - [CHECKLIST.md](./CHECKLIST.md) — Step-by-step deployment checklist with expected results
-- [PLAN.md](./PLAN.md) — Architecture overview
 - [CLAUDE.md](./CLAUDE.md) — AI assistant context
