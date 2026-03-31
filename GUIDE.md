@@ -704,7 +704,7 @@ services:
       - --relayChains=ethereum,bsc
       - --defaultSigner.type=aws
       - --defaultSigner.id=alias/hyperlane-relayer-on
-      - --gasPaymentEnforcement=[{"type":"none"}]
+      - --gasPaymentEnforcement=[{"type":"igp"}]
     environment:
       - CONFIG_FILES=/config/agent-config.json
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
@@ -742,7 +742,7 @@ docker compose -f docker-compose.relayer.yml down
 
 > **Note on validators**: The validator config (section 8.1) runs for Ethereum origin only. If you configure a custom ISM that requires your own validators for BOTH directions, add a second validator service with `--originChainName=bsc` and `--reorgPeriod=15`.
 
-> **Note on gasPaymentEnforcement**: `"type":"none"` means the relayer delivers all messages regardless of gas payment — you subsidize gas for all users. For production, configure enforcement per the [Hyperlane docs](https://docs.hyperlane.xyz/docs/operate/relayer/run-relayer).
+> **Note on gasPaymentEnforcement**: `"type":"igp"` means the relayer only delivers messages where the user paid sufficient gas via the InterchainGasPaymaster (IGP). Users must include `msg.value` when calling `transferRemote()` — the amount is determined by `quoteGasPayment(destinationDomain)`. Bridge UIs handle this automatically. If you want to subsidize gas during initial testing, temporarily use `[{"type":"none"}]` and switch back to `igp` before go-live.
 
 ### 8.3 Validator Announce
 
@@ -1049,6 +1049,55 @@ docker-compose -f docker-compose.relayer.yml up -d
 docker-compose -f docker-compose.validator.yml up -d
 ```
 
+### 12.5 AWS KMS Key Rotation
+
+AWS KMS keys used by the validator and relayer should be rotated periodically. Because Hyperlane agents derive Ethereum addresses from KMS keys, rotation requires updating on-chain references.
+
+**When to rotate:**
+- Scheduled: every 6-12 months
+- Unscheduled: if a key is suspected compromised
+
+**Procedure:**
+
+```bash
+# 1. Create new KMS keys
+aws kms create-key --key-spec ECC_SECG_P256K1 --key-usage SIGN_VERIFY \
+  --description "Hyperlane Validator v2 - ON Token ETH<>BSC"
+aws kms create-alias --alias-name alias/hyperlane-validator-on-v2 --target-key-id <new-key-id>
+
+# 2. Derive the new Ethereum address from the new key
+aws kms get-public-key --key-id alias/hyperlane-validator-on-v2 --output text --query PublicKey
+
+# 3. Fund the new address on ETH and BSC
+cast send <new-validator-address> --value 0.01ether --rpc-url $ETH_RPC_URL --ledger
+
+# 4. Update docker-compose to use the new alias
+# Change: --validator.id=alias/hyperlane-validator-on-v2
+# Or:     --defaultSigner.id=alias/hyperlane-relayer-on-v2
+
+# 5. Restart agents with new key
+docker compose -f docker-compose.validator.yml up -d
+docker compose -f docker-compose.relayer.yml up -d
+
+# 6. For validators: the new validator must announce its storage location
+# Check logs for "Validator has announced signature storage location"
+
+# 7. If using a custom ISM with your validator address:
+#    Update the ISM config to include the new validator address
+#    via warp apply (requires multisig if ownership was transferred)
+
+# 8. Verify the new validator is signing checkpoints
+docker compose -f docker-compose.validator.yml logs -f | grep "signed checkpoint"
+
+# 9. Disable the old KMS key (do NOT delete until fully transitioned)
+aws kms disable-key --key-id <old-key-id>
+
+# 10. After confirming everything works (wait 24-48h), schedule deletion
+aws kms schedule-key-deletion --key-id <old-key-id> --pending-window-in-days 30
+```
+
+> **Important**: Never delete a KMS key immediately. Always disable first, monitor for 24-48 hours, then schedule deletion with a 30-day waiting period. If the old validator signed checkpoints that haven't been relayed yet, deleting the key could strand in-flight messages.
+
 ---
 
 ## 13. Cost Estimation
@@ -1065,15 +1114,16 @@ docker-compose -f docker-compose.validator.yml up -d
 
 ### Monthly
 
-| Item | Cost |
-|------|------|
-| AWS EC2 (2x t3.medium) | ~$70 |
-| AWS KMS (2 keys) | ~$2 |
-| AWS S3 | ~$1 |
-| RPC providers | $0-200 |
-| Relayer gas (ETH) | $50-500 |
-| Relayer gas (BSC) | $5-50 |
-| **Total** | **~$130-825** |
+| Item | Cost | Notes |
+|------|------|-------|
+| AWS EC2 (2x t3.medium) | ~$70 | Validator + relayer hosts |
+| AWS KMS (2 keys) | ~$2 | Validator + relayer signing keys |
+| AWS S3 | ~$1 | Validator checkpoint storage |
+| RPC providers | $0-200 | Alchemy / QuickNode / Infura |
+| Relayer gas | **$0** | Covered by users via IGP |
+| **Total** | **~$75-275** | |
+
+> Relayer gas is paid by users through the InterchainGasPaymaster (IGP). Users include `msg.value` when calling `transferRemote()`, which reimburses the relayer for destination chain gas. The relayer operator pays nothing for message delivery.
 
 ---
 
