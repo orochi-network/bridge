@@ -23,24 +23,24 @@
 
 > **Critical**: All Hyperlane packages must be from the same release family.
 
-| Component | Pinned Version | Notes |
-|-----------|---------------|-------|
-| **CLI** (`@hyperlane-xyz/cli`) | **v29.1.0** | Only dependency in `package.json` |
-| **Core Contracts** (`@hyperlane-xyz/core`) | **v11.1.0** | Deployed via CLI (includes HypERC20) |
-| **Agent Docker Image** | **`gcr.io/abacus-labs-dev/hyperlane-agent:agents-v1.7.0`** | Pinned for validator & relayer |
-| **Node.js** | **v18+** | Required by CLI |
-| **Foundry** | **Latest stable** | For ONSwap contract + verification |
-| **Solidity** | **v0.8.28** | For ONSwap contract |
-| **OpenZeppelin** | **v5.1.0** | SafeERC20 in ONSwap |
+| Component                                  | Pinned Version                                             | Notes                                |
+| ------------------------------------------ | ---------------------------------------------------------- | ------------------------------------ |
+| **CLI** (`@hyperlane-xyz/cli`)             | **v29.1.0**                                                | Only dependency in `package.json`    |
+| **Core Contracts** (`@hyperlane-xyz/core`) | **v11.1.0**                                                | Deployed via CLI (includes HypERC20) |
+| **Agent Docker Image**                     | **`gcr.io/abacus-labs-dev/hyperlane-agent:agents-v1.7.0`** | Pinned for validator & relayer       |
+| **Node.js**                                | **v18+**                                                   | Required by CLI                      |
+| **Foundry**                                | **Latest stable**                                          | For ONSwap contract + verification   |
+| **Solidity**                               | **v0.8.28**                                                | For ONSwap contract                  |
+| **OpenZeppelin**                           | **v5.1.0**                                                 | SafeERC20 in ONSwap                  |
 
 ### Mainnet Contract Addresses (from Hyperlane Registry)
 
 Pre-deployed Hyperlane v3 core contracts. The CLI detects these automatically.
 
-| Contract | Ethereum | BSC |
-|----------|----------|-----|
-| **Mailbox** | `0xc005dc82818d67AF737725bD4bf75435d065D239` | `0x2971b9Aec44bE4eb673DF1B88cDB57b96eefe8a4` |
-| **Domain ID** | `1` | `56` |
+| Contract      | Ethereum                                     | BSC                                          |
+| ------------- | -------------------------------------------- | -------------------------------------------- |
+| **Mailbox**   | `0xc005dc82818d67AF737725bD4bf75435d065D239` | `0x2971b9Aec44bE4eb673DF1B88cDB57b96eefe8a4` |
+| **Domain ID** | `1`                                          | `56`                                         |
 
 ---
 
@@ -79,15 +79,15 @@ Ethereum                              BSC
 
 ### Key Components
 
-| Component | Role | Deployed By |
-|-----------|------|-------------|
-| **HypERC20Collateral** | Locks ON on Ethereum when bridging to BSC | Hyperlane CLI |
-| **HypERC20 (Synthetic)** | Mints/burns ON on BSC; 100M pre-minted | Hyperlane CLI |
-| **ONSwap** | 1:1 swap: old BSC ON → new synthetic ON | Foundry |
-| **Mailbox** | Cross-chain message dispatch/processing | Pre-deployed by Hyperlane |
-| **ISM** | Verifies message authenticity | Configured via CLI |
-| **Validator** | Signs merkle root checkpoints | Docker agent |
-| **Relayer** | Delivers messages between chains | Docker agent |
+| Component                | Role                                      | Deployed By               |
+| ------------------------ | ----------------------------------------- | ------------------------- |
+| **HypERC20Collateral**   | Locks ON on Ethereum when bridging to BSC | Hyperlane CLI             |
+| **HypERC20 (Synthetic)** | Mints/burns ON on BSC; 100M pre-minted    | Hyperlane CLI             |
+| **ONSwap**               | 1:1 swap: old BSC ON → new synthetic ON   | Foundry                   |
+| **Mailbox**              | Cross-chain message dispatch/processing   | Pre-deployed by Hyperlane |
+| **ISM**                  | Verifies message authenticity             | Configured via CLI        |
+| **Validator**            | Signs merkle root checkpoints             | Docker agent              |
+| **Relayer**              | Delivers messages between chains          | Docker agent              |
 
 ### Why We Only Need One Custom Contract
 
@@ -118,23 +118,23 @@ This ensures pre-minted tokens are consumed by the swap before any ETH collatera
 
 ### Key Roles & Addresses
 
-| Role | Purpose | Key Type |
-|------|---------|----------|
-| **Deployer** | Deploys warp route + swap contract | Hex key (used once) |
-| **Owner** | Governs warp route config | Gnosis Safe multisig |
-| **Validator** | Signs checkpoints | AWS KMS |
-| **Relayer** | Submits cross-chain transactions | AWS KMS |
+| Role          | Purpose                            | Key Type             |
+| ------------- | ---------------------------------- | -------------------- |
+| **Deployer**  | Deploys warp route + swap contract | Hex key (used once)  |
+| **Owner**     | Governs warp route config          | Gnosis Safe multisig |
+| **Validator** | Signs checkpoints                  | AWS KMS              |
+| **Relayer**   | Submits cross-chain transactions   | AWS KMS              |
 
 > **Never reuse the same key across roles in production.**
 
 ### Funding Requirements
 
-| Chain | Role | Amount |
-|-------|------|--------|
-| Ethereum | Deployer | ~0.3-0.5 ETH |
-| Ethereum | Relayer | ~0.1 ETH (ongoing) |
-| BSC | Deployer | ~0.05 BNB |
-| BSC | Relayer | ~0.1 BNB (ongoing) |
+| Chain    | Role     | Amount             |
+| -------- | -------- | ------------------ |
+| Ethereum | Deployer | ~0.3-0.5 ETH       |
+| Ethereum | Relayer  | ~0.1 ETH (ongoing) |
+| BSC      | Deployer | ~0.05 BNB          |
+| BSC      | Relayer  | ~0.1 BNB (ongoing) |
 
 ### Software Requirements
 
@@ -158,7 +158,7 @@ docker --version
 
 ```bash
 git clone <this-repo>
-cd bridge2
+cd bridge
 npm install        # installs @hyperlane-xyz/cli@29.1.0
 forge install      # installs OpenZeppelin + forge-std
 forge test -vv     # verify tests pass
@@ -201,6 +201,7 @@ cast call $OLD_ON_TOKEN_BSC "owner()(address)" --rpc-url $BSC_RPC_URL 2>/dev/nul
 ### 3.2 Inventory Old BSC ON Supply
 
 Document where the 100M old BSC ON currently lives:
+
 - [ ] Wallets (top holders on BscScan)
 - [ ] DEX liquidity pools (PancakeSwap old-ON/BNB, etc.)
 - [ ] CEX listings (which exchanges, contact info)
@@ -337,7 +338,7 @@ ethereum:
 
 bsc:
   type: synthetic
-  initialSupply: "100000000000000000000000000"  # 100M * 1e18, quoted to prevent precision loss
+  initialSupply: "100000000000000000000000000" # 100M * 1e18, quoted to prevent precision loss
   name: "Orochi Network Token"
   symbol: "ON"
   owner: "0xDA5E5Be8f9C5fCdd30f2ee08D6b3F794511C2B48"
@@ -362,6 +363,7 @@ npm run warp:init
 ```
 
 Follow the interactive prompts:
+
 - Select network type: Mainnet
 - Select chains: ethereum, bsc
 - Token type for ethereum: collateral
@@ -382,7 +384,7 @@ The CLI may not prompt for `initialSupply`. Edit `configs/warp-route-deploy.yaml
 ```yaml
 bsc:
   type: synthetic
-  initialSupply: "100000000000000000000000000"  # 100M * 1e18, quoted to prevent precision loss
+  initialSupply: "100000000000000000000000000" # 100M * 1e18, quoted to prevent precision loss
   # ... rest of config
 ```
 
@@ -398,6 +400,7 @@ npm run warp:deploy
 ```
 
 Record deployed addresses:
+
 ```
 ✅ Collateral deployed on ethereum: 0x...
 ✅ Synthetic deployed on bsc: 0x...
@@ -514,6 +517,7 @@ forge script script/DeploySwap.s.sol \
 ```
 
 The script will:
+
 1. Verify deployer holds sufficient synthetic ON (reverts with helpful message if not)
 2. Deploy ONSwap with constructor validation (zero-address, same-token checks)
 3. Transfer synthetic ON to ONSwap via SafeERC20 in the same broadcast
@@ -605,11 +609,11 @@ npm run warp:read
 
 ### 7.2 ISM Options
 
-| Level | ISM Type | Trade-off |
-|-------|----------|-----------|
-| **Basic** | `defaultFallbackRoutingIsm` | Hyperlane's default validators; lowest overhead |
-| **Standard** | `staticMultisigIsm` (3-of-5) | Your own validators; medium overhead |
-| **High** | `staticAggregationIsm` | Requires BOTH Hyperlane + your validators |
+| Level        | ISM Type                     | Trade-off                                       |
+| ------------ | ---------------------------- | ----------------------------------------------- |
+| **Basic**    | `defaultFallbackRoutingIsm`  | Hyperlane's default validators; lowest overhead |
+| **Standard** | `staticMultisigIsm` (3-of-5) | Your own validators; medium overhead            |
+| **High**     | `staticAggregationIsm`       | Requires BOTH Hyperlane + your validators       |
 
 To add ISM to your warp config:
 
@@ -788,9 +792,7 @@ Save this as `config/agent-config.json` (create the `config/` directory first):
       "chainId": 1,
       "domainId": 1,
       "protocol": "ethereum",
-      "rpcUrls": [
-        { "http": "https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY" }
-      ],
+      "rpcUrls": [{ "http": "https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY" }],
       "mailbox": "0xc005dc82818d67AF737725bD4bf75435d065D239"
     },
     "bsc": {
@@ -798,9 +800,7 @@ Save this as `config/agent-config.json` (create the `config/` directory first):
       "chainId": 56,
       "domainId": 56,
       "protocol": "ethereum",
-      "rpcUrls": [
-        { "http": "https://bsc-mainnet.nodereal.io/v1/YOUR_KEY" }
-      ],
+      "rpcUrls": [{ "http": "https://bsc-mainnet.nodereal.io/v1/YOUR_KEY" }],
       "mailbox": "0x2971b9Aec44bE4eb673DF1B88cDB57b96eefe8a4"
     }
   }
@@ -813,13 +813,13 @@ Save this as `config/agent-config.json` (create the `config/` directory first):
 
 ### 9.1 Key Metrics
 
-| Metric | Alert Threshold | Action |
-|--------|----------------|--------|
-| `hyperlane_messages_pending` | > 50 for 10 min | Check relayer |
-| `hyperlane_latest_checkpoint` age | > 5 min stale | Check validator |
-| Relayer ETH balance | < 0.05 ETH | Refund |
-| Relayer BNB balance | < 0.05 BNB | Refund |
-| Collateral TVL | Unexpected > 20% drop | Security incident |
+| Metric                            | Alert Threshold       | Action            |
+| --------------------------------- | --------------------- | ----------------- |
+| `hyperlane_messages_pending`      | > 50 for 10 min       | Check relayer     |
+| `hyperlane_latest_checkpoint` age | > 5 min stale         | Check validator   |
+| Relayer ETH balance               | < 0.05 ETH            | Refund            |
+| Relayer BNB balance               | < 0.05 BNB            | Refund            |
+| Collateral TVL                    | Unexpected > 20% drop | Security incident |
 
 ### 9.2 Monitoring Commands
 
@@ -848,12 +848,12 @@ cast call $NEW_ON_TOKEN_BSC "totalSupply()(uint256)" --rpc-url $BSC_RPC_URL
 ```yaml
 # prometheus.yml
 scrape_configs:
-  - job_name: 'hyperlane-relayer'
+  - job_name: "hyperlane-relayer"
     static_configs:
-      - targets: ['relayer:9090']
-  - job_name: 'hyperlane-validator'
+      - targets: ["relayer:9090"]
+  - job_name: "hyperlane-validator"
     static_configs:
-      - targets: ['validator:9090']
+      - targets: ["validator:9090"]
 ```
 
 ---
@@ -869,30 +869,30 @@ scrape_configs:
 ### 10.2 Custom Bridge UI (SDK)
 
 ```typescript
-import { WarpCore } from '@hyperlane-xyz/sdk';
+import { WarpCore } from "@hyperlane-xyz/sdk";
 
 const warpRouteConfig = {
   tokens: [
     {
-      chainName: 'ethereum',
-      standard: 'EvmHypCollateral',
+      chainName: "ethereum",
+      standard: "EvmHypCollateral",
       decimals: 18,
-      symbol: 'ON',
-      name: 'Orochi Network Token',
-      addressOrDenom: '0xCollateralAddress',
-      collateralAddressOrDenom: '0xONTokenAddress',
-      connections: [{ token: 'ethereum|bsc|0xSyntheticAddress' }]
+      symbol: "ON",
+      name: "Orochi Network Token",
+      addressOrDenom: "0xCollateralAddress",
+      collateralAddressOrDenom: "0xONTokenAddress",
+      connections: [{ token: "ethereum|bsc|0xSyntheticAddress" }],
     },
     {
-      chainName: 'bsc',
-      standard: 'EvmHypSynthetic',
+      chainName: "bsc",
+      standard: "EvmHypSynthetic",
       decimals: 18,
-      symbol: 'ON',
-      name: 'Orochi Network Token',
-      addressOrDenom: '0xSyntheticAddress',
-      connections: [{ token: 'ethereum|ethereum|0xCollateralAddress' }]
-    }
-  ]
+      symbol: "ON",
+      name: "Orochi Network Token",
+      addressOrDenom: "0xSyntheticAddress",
+      connections: [{ token: "ethereum|ethereum|0xCollateralAddress" }],
+    },
+  ],
 };
 ```
 
@@ -919,16 +919,16 @@ tokens:
     decimals: 18
     symbol: ON
     name: "Orochi Network Token"
-    addressOrDenom: "<COLLATERAL_CONTRACT>"          # from .env after warp deploy
+    addressOrDenom: "<COLLATERAL_CONTRACT>" # from .env after warp deploy
     collateralAddressOrDenom: "0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d"
     connections:
-      - token: "ethereum|bsc|<NEW_ON_TOKEN_BSC>"     # synthetic address on BSC
+      - token: "ethereum|bsc|<NEW_ON_TOKEN_BSC>" # synthetic address on BSC
   - chainName: bsc
     standard: EvmHypSynthetic
     decimals: 18
     symbol: ON
     name: "Orochi Network Token"
-    addressOrDenom: "<NEW_ON_TOKEN_BSC>"              # synthetic address on BSC
+    addressOrDenom: "<NEW_ON_TOKEN_BSC>" # synthetic address on BSC
     connections:
       - token: "ethereum|ethereum|<COLLATERAL_CONTRACT>"
 ```
@@ -984,6 +984,7 @@ cast call $SWAP_CONTRACT "totalSwapped()(uint256)" --rpc-url $BSC_RPC_URL
 ### 11.2 Completion Criteria
 
 The migration has no deadline — ONSwap runs forever by design. This means:
+
 - No user gets locked out, reducing support burden
 - Old ON holders can swap at any time
 - The owner can effectively end swaps by calling `recover(NEW_TOKEN, owner, remaining)` to drain the pool
@@ -1054,6 +1055,7 @@ docker-compose -f docker-compose.validator.yml up -d
 AWS KMS keys used by the validator and relayer should be rotated periodically. Because Hyperlane agents derive Ethereum addresses from KMS keys, rotation requires updating on-chain references.
 
 **When to rotate:**
+
 - Scheduled: every 6-12 months
 - Unscheduled: if a key is suspected compromised
 
@@ -1104,24 +1106,24 @@ aws kms schedule-key-deletion --key-id <old-key-id> --pending-window-in-days 30
 
 ### One-Time
 
-| Item | Cost |
-|------|------|
-| Warp route deployment (Ethereum) | ~$50-150 |
-| Warp route deployment (BSC) | ~$1-5 |
-| ONSwap deployment (BSC) | ~$1-2 |
-| Gnosis Safe setup (2 chains) | ~$20-50 |
-| **Total** | **~$75-210** |
+| Item                             | Cost         |
+| -------------------------------- | ------------ |
+| Warp route deployment (Ethereum) | ~$50-150     |
+| Warp route deployment (BSC)      | ~$1-5        |
+| ONSwap deployment (BSC)          | ~$1-2        |
+| Gnosis Safe setup (2 chains)     | ~$20-50      |
+| **Total**                        | **~$75-210** |
 
 ### Monthly
 
-| Item | Cost | Notes |
-|------|------|-------|
-| AWS EC2 (2x t3.medium) | ~$70 | Validator + relayer hosts |
-| AWS KMS (2 keys) | ~$2 | Validator + relayer signing keys |
-| AWS S3 | ~$1 | Validator checkpoint storage |
-| RPC providers | $0-200 | Alchemy / QuickNode / Infura |
-| Relayer gas | **$0** | Covered by users via IGP |
-| **Total** | **~$75-275** | |
+| Item                   | Cost         | Notes                            |
+| ---------------------- | ------------ | -------------------------------- |
+| AWS EC2 (2x t3.medium) | ~$70         | Validator + relayer hosts        |
+| AWS KMS (2 keys)       | ~$2          | Validator + relayer signing keys |
+| AWS S3                 | ~$1          | Validator checkpoint storage     |
+| RPC providers          | $0-200       | Alchemy / QuickNode / Infura     |
+| Relayer gas            | **$0**       | Covered by users via IGP         |
+| **Total**              | **~$75-275** |                                  |
 
 > Relayer gas is paid by users through the InterchainGasPaymaster (IGP). Users include `msg.value` when calling `transferRemote()`, which reimburses the relayer for destination chain gas. The relayer operator pays nothing for message delivery.
 
@@ -1179,36 +1181,36 @@ aws kms schedule-key-deletion --key-id <old-key-id> --pending-window-in-days 30
 
 ### npm scripts
 
-| Script | Runs | Purpose |
-|--------|------|---------|
-| `npm run warp:init` | `hyperlane warp init --out ./configs/warp-route-deploy.yaml` | Generate warp route config |
-| `npm run warp:init:advanced` | `hyperlane warp init --advanced --out ...` | Generate config with ISM options |
-| `npm run warp:deploy` | `hyperlane warp deploy` | Deploy warp route contracts |
-| `npm run warp:check` | `hyperlane warp check` | Verify config matches on-chain |
-| `npm run warp:verify` | `hyperlane warp verify` | Verify source on explorers |
-| `npm run warp:send:test` | `hyperlane warp send --relay --amount 1` | Test transfer (1 wei) |
-| `npm run warp:read` | `hyperlane warp read` | Read on-chain state |
-| `npm run warp:read:save` | `hyperlane warp read --out ./configs/warp-route-current.yaml` | Save state to file |
-| `npm run warp:apply` | `hyperlane warp apply` | Apply config changes (ISM, ownership) |
-| `npm run warp:fees` | `hyperlane warp get-fees` | Show bridge fees |
-| `npm run forge:build` | `forge build` | Build Solidity |
-| `npm run forge:test` | `forge test -vv` | Run ONSwap tests |
+| Script                       | Runs                                                          | Purpose                               |
+| ---------------------------- | ------------------------------------------------------------- | ------------------------------------- |
+| `npm run warp:init`          | `hyperlane warp init --out ./configs/warp-route-deploy.yaml`  | Generate warp route config            |
+| `npm run warp:init:advanced` | `hyperlane warp init --advanced --out ...`                    | Generate config with ISM options      |
+| `npm run warp:deploy`        | `hyperlane warp deploy`                                       | Deploy warp route contracts           |
+| `npm run warp:check`         | `hyperlane warp check`                                        | Verify config matches on-chain        |
+| `npm run warp:verify`        | `hyperlane warp verify`                                       | Verify source on explorers            |
+| `npm run warp:send:test`     | `hyperlane warp send --relay --amount 1`                      | Test transfer (1 wei)                 |
+| `npm run warp:read`          | `hyperlane warp read`                                         | Read on-chain state                   |
+| `npm run warp:read:save`     | `hyperlane warp read --out ./configs/warp-route-current.yaml` | Save state to file                    |
+| `npm run warp:apply`         | `hyperlane warp apply`                                        | Apply config changes (ISM, ownership) |
+| `npm run warp:fees`          | `hyperlane warp get-fees`                                     | Show bridge fees                      |
+| `npm run forge:build`        | `forge build`                                                 | Build Solidity                        |
+| `npm run forge:test`         | `forge test -vv`                                              | Run ONSwap tests                      |
 
 ### Common CLI flags (v29.1.0)
 
-| Flag | Purpose |
-|------|---------|
-| `-k, --key, --private-key` | Private key or seed phrase |
-| `-w, --warp-route-id, --id` | Select warp route (skip interactive prompt) |
-| `-y, --yes` | Skip confirmation prompts |
-| `-r, --registry` | Custom registry path(s) |
-| `-o, --out` | Output file path (for `init`, `read`) |
-| `--relay` | Self-relay messages (for `send`, `apply`) |
-| `--advanced` | Advanced ISM config (for `init`) |
-| `--origin, --destination` | Chain selection (for `send`, `check`) |
-| `--amount` | Transfer amount in smallest unit (for `send`, `get-fees`) |
-| `--round-trip` | Test all chain pairs (for `send`) |
-| `--quick` | Skip delivery wait (for `send`) |
+| Flag                        | Purpose                                                   |
+| --------------------------- | --------------------------------------------------------- |
+| `-k, --key, --private-key`  | Private key or seed phrase                                |
+| `-w, --warp-route-id, --id` | Select warp route (skip interactive prompt)               |
+| `-y, --yes`                 | Skip confirmation prompts                                 |
+| `-r, --registry`            | Custom registry path(s)                                   |
+| `-o, --out`                 | Output file path (for `init`, `read`)                     |
+| `--relay`                   | Self-relay messages (for `send`, `apply`)                 |
+| `--advanced`                | Advanced ISM config (for `init`)                          |
+| `--origin, --destination`   | Chain selection (for `send`, `check`)                     |
+| `--amount`                  | Transfer amount in smallest unit (for `send`, `get-fees`) |
+| `--round-trip`              | Test all chain pairs (for `send`)                         |
+| `--quick`                   | Skip delivery wait (for `send`)                           |
 
 ---
 
