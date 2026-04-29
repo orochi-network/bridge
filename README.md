@@ -50,9 +50,13 @@ OWNER_ETH=0x<multisig that should own WrappedON (wON)>
 
 > Use `MNEMONIC=` instead of `PRIVATE_KEY` if you prefer; either works.
 
-## Step 3 — Sanity-check the BSC ON token
+## Step 3 — Sanity-check both ON tokens
 
-The `ONOFTAdapter` model assumes the inner token is **lossless** and **18 decimals**. Confirm before deploying:
+The bridge has two preconditions enforced or assumed at deploy time. **Both must hold** or the bridge will misbehave or fail to deploy.
+
+### 3a. BSC ON (locked by `ONOFTAdapter`)
+
+The `ONOFTAdapter` model assumes the inner token is **lossless** and **18 decimals**. Lossless is _not_ enforced on-chain — confirm by hand:
 
 ```sh
 # Decimals must be 18
@@ -65,6 +69,22 @@ cast call 0x0e4F6209eD984b21EDEA43acE6e09559eD051D48 "decimals()(uint8)" \
 ```
 
 If `decimals` ≠ 18 or the token has a transfer tax, **do not deploy**. Open an issue and re-evaluate.
+
+### 3b. ETH ON (held as the unwrap reserve by `WrappedON`)
+
+`WrappedON`'s constructor reverts with `DecimalsMismatch(actual)` if the reserve token does not return 18 — that's enforced. Fee-on-transfer behaviour is **not** caught at construction, but `wrap` / `seedReserve` revert with `UnexpectedTransferAmount` at call time if the actual transferred amount differs from the requested amount.
+
+```sh
+# Decimals must be 18 (enforced)
+cast call 0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d "decimals()(uint8)" \
+  --rpc-url $RPC_URL_ETH
+
+# Same fee/rebase sanity check as 3a — the auto-unwrap path will revert
+# inside _credit if a transfer charges fees, leaving the LZ message
+# undeliverable until the reserve is empty (fallback to mint).
+```
+
+If either chain's ON has unexpected behaviour, do not deploy.
 
 ## Step 4 — Compile
 
@@ -310,3 +330,9 @@ Reverse direction (ETH → BSC) is identical against `wON` — no `approve` need
 | wON balance on ETH doesn't match expected amount | Decimal mismatch — almost certainly impossible since both are 18, but if a future ON deploys with different decimals it WILL silently lose dust | Check `decimalConversionRate()` on both contracts |
 
 For deep debugging see [LayerZero V2 docs — Debugging](https://docs.layerzero.network/v2/developers/evm/troubleshooting/debugging-messages).
+
+---
+
+## License
+
+Apache-2.0. See [`LICENSE`](./LICENSE).

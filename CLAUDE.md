@@ -78,11 +78,26 @@ Scaffolded by copying `examples/oft-adapter` from [`LayerZero-Labs/devtools`](ht
 | Tool | Version | Notes |
 |------|---------|-------|
 | Node | ≥18.16 | See `.nvmrc` |
-| Hardhat | 2.22.x | Required for `lz:oapp:wire` (applies DVN/executor/enforced-options config) |
+| Hardhat | 2.28.6 | Required for `lz:oapp:wire` (applies DVN/executor/enforced-options config) |
 | Foundry | latest stable | For unit/integration tests via `forge test` |
-| Solidity | 0.8.22 | Pinned, matches LZ template |
+| Solidity | `0.8.22` (exact) | Production contracts use `pragma solidity 0.8.22;` (no caret); pinned in both `foundry.toml` and `hardhat.config.ts` |
 
 Both Hardhat and Foundry are kept. Hardhat does deploy + wire; Foundry does fast tests.
+
+### Cross-toolchain bytecode determinism
+
+Hardhat and Foundry must produce **identical bytecode** for Etherscan / BSCScan source verification to succeed against either toolchain. The following are pinned in both `foundry.toml` and `hardhat.config.ts`:
+
+- `solc` / `solidity.version` = `0.8.22`
+- `evm_version` / `evmVersion` = `'shanghai'` (highest target solc 0.8.22 supports; both Ethereum and BSC mainnet support shanghai opcodes including PUSH0)
+- `bytecode_hash` / `metadata.bytecodeHash` = `'ipfs'`
+- `optimizer_runs` / `optimizer.runs` = `20_000`
+
+Don't edit one without the other.
+
+## License
+
+Apache-2.0. See `LICENSE` at the repo root and the `SPDX-License-Identifier` headers on every `.sol` file.
 
 ## Repository layout
 
@@ -106,6 +121,7 @@ bridge/
 ├── layerzero.config.ts      ← BSC↔ETH pathway, 2 DVNs, confirmations, enforced options
 ├── package.json
 ├── .env.example             ← commented placeholders for RPC / keys / multisigs
+├── LICENSE                  ← Apache-2.0
 └── CLAUDE.md                ← this file
 ```
 
