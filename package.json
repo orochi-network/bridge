@@ -2,7 +2,7 @@
   "name": "@layerzerolabs/oft-adapter-example",
   "version": "0.5.6",
   "private": true,
-  "license": "MIT",
+  "license": "Apache-2.0",
   "scripts": {
     "clean": "rm -rf artifacts cache out",
     "compile": "concurrently -c auto --names forge,hardhat '$npm_execpath run compile:forge' '$npm_execpath run compile:hardhat'",
