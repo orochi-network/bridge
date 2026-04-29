@@ -5,7 +5,7 @@ LayerZero V2 OFT bridge for the **ON** token.
 | Chain | Contract | Token | Role |
 |-------|----------|-------|------|
 | **BSC** mainnet | `ONOFTAdapter` | wraps existing [`ON`](https://bscscan.com/address/0x0e4F6209eD984b21EDEA43acE6e09559eD051D48) at `0x0e4F...1D48` | Locks ON on outbound; releases on inbound. |
-| **Ethereum** mainnet | `WrappedON` | mints/burns `wON` ("Wrapped ON") | Mints wON on inbound; burns on outbound. |
+| **Ethereum** mainnet | `WrappedON` | mints/burns `wON` ("Wrapped ON"); holds `ON` reserve | Auto-unwraps to real ON when reserve covers, else mints wON. Manual `wrap` / `unwrap` / `seedReserve`. |
 
 Architecture rationale and the rejected alternatives are documented in [CLAUDE.md](./CLAUDE.md).
 
@@ -106,11 +106,12 @@ new WrappedON(
     "Wrapped ON",                                         // name
     "wON",                                                // symbol
     0x1a44076050125825900e736c501f859c50fE728c,           // LayerZero EndpointV2
-    deployer                                              // initial owner + delegate
+    deployer,                                             // initial owner + delegate
+    0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d            // pre-existing ETH ON used as the unwrap reserve
 )
 ```
 
-Address is written to `deployments/ethereum/WrappedON.json`.
+Address is written to `deployments/ethereum/WrappedON.json`. The constructor reverts with `DecimalsMismatch(actual)` if the reserve token does not report 18 decimals — verify before retrying.
 
 ## Step 7 — Verify source code on the explorers
 
@@ -125,7 +126,8 @@ npx hardhat verify --network bsc <ADAPTER_ADDR> \
 npx hardhat verify --network ethereum <WON_ADDR> \
   "Wrapped ON" "wON" \
   "0x1a44076050125825900e736c501f859c50fE728c" \
-  "<DEPLOYER_ADDR>"
+  "<DEPLOYER_ADDR>" \
+  "0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d"
 ```
 
 > API keys are read from `.env` via the `etherscan` block in `hardhat.config.ts`. Hardhat-verify routes by chainId, so the `mainnet` key is used for Ethereum and the `bsc` key for BSC.
@@ -238,6 +240,34 @@ cast call <WON_ADDR>     "owner()(address)" --rpc-url $RPC_URL_ETH   # → $OWNE
 🎉 The bridge is live.
 
 ---
+
+## Reserve operations (operator)
+
+`WrappedON` exposes three reserve-management entrypoints. Anyone can call them; the owner does **not** have a privileged path to drain the reserve.
+
+| Function | What it does | Who calls |
+|----------|--------------|-----------|
+| `seedReserve(amount)` | Pulls `amount` real ON from caller into the reserve. **Does not** mint wON. | Treasury — to refill the reserve so stranded wON-holders can `unwrap`. Caller must `approve(WrappedON, amount)` on the ETH ON token first. |
+| `wrap(amount)` | Pulls `amount` real ON from caller, mints `amount` wON to caller. 1:1. | Legacy ETH ON holders bridging out, or the operator rebalancing. Caller must `approve` first. |
+| `unwrap(amount)` | Burns `amount` wON from caller, transfers `amount` real ON to caller. 1:1. Reverts with `ReserveInsufficient` if reserve is dry. | Any wON holder once the reserve has been refilled. |
+
+```sh
+# Seed the reserve with 100,000 ON from a treasury wallet
+cast send 0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d \
+  "approve(address,uint256)" <WON_ADDR> 100000000000000000000000 \
+  --private-key $TREASURY_KEY --rpc-url $RPC_URL_ETH
+cast send <WON_ADDR> "seedReserve(uint256)" 100000000000000000000000 \
+  --private-key $TREASURY_KEY --rpc-url $RPC_URL_ETH
+
+# Read current reserve
+cast call <WON_ADDR> "reserve()(uint256)" --rpc-url $RPC_URL_ETH
+
+# User-initiated unwrap (must hold wON)
+cast send <WON_ADDR> "unwrap(uint256)" <amount_wei> \
+  --private-key $USER_KEY --rpc-url $RPC_URL_ETH
+```
+
+**Operator obligations:** sustained net BSC→ETH flow drains the reserve. Off-chain monitoring should alert when `reserve()` falls below an agreed threshold. Refill paths: bridge wON ETH→BSC to unlock real ON on BSC and acquire fresh ETH ON off-chain, or commit treasury ON directly via `seedReserve`. There is no autonomous on-chain refill.
 
 ## End-user send flow (for integrators)
 
