@@ -38,7 +38,7 @@ if (accounts == null) {
     )
 }
 
-// Address of the canonical ON token on BSC mainnet (locked by MyOFTAdapter).
+// Address of the canonical ON token on BSC mainnet (locked by ONOFTAdapter).
 // https://bscscan.com/address/0x0e4F6209eD984b21EDEA43acE6e09559eD051D48
 const ON_TOKEN_BSC = '0x0e4F6209eD984b21EDEA43acE6e09559eD051D48'
 
@@ -66,7 +66,7 @@ const config: HardhatUserConfig = {
         ],
     },
     networks: {
-        // BSC mainnet — deploys MyOFTAdapter on top of the existing ON token.
+        // BSC mainnet — deploys ONOFTAdapter on top of the existing ON token.
         bsc: {
             eid: EndpointId.BSC_V2_MAINNET,
             url: process.env.RPC_URL_BSC || 'https://bsc-dataseed.bnbchain.org',
@@ -75,7 +75,7 @@ const config: HardhatUserConfig = {
                 tokenAddress: ON_TOKEN_BSC,
             },
         },
-        // Ethereum mainnet — deploys MyOFT (wON), the bridged representation.
+        // Ethereum mainnet — deploys WrappedON (wON), the bridged representation.
         ethereum: {
             eid: EndpointId.ETHEREUM_V2_MAINNET,
             // Dummy public RPC; replace with Alchemy/Infura/your own provider for production.
