@@ -5,13 +5,13 @@ import { deployments, ethers } from 'hardhat'
 
 import { Options } from '@layerzerolabs/lz-v2-utilities'
 
-describe('MyOFTAdapter Test', function () {
+describe('ONOFTAdapter Test', function () {
     // Constant representing a mock Endpoint ID for testing purposes
     const eidA = 1
     const eidB = 2
     // Declaration of variables to be used in the test suite
-    let MyOFTAdapter: ContractFactory
-    let MyOFT: ContractFactory
+    let ONOFTAdapter: ContractFactory
+    let WrappedON: ContractFactory
     let ERC20Mock: ContractFactory
     let EndpointV2Mock: ContractFactory
     let ownerA: SignerWithAddress
@@ -28,9 +28,9 @@ describe('MyOFTAdapter Test', function () {
         // Contract factory for our tested contract
         //
         // We are using a derived contract that exposes a mint() function for testing purposes
-        MyOFTAdapter = await ethers.getContractFactory('MyOFTAdapterMock')
+        ONOFTAdapter = await ethers.getContractFactory('ONOFTAdapterMock')
 
-        MyOFT = await ethers.getContractFactory('MyOFTMock')
+        WrappedON = await ethers.getContractFactory('WrappedONMock')
 
         ERC20Mock = await ethers.getContractFactory('MyERC20Mock')
 
@@ -58,15 +58,15 @@ describe('MyOFTAdapter Test', function () {
 
         token = await ERC20Mock.deploy('Token', 'TOKEN')
 
-        // Deploying two instances of MyOFT contract with different identifiers and linking them to the mock LZEndpoint
-        myOFTAdapter = await MyOFTAdapter.deploy(token.address, mockEndpointV2A.address, ownerA.address)
-        myOFTB = await MyOFT.deploy('bOFT', 'bOFT', mockEndpointV2B.address, ownerB.address)
+        // Deploying two instances of WrappedON contract with different identifiers and linking them to the mock LZEndpoint
+        myOFTAdapter = await ONOFTAdapter.deploy(token.address, mockEndpointV2A.address, ownerA.address)
+        myOFTB = await WrappedON.deploy('bOFT', 'bOFT', mockEndpointV2B.address, ownerB.address)
 
-        // Setting destination endpoints in the LZEndpoint mock for each MyOFT instance
+        // Setting destination endpoints in the LZEndpoint mock for each WrappedON instance
         await mockEndpointV2A.setDestLzEndpoint(myOFTB.address, mockEndpointV2B.address)
         await mockEndpointV2B.setDestLzEndpoint(myOFTAdapter.address, mockEndpointV2A.address)
 
-        // Setting each MyOFT instance as a peer of the other in the mock LZEndpoint
+        // Setting each WrappedON instance as a peer of the other in the mock LZEndpoint
         await myOFTAdapter.connect(ownerA).setPeer(eidB, ethers.utils.zeroPad(myOFTB.address, 32))
         await myOFTB.connect(ownerB).setPeer(eidA, ethers.utils.zeroPad(myOFTAdapter.address, 32))
     })

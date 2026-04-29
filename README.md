@@ -4,8 +4,8 @@ LayerZero V2 OFT bridge for the **ON** token.
 
 | Chain | Contract | Token | Role |
 |-------|----------|-------|------|
-| **BSC** mainnet | `MyOFTAdapter` | wraps existing [`ON`](https://bscscan.com/address/0x0e4F6209eD984b21EDEA43acE6e09559eD051D48) at `0x0e4F...1D48` | Locks ON on outbound; releases on inbound. |
-| **Ethereum** mainnet | `MyOFT` | mints/burns `wON` ("Wrapped ON") | Mints wON on inbound; burns on outbound. |
+| **BSC** mainnet | `ONOFTAdapter` | wraps existing [`ON`](https://bscscan.com/address/0x0e4F6209eD984b21EDEA43acE6e09559eD051D48) at `0x0e4F...1D48` | Locks ON on outbound; releases on inbound. |
+| **Ethereum** mainnet | `WrappedON` | mints/burns `wON` ("Wrapped ON") | Mints wON on inbound; burns on outbound. |
 
 Architecture rationale and the rejected alternatives are documented in [CLAUDE.md](./CLAUDE.md).
 
@@ -44,15 +44,15 @@ RPC_URL_BSC=https://bsc-mainnet.g.alchemy.com/v2/<key>
 RPC_URL_ETH=https://eth-mainnet.g.alchemy.com/v2/<key>
 BSCSCAN_API_KEY=<for source verification>
 ETHERSCAN_API_KEY=<for source verification>
-OWNER_BSC=0x<multisig that should own MyOFTAdapter>
-OWNER_ETH=0x<multisig that should own MyOFT (wON)>
+OWNER_BSC=0x<multisig that should own ONOFTAdapter>
+OWNER_ETH=0x<multisig that should own WrappedON (wON)>
 ```
 
 > Use `MNEMONIC=` instead of `PRIVATE_KEY` if you prefer; either works.
 
 ## Step 3 — Sanity-check the BSC ON token
 
-The `MyOFTAdapter` model assumes the inner token is **lossless** and **18 decimals**. Confirm before deploying:
+The `ONOFTAdapter` model assumes the inner token is **lossless** and **18 decimals**. Confirm before deploying:
 
 ```sh
 # Decimals must be 18
@@ -75,34 +75,34 @@ npm test               # forge test + hardhat test
 
 Both must pass before proceeding.
 
-## Step 5 — Deploy `MyOFTAdapter` on BSC
+## Step 5 — Deploy `ONOFTAdapter` on BSC
 
 ```sh
-npx hardhat lz:deploy --networks bsc --tags MyOFTAdapter
+npx hardhat lz:deploy --networks bsc --tags ONOFTAdapter
 ```
 
 The deploy script reads `oftAdapter.tokenAddress` from `hardhat.config.ts` (already set to `0x0e4F...1D48`) and constructs:
 
 ```solidity
-new MyOFTAdapter(
+new ONOFTAdapter(
     0x0e4F6209eD984b21EDEA43acE6e09559eD051D48,           // ON token on BSC
     0x1a44076050125825900e736c501f859c50fE728c,           // LayerZero EndpointV2
     deployer                                              // initial owner + delegate
 )
 ```
 
-Address is written to `deployments/bsc/MyOFTAdapter.json`. **Save it** for Etherscan verification.
+Address is written to `deployments/bsc/ONOFTAdapter.json`. **Save it** for Etherscan verification.
 
-## Step 6 — Deploy `MyOFT` (wON) on Ethereum
+## Step 6 — Deploy `WrappedON` (wON) on Ethereum
 
 ```sh
-npx hardhat lz:deploy --networks ethereum --tags MyOFT
+npx hardhat lz:deploy --networks ethereum --tags WrappedON
 ```
 
 This deploys the wrapped representation:
 
 ```solidity
-new MyOFT(
+new WrappedON(
     "Wrapped ON",                                         // name
     "wON",                                                // symbol
     0x1a44076050125825900e736c501f859c50fE728c,           // LayerZero EndpointV2
@@ -110,7 +110,7 @@ new MyOFT(
 )
 ```
 
-Address is written to `deployments/ethereum/MyOFT.json`.
+Address is written to `deployments/ethereum/WrappedON.json`.
 
 ## Step 7 — Verify source code on the explorers
 
@@ -215,13 +215,13 @@ If any of these are off, **do not transfer ownership yet** — investigate.
 Final step. After this, the deployer EOA has no admin power.
 
 ```sh
-# BSC — transfer MyOFTAdapter ownership + LayerZero delegate
+# BSC — transfer ONOFTAdapter ownership + LayerZero delegate
 cast send <ADAPTER_ADDR> "transferOwnership(address)" $OWNER_BSC \
   --private-key $PRIVATE_KEY --rpc-url $RPC_URL_BSC
 cast send <ADAPTER_ADDR> "setDelegate(address)" $OWNER_BSC \
   --private-key $PRIVATE_KEY --rpc-url $RPC_URL_BSC
 
-# Ethereum — transfer MyOFT (wON) ownership + LayerZero delegate
+# Ethereum — transfer WrappedON (wON) ownership + LayerZero delegate
 cast send <WON_ADDR> "transferOwnership(address)" $OWNER_ETH \
   --private-key $PRIVATE_KEY --rpc-url $RPC_URL_ETH
 cast send <WON_ADDR> "setDelegate(address)" $OWNER_ETH \
@@ -267,7 +267,7 @@ Reverse direction (ETH → BSC) is identical against `wON` — no `approve` need
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| `lz:deploy` says "oftAdapter not configured, skipping" on Ethereum | Working as intended — ETH only deploys `MyOFT`, BSC only deploys `MyOFTAdapter` | none |
+| `lz:deploy` says "oftAdapter not configured, skipping" on Ethereum | Working as intended — ETH only deploys `WrappedON`, BSC only deploys `ONOFTAdapter` | none |
 | `lz:oapp:wire` shows zero diff after deploy | Already wired — re-running is a no-op | none |
 | Send tx reverts with `LZ_DefaultSendLibUnavailable` or similar | Wire step never ran or failed | Run `lz:oapp:wire` |
 | Send succeeds on source but never delivers on destination | DVN issue, executor underfunded, or insufficient confirmations elapsed | Check [LayerZero Scan](https://layerzeroscan.com/), ensure both DVNs attested. Default confirmations take ≈ 60s (BSC→ETH) and ≈ 3min (ETH→BSC). |

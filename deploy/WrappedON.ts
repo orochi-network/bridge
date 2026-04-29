@@ -2,7 +2,7 @@ import assert from 'assert'
 
 import { type DeployFunction } from 'hardhat-deploy/types'
 
-const contractName = 'MyOFTAdapter'
+const contractName = 'WrappedON'
 
 const deploy: DeployFunction = async (hre) => {
     const { getNamedAccounts, deployments } = hre
@@ -33,20 +33,20 @@ const deploy: DeployFunction = async (hre) => {
     // }
     const endpointV2Deployment = await hre.deployments.get('EndpointV2')
 
-    // The token address must be defined in hardhat.config.ts
-    // If the token address is not defined, the deployment will log a warning and skip the deployment
-    if (hre.network.config.oftAdapter == null) {
-        console.warn(`oftAdapter not configured on network config, skipping OFTWrapper deployment`)
-
+    // If the oftAdapter configuration is defined on a network that is deploying an OFT,
+    // the deployment will log a warning and skip the deployment
+    if (hre.network.config.oftAdapter != null) {
+        console.warn(`oftAdapter configuration found on OFT deployment, skipping OFT deployment`)
         return
     }
 
     const { address } = await deploy(contractName, {
         from: deployer,
         args: [
-            hre.network.config.oftAdapter.tokenAddress, // token address
+            'Wrapped ON', // name
+            'wON', // symbol
             endpointV2Deployment.address, // LayerZero's EndpointV2 address
-            deployer, // owner
+            deployer, // owner — transferred to multisig after wiring (see README)
         ],
         log: true,
         skipIfAlreadyDeployed: false,

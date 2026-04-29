@@ -6,10 +6,10 @@ LayerZero V2 OFT bridge for the **ON** token between **BSC** (canonical / locked
 
 | Chain | Existing ON token | Bridge contract | Role |
 |-------|-------------------|-----------------|------|
-| BSC | [`0x0e4F6209eD984b21EDEA43acE6e09559eD051D48`](https://bscscan.com/address/0x0e4F6209eD984b21EDEA43acE6e09559eD051D48) | `MyOFTAdapter` | Locks/unlocks the existing ON token |
-| ETH | [`0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d`](https://etherscan.io/address/0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d) | `MyOFT` (wON) | Mints/burns the bridged representation |
+| BSC | [`0x0e4F6209eD984b21EDEA43acE6e09559eD051D48`](https://bscscan.com/address/0x0e4F6209eD984b21EDEA43acE6e09559eD051D48) | `ONOFTAdapter` | Locks/unlocks the existing ON token |
+| ETH | [`0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d`](https://etherscan.io/address/0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d) | `WrappedON` (wON) | Mints/burns the bridged representation |
 
-**Solution 3** (per the design doc): BSC holds the canonical supply locked in `MyOFTAdapter`; Ethereum gets a fresh mintable `MyOFT` (wON). The pre-existing ETH-side ON contract is **unused** by the bridge and orphaned by design.
+**Solution 3** (per the design doc): BSC holds the canonical supply locked in `ONOFTAdapter`; Ethereum gets a fresh mintable `WrappedON` (wON). The pre-existing ETH-side ON contract is **unused** by the bridge and orphaned by design.
 
 ## Why Solution 3 (and not 1, 2, or 4)
 
@@ -22,7 +22,7 @@ LayerZero V2 OFT bridge for the **ON** token between **BSC** (canonical / locked
 
 Auto-unwrap (override `_credit`/`_debit` so wON converts to the pre-existing ETH ON on receipt) would require:
 
-1. Custom Solidity in `MyOFT.sol` (we want to keep it byte-identical to the LayerZero template).
+1. Custom Solidity in `WrappedON.sol` (we want to keep it byte-identical to the LayerZero template).
 2. A finite reserve of the pre-existing ETH ON inside wON. The pre-existing token has no mint, so net BSC→ETH flow drains the reserve and bricks the ETH side.
 3. Liquidity monitoring + manual rebalances.
 
@@ -30,7 +30,7 @@ This converts Solution 3 into Solution 4 and reintroduces exactly the problem we
 
 ## Origin
 
-Scaffolded by copying `examples/oft-adapter` from [`LayerZero-Labs/devtools`](https://github.com/LayerZero-Labs/devtools/tree/main/examples/oft-adapter) (the same template `npx create-lz-oapp -e oft-adapter` produces). Contracts (`MyOFT.sol`, `MyOFTAdapter.sol`) are **byte-identical** to the upstream template — only the constructor pass-through that the abstract parents require.
+Scaffolded by copying `examples/oft-adapter` from [`LayerZero-Labs/devtools`](https://github.com/LayerZero-Labs/devtools/tree/main/examples/oft-adapter) (the same template `npx create-lz-oapp -e oft-adapter` produces). Contracts (`WrappedON.sol`, `ONOFTAdapter.sol`) are **byte-identical** to the upstream template — only the constructor pass-through that the abstract parents require.
 
 ## Production configuration decisions (locked in)
 
@@ -56,12 +56,12 @@ Both Hardhat and Foundry are kept. Hardhat does deploy + wire; Foundry does fast
 ```
 bridge/
 ├── contracts/
-│   ├── MyOFTAdapter.sol     ← BSC: pass-through over OFTAdapter (LZ template, unchanged)
-│   ├── MyOFT.sol            ← ETH: pass-through over OFT       (LZ template, unchanged)
+│   ├── ONOFTAdapter.sol     ← BSC: pass-through over OFTAdapter (LZ template, unchanged)
+│   ├── WrappedON.sol            ← ETH: pass-through over OFT       (LZ template, unchanged)
 │   └── mocks/
 ├── deploy/
-│   ├── MyOFTAdapter.ts      ← deploys MyOFTAdapter on networks with `oftAdapter.tokenAddress` set
-│   ├── MyOFT.ts             ← deploys MyOFT (wON) on networks WITHOUT `oftAdapter` config
+│   ├── ONOFTAdapter.ts      ← deploys ONOFTAdapter on networks with `oftAdapter.tokenAddress` set
+│   ├── WrappedON.ts             ← deploys WrappedON (wON) on networks WITHOUT `oftAdapter` config
 │   └── MyERC20Mock.ts       ← test-only mock token deploy (unused on mainnet)
 ├── tasks/
 │   ├── sendOFT.ts           ← `hardhat send` task: quote + approve + send
@@ -89,7 +89,7 @@ npm test                     # forge test + hardhat test
 
 # Deploy
 npx hardhat lz:deploy        # CLI prompts for networks; pick `bsc` and `ethereum`
-                             # → BSC deploys MyOFTAdapter, ETH deploys MyOFT (wON)
+                             # → BSC deploys ONOFTAdapter, ETH deploys WrappedON (wON)
 
 # Wire (sets peers + DVNs + executor + enforced options on both sides)
 npx hardhat lz:oapp:wire --oapp-config layerzero.config.ts
@@ -109,22 +109,22 @@ npx hardhat lz:oft:send --network ethereum --src-eid 30101 --dst-eid 30102 --to 
 2. ✅ Run `lz:oapp:wire` — confirm both peers, DVN config, and enforced options applied.
 3. ✅ Run `lz:oapp:peers:get` to confirm bidirectional peers.
 4. ✅ Send a small test amount BSC→ETH and ETH→BSC; confirm balances move losslessly.
-5. ✅ `transferOwnership(OWNER_BSC)` on `MyOFTAdapter`, `transferOwnership(OWNER_ETH)` on `MyOFT`.
+5. ✅ `transferOwnership(OWNER_BSC)` on `ONOFTAdapter`, `transferOwnership(OWNER_ETH)` on `WrappedON`.
 6. ✅ `setDelegate(OWNER_BSC)` and `setDelegate(OWNER_ETH)` (LayerZero config authority).
 7. ✅ Have multisig signers confirm they can call admin functions (sanity check).
 
 ## Important gotchas
 
 - **OFTAdapter requires a lossless inner token.** ON on BSC must NOT be fee-on-transfer or rebasing. The adapter assumes `transferFrom(amount)` actually moves `amount`. **Verify with a forked-mainnet test before production.**
-- **OFT decimals must match.** `MyOFT` defaults to 18 (OZ ERC20). Real ON on BSC is 18 — but reconfirm via `cast call $ON_BSC "decimals()(uint8)" --rpc-url $RPC_URL_BSC`. Mismatch → silent dust loss via `decimalConversionRate`.
-- **Only ONE OFTAdapter per global mesh.** BSC is it. If a third chain is added later, deploy another `MyOFT` (mintable), never another adapter.
+- **OFT decimals must match.** `WrappedON` defaults to 18 (OZ ERC20). Real ON on BSC is 18 — but reconfirm via `cast call $ON_BSC "decimals()(uint8)" --rpc-url $RPC_URL_BSC`. Mismatch → silent dust loss via `decimalConversionRate`.
+- **Only ONE OFTAdapter per global mesh.** BSC is it. If a third chain is added later, deploy another `WrappedON` (mintable), never another adapter.
 - **Endpoint V2 address.** `0x1a44076050125825900e736c501f859c50fE728c` on every supported EVM mainnet/testnet. The Hardhat plugin pulls this automatically based on `eid`.
-- **Approval before send (BSC side).** Users must `approve(adapter, amount)` on the ON token before calling `send()` on `MyOFTAdapter`.
+- **Approval before send (BSC side).** Users must `approve(adapter, amount)` on the ON token before calling `send()` on `ONOFTAdapter`.
 - **Multisig hand-off.** Deployer EOA owns the contracts until step 5–6 of the post-deploy checklist. Don't go live without finishing the hand-off.
 
 ## What we deliberately did NOT do
 
-- No custom contract logic — `MyOFT.sol` and `MyOFTAdapter.sol` are byte-identical to the LZ template.
+- No custom contract logic — `WrappedON.sol` and `ONOFTAdapter.sol` are byte-identical to the LZ template.
 - No auto-unwrap on ETH (would require an ETH-side reserve and convert this into Solution 4).
 - No `MintBurnOFTAdapter` / `NativeOFTAdapter`.
 - No LayerZero V1.

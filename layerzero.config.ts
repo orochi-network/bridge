@@ -8,9 +8,9 @@ import type { OmniPointHardhat } from '@layerzerolabs/toolbox-hardhat'
 /**
  * ON Bridge — Solution 3
  *
- *   BSC (canonical):  MyOFTAdapter wraps the existing ON token at
+ *   BSC (canonical):  ONOFTAdapter wraps the existing ON token at
  *                     0x0e4F6209eD984b21EDEA43acE6e09559eD051D48 (lock/unlock).
- *   ETH (bridged):    MyOFT mints/burns wON ("Wrapped ON").
+ *   ETH (bridged):    WrappedON mints/burns wON ("Wrapped ON").
  *
  *   Users on Ethereum hold wON directly — there is no on-chain unwrap path
  *   to the pre-existing ETH ON token. See CLAUDE.md for the rationale.
@@ -19,20 +19,20 @@ import type { OmniPointHardhat } from '@layerzerolabs/toolbox-hardhat'
  */
 const bscContract: OmniPointHardhat = {
     eid: EndpointId.BSC_V2_MAINNET,
-    contractName: 'MyOFTAdapter',
+    contractName: 'ONOFTAdapter',
 }
 
 const ethContract: OmniPointHardhat = {
     eid: EndpointId.ETHEREUM_V2_MAINNET,
-    contractName: 'MyOFT',
+    contractName: 'WrappedON',
 }
 
 // Enforced executor options applied automatically to every send().
 // Integrators that forget to pass options will still get reliable destination delivery.
 //
 // gas budget for _lzReceive on the destination:
-//   - ETH side (MyOFT): mints wON to the recipient — ~60-80k.
-//   - BSC side (MyOFTAdapter): transfers ON from escrow — ~50-80k assuming ON is a vanilla ERC20.
+//   - ETH side (WrappedON): mints wON to the recipient — ~60-80k.
+//   - BSC side (ONOFTAdapter): transfers ON from escrow — ~50-80k assuming ON is a vanilla ERC20.
 // 200k gives generous headroom; unused gas is refunded by the executor.
 //
 // To learn more, see https://docs.layerzero.network/v2/concepts/applications/oapp-standard#execution-options-and-enforced-settings
@@ -62,8 +62,8 @@ const ETH_TO_BSC_CONFIRMATIONS = 15
 // i.e. if you declare A,B there's no need to declare B,A
 const pathways: TwoWayConfig[] = [
     [
-        bscContract, // Chain A (BSC, MyOFTAdapter)
-        ethContract, // Chain B (ETH, MyOFT / wON)
+        bscContract, // Chain A (BSC, ONOFTAdapter)
+        ethContract, // Chain B (ETH, WrappedON / wON)
         [REQUIRED_DVNS, []], // [ requiredDVN[], [ optionalDVN[], threshold ] ]
         [BSC_TO_ETH_CONFIRMATIONS, ETH_TO_BSC_CONFIRMATIONS], // [A->B confirmations, B->A confirmations]
         [EVM_ENFORCED_OPTIONS, EVM_ENFORCED_OPTIONS], // [Chain B enforcedOptions (recv on B), Chain A enforcedOptions (recv on A)]
