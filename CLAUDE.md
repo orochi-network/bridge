@@ -1,71 +1,149 @@
-# CLAUDE.md
+# Project: ON Cross-Chain Bridge (BSC ↔ Ethereum)
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## What this project is
 
-## Project Overview
+LayerZero V2 OFT bridge for the **ON** token between **BSC** (canonical / locked) and **Ethereum** (wrapped / mintable).
 
-Hyperlane warp route bridge for Orochi Network Token (ON) between Ethereum and BNB Smart Chain (BSC), plus a one-way swap contract for migrating old BSC ON tokens to the new Hyperlane synthetic.
+| Chain | Existing ON token | Bridge contract | Role |
+|-------|-------------------|-----------------|------|
+| BSC | [`0x0e4F6209eD984b21EDEA43acE6e09559eD051D48`](https://bscscan.com/address/0x0e4F6209eD984b21EDEA43acE6e09559eD051D48) | `MyOFTAdapter` | Locks/unlocks the existing ON token |
+| ETH | [`0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d`](https://etherscan.io/address/0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d) | `MyOFT` (wON) | Mints/burns the bridged representation |
 
-- **Ethereum**: 600M ON (canonical ERC20, `0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d`)
-- **BSC old**: 100M ON (separate contract, `0x0e4F6209eD984b21EDEA43acE6e09559eD051D48`)
-- **BSC new**: HypERC20 synthetic (100M pre-minted via `initialSupply`, plus bridge mint/burn)
-- **ONSwap**: One-way swap — old BSC ON burned to `0xdEaD`, new synthetic ON sent to user. 1:1. No reverse.
-- **Multisig**: `0xDA5E5Be8f9C5fCdd30f2ee08D6b3F794511C2B48`
+**Solution 3** (per the design doc): BSC holds the canonical supply locked in `MyOFTAdapter`; Ethereum gets a fresh mintable `MyOFT` (wON). The pre-existing ETH-side ON contract is **unused** by the bridge and orphaned by design.
 
-## Collateral Model
+## Why Solution 3 (and not 1, 2, or 4)
 
-- ETH side: HypERC20Collateral **locks/unlocks** ON. No tokens are burned on Ethereum.
-- BSC side: HypERC20 synthetic **mints/burns**. Pre-minted 100M is NOT backed by ETH collateral.
-- If ETH collateral exists (from ETH→BSC bridging), ALL synthetic holders can bridge BSC→ETH first-come-first-served. There is no on-chain enforcement preventing this.
-- **Recommended sequence**: Complete the swap migration, recover unswapped tokens, THEN open the bridge for ETH↔BSC traffic.
+- **Solution 1** (Chainlink CCIP `LockReleaseTokenPool`): requires liquidity management on both chains, off Chainlink best practices.
+- **Solution 2** (multiple OFTAdapters): unsafe — source has no view of destination balance, oversend → permanently locked funds.
+- **Solution 3** (BSC adapter + ETH mintable wON): one canonical reserve (BSC), the other side is mint/burn → no liquidity to manage. **Chosen.**
+- **Solution 4** (mintable wrappers on both chains with internal accounting): same liquidity-fragmentation risk as 1/2, most custom code.
 
-## Build and Test Commands
+## Why no auto-unwrap on Ethereum
 
-```bash
-# Solidity (Foundry)
-forge build
-forge test -vv                    # all tests (24)
-forge test --match-test test_swap # single test
-forge test --match-contract ONSwapTest -vvv  # verbose traces
+Auto-unwrap (override `_credit`/`_debit` so wON converts to the pre-existing ETH ON on receipt) would require:
 
-# Hyperlane CLI (v29.1.0)
-npm run warp:init            # generate config → configs/warp-route-deploy.yaml
-npm run warp:init:advanced   # with ISM options
-npm run warp:deploy          # deploy (interactive, uses registry)
-npm run warp:check           # verify on-chain state
-npm run warp:read            # read warp route state
-npm run warp:read:save       # save state to configs/warp-route-current.yaml
-npm run warp:apply           # apply config changes (ISM, ownership)
-npm run warp:send:test       # test transfer with self-relay
-npm run warp:fees            # show bridge fees
+1. Custom Solidity in `MyOFT.sol` (we want to keep it byte-identical to the LayerZero template).
+2. A finite reserve of the pre-existing ETH ON inside wON. The pre-existing token has no mint, so net BSC→ETH flow drains the reserve and bricks the ETH side.
+3. Liquidity monitoring + manual rebalances.
+
+This converts Solution 3 into Solution 4 and reintroduces exactly the problem we picked Solution 3 to avoid. **Decision: users on ETH hold wON directly. No on-chain unwrap.**
+
+## Origin
+
+Scaffolded by copying `examples/oft-adapter` from [`LayerZero-Labs/devtools`](https://github.com/LayerZero-Labs/devtools/tree/main/examples/oft-adapter) (the same template `npx create-lz-oapp -e oft-adapter` produces). Contracts (`MyOFT.sol`, `MyOFTAdapter.sol`) are **byte-identical** to the upstream template — only the constructor pass-through that the abstract parents require.
+
+## Production configuration decisions (locked in)
+
+- **DVNs**: 2 required, 0 optional → `['LayerZero Labs', 'Google Cloud']`. `metadata-tools` resolves names to per-chain addresses at `lz:oapp:wire` time.
+- **Confirmations**: BSC→ETH = 20 (~60s on BSC's ~3s blocks); ETH→BSC = 15 (~3 min on ETH's 12s blocks).
+- **Enforced executor options**: 200,000 gas, 0 value on `LZ_RECEIVE` for both directions. Generous headroom for `_lzReceive` (mint on ETH, transfer on BSC); unused gas is refunded.
+- **Ownership flow**: deploy with EOA, then `lz:oapp:wire`, then transfer `owner` and `setDelegate` to a multisig. Multisig addresses go in `.env` (`OWNER_BSC`, `OWNER_ETH`).
+- **wON metadata**: `name = "Wrapped ON"`, `symbol = "wON"`, decimals 18 (OZ ERC20 default).
+
+## Toolchain
+
+| Tool | Version | Notes |
+|------|---------|-------|
+| Node | ≥18.16 | See `.nvmrc` |
+| Hardhat | 2.22.x | Required for `lz:oapp:wire` (applies DVN/executor/enforced-options config) |
+| Foundry | latest stable | For unit/integration tests via `forge test` |
+| Solidity | 0.8.22 | Pinned, matches LZ template |
+
+Both Hardhat and Foundry are kept. Hardhat does deploy + wire; Foundry does fast tests.
+
+## Repository layout
+
+```
+bridge/
+├── contracts/
+│   ├── MyOFTAdapter.sol     ← BSC: pass-through over OFTAdapter (LZ template, unchanged)
+│   ├── MyOFT.sol            ← ETH: pass-through over OFT       (LZ template, unchanged)
+│   └── mocks/
+├── deploy/
+│   ├── MyOFTAdapter.ts      ← deploys MyOFTAdapter on networks with `oftAdapter.tokenAddress` set
+│   ├── MyOFT.ts             ← deploys MyOFT (wON) on networks WITHOUT `oftAdapter` config
+│   └── MyERC20Mock.ts       ← test-only mock token deploy (unused on mainnet)
+├── tasks/
+│   ├── sendOFT.ts           ← `hardhat send` task: quote + approve + send
+│   ├── sendEvm.ts
+│   └── ...
+├── test/                    ← Foundry + Hardhat tests
+├── foundry.toml
+├── hardhat.config.ts        ← networks: bsc + ethereum mainnet (BSC has oftAdapter.tokenAddress set)
+├── layerzero.config.ts      ← BSC↔ETH pathway, 2 DVNs, confirmations, enforced options
+├── package.json
+├── .env.example             ← commented placeholders for RPC / keys / multisigs
+└── CLAUDE.md                ← this file
 ```
 
-## Architecture
+## Common commands
 
-1. **Hyperlane Warp Route** (deployed via CLI, no custom Solidity):
-   - `HypERC20Collateral` on Ethereum — locks ON when bridging to BSC, releases when bridging back
-   - `HypERC20` synthetic on BSC — mints on receive, burns on send. `initialSupply: "100000000000000000000000000"` pre-mints 100M to deployer.
+```sh
+# One-time setup
+cp .env.example .env         # fill in PRIVATE_KEY (or MNEMONIC) and RPC URLs
+npm install                  # or pnpm install — pnpm-lock.yaml is the canonical lockfile
+npm run compile              # Hardhat + Foundry compile
 
-2. **ONSwap.sol** (the only custom contract):
-   - Burns old BSC ON to `0xdEaD` via `safeTransferFrom`, sends new synthetic ON to user via `safeTransfer`
-   - `Ownable` + `ReentrancyGuard`, constructor validates zero addresses and same-token
-   - Owner `recover()` for emergency (drain NEW_TOKEN = pause swaps) or recovering misrouted tokens
-   - `DeploySwap.s.sol` atomic deploy + seed in single broadcast, with chain ID check (BSC only), contract existence checks, and seed minimum validation
+# Tests
+npm test                     # forge test + hardhat test
 
-## Key Config Details
+# Deploy
+npx hardhat lz:deploy        # CLI prompts for networks; pick `bsc` and `ethereum`
+                             # → BSC deploys MyOFTAdapter, ETH deploys MyOFT (wON)
 
-- `configs/warp-route-deploy.yaml` is a reference config generated by `warp init --out`. The CLI uses its own registry for `warp deploy` — no `--config` flag.
-- The synthetic field MUST be `initialSupply` (not `totalSupply`) — the CLI Zod schema silently strips unknown fields. Always quote large integers as strings to prevent YAML precision loss.
-- CLI common flags: `-w <warp-route-id>` to select route, `-k` for key, `-y` to skip prompts, `--out` for file output.
-- Solidity 0.8.28, optimizer 200 runs, `paris` EVM (BSC does not support PUSH0/Shanghai).
-- OpenZeppelin v5.1.0 via `@openzeppelin/contracts/`.
+# Wire (sets peers + DVNs + executor + enforced options on both sides)
+npx hardhat lz:oapp:wire --oapp-config layerzero.config.ts
 
-## Deploy Sequence
+# Verify peers
+npx hardhat lz:oapp:peers:get --oapp-config layerzero.config.ts
 
-1. `npm run warp:init` → manually add `initialSupply` (quoted string) → `npm run warp:deploy`
-2. Verify 100M minted: `cast call $NEW_ON_TOKEN_BSC "balanceOf(address)(uint256)" $DEPLOYER_ADDRESS --rpc-url $BSC_RPC_URL`
-3. `forge script script/DeploySwap.s.sol --rpc-url $BSC_RPC_URL --broadcast --verify --private-key $HYP_KEY` (must use same key as warp deploy)
-4. Update ISM and transfer ownership to multisig via `npm run warp:apply`
-5. Destroy deployer key
-6. Start validator + relayer (see GUIDE.md Phase 5)
-7. Submit warp route to Hyperlane registry (see GUIDE.md Section 10.3)
+# Send (BSC → ETH)
+npx hardhat lz:oft:send --network bsc --src-eid 30102 --dst-eid 30101 --to 0xRECIPIENT --amount 1.0
+# Send (ETH → BSC)
+npx hardhat lz:oft:send --network ethereum --src-eid 30101 --dst-eid 30102 --to 0xRECIPIENT --amount 1.0
+```
+
+## Post-deploy checklist (mainnet)
+
+1. ✅ Verify on Etherscan + BSCScan (`--verify` flag on `lz:deploy` or manual).
+2. ✅ Run `lz:oapp:wire` — confirm both peers, DVN config, and enforced options applied.
+3. ✅ Run `lz:oapp:peers:get` to confirm bidirectional peers.
+4. ✅ Send a small test amount BSC→ETH and ETH→BSC; confirm balances move losslessly.
+5. ✅ `transferOwnership(OWNER_BSC)` on `MyOFTAdapter`, `transferOwnership(OWNER_ETH)` on `MyOFT`.
+6. ✅ `setDelegate(OWNER_BSC)` and `setDelegate(OWNER_ETH)` (LayerZero config authority).
+7. ✅ Have multisig signers confirm they can call admin functions (sanity check).
+
+## Important gotchas
+
+- **OFTAdapter requires a lossless inner token.** ON on BSC must NOT be fee-on-transfer or rebasing. The adapter assumes `transferFrom(amount)` actually moves `amount`. **Verify with a forked-mainnet test before production.**
+- **OFT decimals must match.** `MyOFT` defaults to 18 (OZ ERC20). Real ON on BSC is 18 — but reconfirm via `cast call $ON_BSC "decimals()(uint8)" --rpc-url $RPC_URL_BSC`. Mismatch → silent dust loss via `decimalConversionRate`.
+- **Only ONE OFTAdapter per global mesh.** BSC is it. If a third chain is added later, deploy another `MyOFT` (mintable), never another adapter.
+- **Endpoint V2 address.** `0x1a44076050125825900e736c501f859c50fE728c` on every supported EVM mainnet/testnet. The Hardhat plugin pulls this automatically based on `eid`.
+- **Approval before send (BSC side).** Users must `approve(adapter, amount)` on the ON token before calling `send()` on `MyOFTAdapter`.
+- **Multisig hand-off.** Deployer EOA owns the contracts until step 5–6 of the post-deploy checklist. Don't go live without finishing the hand-off.
+
+## What we deliberately did NOT do
+
+- No custom contract logic — `MyOFT.sol` and `MyOFTAdapter.sol` are byte-identical to the LZ template.
+- No auto-unwrap on ETH (would require an ETH-side reserve and convert this into Solution 4).
+- No `MintBurnOFTAdapter` / `NativeOFTAdapter`.
+- No LayerZero V1.
+
+## Re-scaffolding the upstream template
+
+To pull a newer version of the LayerZero template later:
+
+```sh
+git clone --depth 1 https://github.com/LayerZero-Labs/devtools.git /tmp/lz-fresh
+diff -r /tmp/lz-fresh/examples/oft-adapter/contracts ./contracts
+diff -r /tmp/lz-fresh/examples/oft-adapter/test ./test
+```
+
+If upstream contracts changed, decide case-by-case whether to merge.
+
+## Things still to fill in before production deploy
+
+- [ ] `.env` — `PRIVATE_KEY` (deployer), `RPC_URL_BSC`, `RPC_URL_ETH`, `BSCSCAN_API_KEY`, `ETHERSCAN_API_KEY`, `OWNER_BSC`, `OWNER_ETH`.
+- [ ] Confirm ON on BSC `decimals() == 18` and is not fee-on-transfer (forked test).
+- [ ] Confirm Google Cloud DVN is live on both BSC and Ethereum mainnet (check https://docs.layerzero.network/v2/deployments/dvn-addresses).
+- [ ] Decide multisig threshold + signers; have the multisig deployed on both chains.

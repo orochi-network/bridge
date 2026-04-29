@@ -1,21 +1,24 @@
-# Compiler files
-cache/
-out/
-
-# Broadcast logs (may contain deployer addresses, RPC URLs, nonces)
-/broadcast/
-
-# Docs
-docs/
-
-# Dotenv file
+node_modules
 .env
-.env.*
-!.env.example
+coverage
+coverage.json
+typechain
+typechain-types
 
-# Node
-node_modules/
-dist/
+# Hardhat files
+cache
+artifacts
 
-# Hyperlane
-.hyperlane/
+
+# LayerZero specific files
+.layerzero
+
+# foundry test compilation files
+out
+
+# pnpm
+pnpm-error.log
+
+# Editor and OS files
+.DS_Store
+.idea
