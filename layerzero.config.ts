@@ -12,8 +12,9 @@ import type { OmniPointHardhat } from '@layerzerolabs/toolbox-hardhat'
  *                     0x0e4F6209eD984b21EDEA43acE6e09559eD051D48 (lock/unlock).
  *   ETH (bridged):    WrappedON mints/burns wON ("Wrapped ON").
  *
- *   Users on Ethereum hold wON directly — there is no on-chain unwrap path
- *   to the pre-existing ETH ON token. See CLAUDE.md for the rationale.
+ *   On inbound (BSC -> ETH), WrappedON either auto-unwraps to real ON when its
+ *   reserve covers the amount or falls back to minting wON. Composed messages
+ *   are forced to the mint path. See CLAUDE.md for the rationale.
  *
  *   WARNING: ONLY 1 OFTAdapter should exist for this mesh (BSC).
  */
@@ -31,16 +32,21 @@ const ethContract: OmniPointHardhat = {
 // Integrators that forget to pass options will still get reliable destination delivery.
 //
 // gas budget for _lzReceive on the destination:
-//   - ETH side (WrappedON): mints wON to the recipient — ~60-80k.
-//   - BSC side (ONOFTAdapter): transfers ON from escrow — ~50-80k assuming ON is a vanilla ERC20.
-// 200k gives generous headroom; unused gas is refunded by the executor.
+//   - ETH (WrappedON, plain msg, mint fallback):     ~60-80k
+//   - ETH (WrappedON, plain msg, auto-unwrap path):  ~50-90k (vanilla ERC20)
+//                                                   higher if the ON token has hooks
+//   - ETH (WrappedON, composed msg):                  mint + endpoint.sendCompose ~120-160k
+//   - BSC (ONOFTAdapter, plain msg):                  ~50-80k
+//   - LayerZero plumbing overhead:                    ~40-60k
+// 250k absorbs the worst case (composed inbound on ETH with a hooky ON token).
+// Unused gas is refunded by the executor; over-budgeting is a safety knob, not a cost.
 //
 // To learn more, see https://docs.layerzero.network/v2/concepts/applications/oapp-standard#execution-options-and-enforced-settings
 const EVM_ENFORCED_OPTIONS: OAppEnforcedOption[] = [
     {
         msgType: 1,
         optionType: ExecutorOptionType.LZ_RECEIVE,
-        gas: 200000,
+        gas: 250000,
         value: 0,
     },
 ]

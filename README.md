@@ -153,7 +153,7 @@ Expect roughly:
 - 1× `setPeer` on Ethereum (peer = adapter on BSC)
 - 1× `setConfig` on each side for **send** ULN (DVN = LayerZero Labs + Google Cloud, confirmations)
 - 1× `setConfig` on each side for **receive** ULN
-- 1× `setEnforcedOptions` on each side (200k `LZ_RECEIVE` gas)
+- 1× `setEnforcedOptions` on each side (250k `LZ_RECEIVE` gas)
 
 If wire fails partway, **rerun it** — it's idempotent and will pick up where it left off.
 
@@ -168,7 +168,7 @@ Both sides should show:
 - Peer correctly set to the counterpart contract
 - Required DVNs: 2 (LayerZero Labs + Google Cloud)
 - Confirmations: 20 BSC→ETH, 15 ETH→BSC
-- Enforced `LZ_RECEIVE` gas: 200,000
+- Enforced `LZ_RECEIVE` gas: 250,000
 
 ## Step 10 — Smoke test with a tiny amount
 
@@ -247,8 +247,8 @@ cast call <WON_ADDR>     "owner()(address)" --rpc-url $RPC_URL_ETH   # → $OWNE
 
 | Function | What it does | Who calls |
 |----------|--------------|-----------|
-| `seedReserve(amount)` | Pulls `amount` real ON from caller into the reserve. **Does not** mint wON. | Treasury — to refill the reserve so stranded wON-holders can `unwrap`. Caller must `approve(WrappedON, amount)` on the ETH ON token first. |
-| `wrap(amount)` | Pulls `amount` real ON from caller, mints `amount` wON to caller. 1:1. | Legacy ETH ON holders bridging out, or the operator rebalancing. Caller must `approve` first. |
+| `seedReserve(amount)` | Pulls `amount` real ON from caller into the reserve. **Does not** mint wON. **One-way subsidy**: the donor gets nothing back; the funds can be paid out to any wON holder via `unwrap` or to any inbound bridge user via auto-unwrap. | Treasury — only when the donation is genuinely intended as overcollateralization, not as a recoverable deposit. For a recoverable deposit use `wrap` instead. |
+| `wrap(amount)` | Pulls `amount` real ON from caller, mints `amount` wON to caller. 1:1. Reverts with `UnexpectedTransferAmount` if the ON token is fee-on-transfer. | Legacy ETH ON holders bridging out, or the operator depositing recoverable liquidity. Caller must `approve` first. |
 | `unwrap(amount)` | Burns `amount` wON from caller, transfers `amount` real ON to caller. 1:1. Reverts with `ReserveInsufficient` if reserve is dry. | Any wON holder once the reserve has been refilled. |
 
 ```sh
@@ -268,6 +268,11 @@ cast send <WON_ADDR> "unwrap(uint256)" <amount_wei> \
 ```
 
 **Operator obligations:** sustained net BSC→ETH flow drains the reserve. Off-chain monitoring should alert when `reserve()` falls below an agreed threshold. Refill paths: bridge wON ETH→BSC to unlock real ON on BSC and acquire fresh ETH ON off-chain, or commit treasury ON directly via `seedReserve`. There is no autonomous on-chain refill.
+
+**Known limitations:**
+- **Front-running grief.** A wON holder can `unwrap` while a user's BSC→ETH bridge is in flight (~60s LZ delivery), forcing the inbound user onto the wON fallback. Auto-unwrap is best-effort, not guaranteed.
+- **ON pause/blacklist.** If the ON token is paused or blacklists the recipient, the auto-unwrap branch reverts inside `_credit`, making the LayerZero message undeliverable until the lock lifts. Operators should monitor delivery health.
+- **Composed messages.** `SEND_AND_CALL` always mints wON, even when the reserve covers the amount. The compose handler downstream needs wON for its own logic; auto-unwrap would deliver real ON instead. Recipients of composed messages can call `unwrap` separately.
 
 ## End-user send flow (for integrators)
 

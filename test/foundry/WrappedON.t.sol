@@ -3,11 +3,14 @@ pragma solidity ^0.8.20;
 
 import { TestHelperOz5 } from "@layerzerolabs/test-devtools-evm-foundry/contracts/TestHelperOz5.sol";
 import { OptionsBuilder } from "@layerzerolabs/oapp-evm/contracts/oapp/libs/OptionsBuilder.sol";
-import { SendParam } from "@layerzerolabs/oft-evm/contracts/interfaces/IOFT.sol";
-import { MessagingFee } from "@layerzerolabs/oft-evm/contracts/OFTCore.sol";
+import { SendParam, OFTReceipt } from "@layerzerolabs/oft-evm/contracts/interfaces/IOFT.sol";
+import { MessagingFee, MessagingReceipt } from "@layerzerolabs/oft-evm/contracts/OFTCore.sol";
+import { OFTComposeMsgCodec } from "@layerzerolabs/oft-evm/contracts/libs/OFTComposeMsgCodec.sol";
+import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 import { OFTAdapterMock } from "../mocks/OFTAdapterMock.sol";
 import { ERC20Mock } from "../mocks/ERC20Mock.sol";
+import { OFTComposerMock } from "../mocks/OFTComposerMock.sol";
 import { WrappedONMock } from "../../contracts/mocks/WrappedONMock.sol";
 import { WrappedON } from "../../contracts/WrappedON.sol";
 
@@ -116,12 +119,18 @@ contract WrappedONTest is TestHelperOz5 {
     }
 
     function test_constructor_revertsOnDecimalsMismatch() public {
-        // ERC20Mock returns 18 by default — deploy a 6-decimal variant via raw hack:
-        // we can't easily change ERC20Mock's decimals, so use a token with non-18 decimals.
-        // Skip this case if the mock doesn't support it; otherwise:
         SixDecimalERC20 wrong = new SixDecimalERC20();
         vm.expectRevert(abi.encodeWithSelector(WrappedON.DecimalsMismatch.selector, uint8(6)));
         new WrappedONMock("Wrapped ON", "wON", address(endpoints[ETH_EID]), address(this), address(wrong));
+    }
+
+    function test_constructor_revertsOnSelfReserve() public {
+        // Predict the address that the next CREATE from this test contract will land
+        // at, then pass that same address as the reserve token. The constructor
+        // executes with `address(this) == predicted == _onToken`, hitting SelfReserve.
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        vm.expectRevert(WrappedON.SelfReserve.selector);
+        new WrappedONMock("Wrapped ON", "wON", address(endpoints[ETH_EID]), address(this), predicted);
     }
 
     // -------------------------------------------------------------------------
@@ -242,11 +251,128 @@ contract WrappedONTest is TestHelperOz5 {
         vm.expectRevert(WrappedON.ZeroAmount.selector);
         wON.seedReserve(0);
     }
+
+    // -------------------------------------------------------------------------
+    // composed-message handling
+    // -------------------------------------------------------------------------
+
+    /// @dev When a SEND_AND_CALL message arrives, the compose handler downstream
+    ///      receives `amountReceivedLD` and assumes it is OFT (wON). We must NOT
+    ///      auto-unwrap to real ON in this case — the compose handler would then
+    ///      manipulate a wON balance the recipient doesn't have. Force mint.
+    function test_inbound_composedMessage_forcesMintEvenWithFullReserve() public {
+        _seed(500 ether); // reserve full enough to auto-unwrap
+
+        OFTComposerMock composer = new OFTComposerMock();
+
+        bytes memory options = OptionsBuilder
+            .newOptions()
+            .addExecutorLzReceiveOption(250_000, 0)
+            .addExecutorLzComposeOption(0, 500_000, 0);
+        bytes memory composeMsg = hex"1234";
+        SendParam memory p = SendParam(
+            ETH_EID,
+            addressToBytes32(address(composer)),
+            100 ether,
+            100 ether,
+            options,
+            composeMsg,
+            ""
+        );
+        MessagingFee memory fee = adapter.quoteSend(p, false);
+
+        vm.startPrank(alice);
+        bscON.approve(address(adapter), 100 ether);
+        adapter.send{ value: fee.nativeFee }(p, fee, payable(alice));
+        vm.stopPrank();
+
+        verifyPackets(ETH_EID, addressToBytes32(address(wON)));
+
+        // Composer must hold wON, NOT real ON. Reserve must be untouched.
+        assertEq(wON.balanceOf(address(composer)), 100 ether, "composer holds wON");
+        assertEq(ethON.balanceOf(address(composer)), 0, "composer has no real ON");
+        assertEq(wON.reserve(), 500 ether, "reserve untouched (compose forced mint)");
+    }
+
+    // -------------------------------------------------------------------------
+    // wrap defends against fee-on-transfer reserve token
+    // -------------------------------------------------------------------------
+
+    function test_wrap_revertsOnFeeOnTransferToken() public {
+        // Spin up a separate WrappedON instance whose reserve token charges a
+        // 1% transfer fee. wrap() must detect the mismatch and revert.
+        FeeOnTransferERC20 feeOn = new FeeOnTransferERC20();
+        WrappedONMock wON_fot = WrappedONMock(
+            _deployOApp(
+                type(WrappedONMock).creationCode,
+                abi.encode("Wrapped ON FOT", "wON-FOT", address(endpoints[ETH_EID]), address(this), address(feeOn))
+            )
+        );
+
+        feeOn.mint(alice, 100 ether);
+        vm.startPrank(alice);
+        feeOn.approve(address(wON_fot), 100 ether);
+        // wrap requests 100 but only 99 arrives -> revert
+        vm.expectRevert(
+            abi.encodeWithSelector(WrappedON.UnexpectedTransferAmount.selector, uint256(100 ether), uint256(99 ether))
+        );
+        wON_fot.wrap(100 ether);
+        vm.stopPrank();
+    }
+
+    function test_seedReserve_revertsOnFeeOnTransferToken() public {
+        FeeOnTransferERC20 feeOn = new FeeOnTransferERC20();
+        WrappedONMock wON_fot = WrappedONMock(
+            _deployOApp(
+                type(WrappedONMock).creationCode,
+                abi.encode("Wrapped ON FOT", "wON-FOT", address(endpoints[ETH_EID]), address(this), address(feeOn))
+            )
+        );
+
+        feeOn.mint(treasury, 100 ether);
+        vm.startPrank(treasury);
+        feeOn.approve(address(wON_fot), 100 ether);
+        vm.expectRevert(
+            abi.encodeWithSelector(WrappedON.UnexpectedTransferAmount.selector, uint256(100 ether), uint256(99 ether))
+        );
+        wON_fot.seedReserve(100 ether);
+        vm.stopPrank();
+    }
 }
 
-/// @dev Helper: a 6-decimal ERC20 to verify constructor enforces the decimals check.
-contract SixDecimalERC20 {
-    function decimals() external pure returns (uint8) {
+/// @dev Helper: a minimal-but-real ERC20 with 6 decimals. The WrappedON constructor
+///      currently only calls `decimals()`, but we extend ERC20 anyway so future
+///      additions to the constructor (balance check, name read, etc.) won't make
+///      this test silently revert for the wrong reason.
+contract SixDecimalERC20 is ERC20 {
+    constructor() ERC20("Six Decimal", "SIX") {}
+
+    function decimals() public pure override returns (uint8) {
         return 6;
+    }
+
+    function mint(address _to, uint256 _amount) external {
+        _mint(_to, _amount);
+    }
+}
+
+/// @dev Helper: 18-decimal ERC20 that burns 1% on every user-to-user transfer,
+///      simulating a fee-on-transfer token. Used to verify wrap/seedReserve
+///      detect the balance mismatch.
+contract FeeOnTransferERC20 is ERC20 {
+    constructor() ERC20("Fee On Transfer", "FOT") {}
+
+    function mint(address _to, uint256 _amount) external {
+        _mint(_to, _amount);
+    }
+
+    function _update(address from, address to, uint256 value) internal override {
+        if (from != address(0) && to != address(0)) {
+            uint256 fee = value / 100; // 1% fee
+            super._update(from, address(0xdead), fee);
+            super._update(from, to, value - fee);
+        } else {
+            super._update(from, to, value);
+        }
     }
 }

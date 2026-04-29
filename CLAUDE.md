@@ -22,29 +22,44 @@ LayerZero V2 OFT bridge for the **ON** token between **BSC** (canonical / locked
 
 `WrappedON` overrides OFT's default `_credit` so that on inbound BSC→ETH messages:
 
-- If `WrappedON.reserve()` (real ON held by the contract) ≥ amount: **transfer real ON** to the recipient. wON is **not** minted.
-- Otherwise: fall back to minting wON (default OFT behaviour). The recipient can later call `unwrap(amount)` to redeem against the reserve once it's refilled.
+- **Plain message + reserve ≥ amount**: transfer real ON to the recipient. wON is **not** minted.
+- **Plain message + reserve insufficient**: fall back to minting wON (default OFT behaviour). The recipient can later call `unwrap(amount)` to redeem against the reserve once it's refilled.
+- **Composed message** (`SEND_AND_CALL`): always mint wON, regardless of reserve. The compose handler downstream encodes `amountReceivedLD` as if it were the OFT (wON); auto-unwrapping would deliver real ON instead, leaving the compose handler manipulating a wON balance the recipient doesn't have. Force the mint path to keep compose semantics intact.
 
-The pre-existing ETH ON has no mint, so this is a Solution-4-style design with a known liquidity-management problem. We accepted the trade-off because users always have a recovery path — message **delivery** never bricks (fallback always succeeds), only **instant unwrap** can fail when the reserve is dry.
+The pre-existing ETH ON has no mint, so this is a Solution-4-style design with a known liquidity-management problem. We accepted the trade-off because users always have a recovery path — message **delivery** never bricks for plain messages (fallback always succeeds), only **instant unwrap** can fail when the reserve is dry.
 
 `WrappedON` exposes a manual swap surface:
 
-- `wrap(amount)` — deposit real ON, mint wON 1:1. Lets legacy ETH-ON holders enter the bridge and lets the operator rebalance.
+- `wrap(amount)` — deposit real ON, mint wON 1:1. Lets legacy ETH-ON holders enter the bridge and lets the operator rebalance. Defends against fee-on-transfer reserves: reverts with `UnexpectedTransferAmount` if the actual amount received is not exactly the requested amount.
 - `unwrap(amount)` — burn wON, withdraw real ON 1:1. Reverts with `ReserveInsufficient` if the reserve cannot cover the request.
-- `seedReserve(amount)` — donate real ON to the reserve without minting wON. Used by treasury/operator to refill the reserve outside of the bridge flow.
+- `seedReserve(amount)` — donate real ON to the reserve without minting wON. Same fee-on-transfer guard as `wrap`. **One-way subsidy** — see below.
 
 ### Reserve operations (operator obligations)
 
 Sustained net BSC→ETH flow drains the reserve. Refill paths:
 
-1. **Bridge wON back to BSC.** Treasury holds wON, sends ETH→BSC to unlock real ON on BSC, acquires real ETH ON off-chain (DEX/OTC), then `seedReserve`s it.
-2. **Direct treasury commitment.** Treasury holds real ETH ON and `seedReserve`s it. Recoverable by `wrap`-ing it back to wON later.
+1. **Bridge wON back to BSC.** Treasury holds wON (from market activity, `wrap`-ing legacy ETH ON, or some other source), sends ETH→BSC to unlock real ON on BSC, acquires real ETH ON off-chain (DEX/OTC), then `seedReserve`s it.
+2. **Direct treasury commitment.** Treasury holds real ETH ON and `seedReserve`s it.
 
 Off-chain monitoring is required: alert when `WrappedON.reserve()` falls below a threshold proportional to expected daily inflow. There is **no autonomous refill mechanism on-chain**.
 
+### `seedReserve` is a one-way subsidy
+
+`seedReserve` does **not** mint wON to the donor. The donated funds become part of the reserve and can be paid out via auto-unwrap to ANY future inbound bridge user, or via `unwrap` to ANY existing wON holder — not just back to the donor. Once seeded, the donation is unrecoverable from the donor's perspective unless they independently hold wON they can `unwrap`. Treat `seedReserve` accordingly.
+
+If you want a deposit that is recoverable, use `wrap(amount)` instead — it adds the same liquidity to the reserve AND mints `amount` wON to the depositor, who can later `unwrap` to get their funds back (assuming the reserve still covers it).
+
+### Front-running grief vector
+
+A wON holder can drain the reserve via `unwrap` while another user's BSC→ETH bridge is in flight (~60s LZ delivery), forcing that user onto the wON fallback even when the reserve was full at send time. This is economically neutral to the front-runner (they burn wON for an equal amount of ON) but harmful to the inbound user (they expected real ON). The bridge does not advertise auto-unwrap as a guarantee — integrators should treat it as best-effort. There is no on-chain mitigation; either accept the design or revert auto-unwrap entirely.
+
+### ON-token-pause / blacklist behaviour
+
+If the ON token is paused or blacklists the recipient, the auto-unwrap branch's `safeTransfer` reverts inside `_credit`, making the LayerZero message undeliverable until the lock lifts. The fallback-to-mint branch only fires when the reserve is insufficient, not as a generic try/catch. We do not wrap the transfer in try/catch because the trade-off is debatable (silent fallback hides ON-token incidents from users); operators should monitor delivery health and ensure the ON token doesn't ship a pause without coordination.
+
 ### Conservation invariant
 
-At rest (no in-flight messages): every wON in circulation is a claim on real ON locked in `ONOFTAdapter` on BSC. Real ON in `WrappedON.reserve()` represents either (a) a `wrap` deposit (matched 1:1 by minted wON) or (b) a `seedReserve` donation (treasury overcollateralization, recoverable only by bridging back).
+At rest (no in-flight messages): every wON in circulation is a claim on real ON locked in `ONOFTAdapter` on BSC. Real ON in `WrappedON.reserve()` represents either (a) a `wrap` deposit (matched 1:1 by minted wON, recoverable by the depositor via `unwrap` while liquidity holds) or (b) a `seedReserve` donation (treasury subsidy, **not** recoverable directly — see "one-way subsidy" above).
 
 ## Origin
 
@@ -54,7 +69,7 @@ Scaffolded by copying `examples/oft-adapter` from [`LayerZero-Labs/devtools`](ht
 
 - **DVNs**: 2 required, 0 optional → `['LayerZero Labs', 'Google Cloud']`. `metadata-tools` resolves names to per-chain addresses at `lz:oapp:wire` time.
 - **Confirmations**: BSC→ETH = 20 (~60s on BSC's ~3s blocks); ETH→BSC = 15 (~3 min on ETH's 12s blocks).
-- **Enforced executor options**: 200,000 gas, 0 value on `LZ_RECEIVE` for both directions. Generous headroom for `_lzReceive` (mint on ETH, transfer on BSC); unused gas is refunded.
+- **Enforced executor options**: 250,000 gas, 0 value on `LZ_RECEIVE` for both directions. Sized to absorb the worst path (composed inbound on ETH with a hooky ON token); unused gas is refunded.
 - **Ownership flow**: deploy with EOA, then `lz:oapp:wire`, then transfer `owner` and `setDelegate` to a multisig. Multisig addresses go in `.env` (`OWNER_BSC`, `OWNER_ETH`).
 - **wON metadata**: `name = "Wrapped ON"`, `symbol = "wON"`, decimals 18 (OZ ERC20 default).
 

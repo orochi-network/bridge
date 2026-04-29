@@ -64,8 +64,15 @@ const config: HardhatUserConfig = {
                         // toward per-call efficiency over deploy cost.
                         runs: 20_000,
                     },
-                    // metadata.bytecodeHash is left as default ('ipfs').
-                    // Hardhat and Foundry must agree on this for source-verification reproducibility.
+                    // Pinned so Hardhat and Foundry produce identical bytecode.
+                    // Both fields must match across toolchains for Etherscan source
+                    // verification to succeed. 'shanghai' is the highest target
+                    // solc 0.8.22 supports; both Ethereum and BSC mainnet support
+                    // shanghai opcodes (PUSH0).
+                    evmVersion: 'shanghai',
+                    metadata: {
+                        bytecodeHash: 'ipfs',
+                    },
                 },
             },
         ],
