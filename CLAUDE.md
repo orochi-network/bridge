@@ -191,11 +191,27 @@ diff -r /tmp/lz-fresh/examples/oft-adapter/test ./test
 
 If upstream contracts changed, decide case-by-case whether to merge.
 
+## Forked-mainnet dry-run
+
+`test/foundry/DryRun.t.sol` forks BSC + ETH mainnet, deploys both contracts
+against the real ON tokens, and exercises the full bridge flow end-to-end
+(BSC→ETH plain, BSC→ETH with seeded reserve, BSC→ETH composed, ETH→BSC round
+trip, wrap/unwrap/seedReserve, plus explicit lossless-inner-token and decimals
+checks). Real DVN/Executor infrastructure is bypassed — destination delivery
+is simulated by impersonating the LayerZero endpoint, so only the on-chain
+logic of the bridge contracts (and of the real ON tokens) is exercised.
+
+```sh
+RPC_URL_BSC=https://... RPC_URL_ETH=https://... npm run test:dryrun
+```
+
+The test skips cleanly if either RPC env var is unset, so `npm test` stays
+green without RPC credentials. Run the dry-run before every mainnet deploy.
+
 ## Things still to fill in before production deploy
 
 - [ ] `.env` — `PRIVATE_KEY` (deployer), `RPC_URL_BSC`, `RPC_URL_ETH`, `BSCSCAN_API_KEY`, `ETHERSCAN_API_KEY`, `OWNER_BSC`, `OWNER_ETH`.
-- [ ] Confirm ON on BSC `decimals() == 18` and is not fee-on-transfer (forked test).
-- [ ] Confirm pre-existing ETH ON at `0x33f6...B59d` `decimals() == 18` (deploy reverts otherwise).
+- [ ] Run `npm run test:dryrun` against archive RPCs — covers BSC ON lossless transfer, ETH ON 18 decimals, full BSC↔ETH bridge flow, auto-unwrap vs fallback vs composed paths, manual wrap/unwrap/seedReserve.
 - [ ] Confirm Google Cloud DVN is live on both BSC and Ethereum mainnet (check https://docs.layerzero.network/v2/deployments/dvn-addresses).
 - [ ] Decide multisig threshold + signers; have the multisig deployed on both chains.
 - [ ] Decide reserve seeding strategy: how much real ETH ON to commit on day-1, who funds it, what the low-water alert threshold is.

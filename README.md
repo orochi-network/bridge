@@ -84,7 +84,7 @@ cast call 0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d "decimals()(uint8)" \
 # undeliverable until the reserve is empty (fallback to mint).
 ```
 
-If either chain's ON has unexpected behaviour, do not deploy.
+If either chain's ON has unexpected behaviour, do not deploy. The forked dry-run in [Step 5](#step-5--forked-mainnet-dry-run) re-runs both checks programmatically against actual mainnet state.
 
 ## Step 4 — Compile
 
@@ -95,7 +95,27 @@ npm test               # forge test + hardhat test
 
 Both must pass before proceeding.
 
-## Step 5 — Deploy `ONOFTAdapter` on BSC
+## Step 5 — Forked-mainnet dry-run
+
+Before deploying for real, run the full bridge flow end-to-end against forked copies of BSC and Ethereum mainnet. The dry-run deploys both contracts against the **real** ON tokens on each fork and exercises every code path: BSC→ETH plain / seeded reserve / composed, ETH→BSC round trip, and the manual `wrap` / `unwrap` / `seedReserve` surface. It also asserts the Step 3 preconditions (BSC ON is lossless; ETH ON reports 18 decimals) on actual mainnet state. Real DVN/Executor infrastructure is bypassed — destination delivery is simulated by impersonating the LayerZero endpoint, so only the on-chain logic of the bridge contracts and the real ON tokens is exercised.
+
+```sh
+npm run test:dryrun        # picks up RPC_URL_BSC and RPC_URL_ETH from .env
+```
+
+Expect 7 passing tests in ~20 seconds against archive-quality RPCs. The test skips cleanly if either RPC env var is unset, so `npm test` stays green without RPC credentials.
+
+**If any test fails, do not deploy.** Most common failure modes:
+
+| Failing test | What it means |
+|---|---|
+| `test_bsc_innerToken_isLossless` | BSC ON has a transfer fee or rebases. The default `OFTAdapter` cannot handle this; the bridge will leak backing on every send. Stop and reconsider Solution 3. |
+| Constructor reverts with `DecimalsMismatch` | ETH ON does not return 18 decimals. Stop; the OFT decimal model assumes 18. |
+| `test_bridge_*` reverts inside `quoteSend` / `send` | The RPC is missing state needed by the LayerZero endpoint (default send library, DVN config). Use an archive-quality RPC. |
+
+Re-run the dry-run whenever the contracts, the ON token addresses, or the LZ endpoint configuration change. Implementation lives in [`test/foundry/DryRun.t.sol`](./test/foundry/DryRun.t.sol).
+
+## Step 6 — Deploy `ONOFTAdapter` on BSC
 
 ```sh
 npx hardhat lz:deploy --networks bsc --tags ONOFTAdapter
@@ -113,7 +133,7 @@ new ONOFTAdapter(
 
 Address is written to `deployments/bsc/ONOFTAdapter.json`. **Save it** for Etherscan verification.
 
-## Step 6 — Deploy `WrappedON` (wON) on Ethereum
+## Step 7 — Deploy `WrappedON` (wON) on Ethereum
 
 ```sh
 npx hardhat lz:deploy --networks ethereum --tags WrappedON
@@ -133,7 +153,7 @@ new WrappedON(
 
 Address is written to `deployments/ethereum/WrappedON.json`. The constructor reverts with `DecimalsMismatch(actual)` if the reserve token does not report 18 decimals — verify before retrying.
 
-## Step 7 — Verify source code on the explorers
+## Step 8 — Verify source code on the explorers
 
 ```sh
 # BSC
@@ -152,7 +172,7 @@ npx hardhat verify --network ethereum <WON_ADDR> \
 
 > API keys are read from `.env` via the `etherscan` block in `hardhat.config.ts`. Hardhat-verify routes by chainId, so the `mainnet` key is used for Ethereum and the `bsc` key for BSC.
 
-## Step 8 — Wire (set peers + DVNs + executor + enforced options)
+## Step 9 — Wire (set peers + DVNs + executor + enforced options)
 
 This is the single most important step. It applies the entire `layerzero.config.ts` (peers, two required DVNs, confirmations, enforced `LZ_RECEIVE` options) to both contracts in one run.
 
@@ -177,7 +197,7 @@ Expect roughly:
 
 If wire fails partway, **rerun it** — it's idempotent and will pick up where it left off.
 
-## Step 9 — Verify peers and config
+## Step 10 — Verify peers and config
 
 ```sh
 npx hardhat lz:oapp:peers:get --oapp-config layerzero.config.ts
@@ -190,7 +210,7 @@ Both sides should show:
 - Confirmations: 20 BSC→ETH, 15 ETH→BSC
 - Enforced `LZ_RECEIVE` gas: 250,000
 
-## Step 10 — Smoke test with a tiny amount
+## Step 11 — Smoke test with a tiny amount
 
 Bridge a small amount end-to-end **before** transferring ownership. Use a wallet you control on both chains.
 
@@ -232,7 +252,7 @@ After delivery, confirm:
 
 If any of these are off, **do not transfer ownership yet** — investigate.
 
-## Step 11 — Transfer ownership and delegate to multisig
+## Step 12 — Transfer ownership and delegate to multisig
 
 Final step. After this, the deployer EOA has no admin power.
 
