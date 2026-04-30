@@ -42,6 +42,11 @@ if (accounts == null) {
 // https://bscscan.com/address/0x0e4F6209eD984b21EDEA43acE6e09559eD051D48
 const ON_TOKEN_BSC = '0x0e4F6209eD984b21EDEA43acE6e09559eD051D48'
 
+// Address of the pre-existing, non-mintable ON token on Ethereum mainnet.
+// Held in WrappedON as the reserve for auto-unwrap and the manual wrap/unwrap swap.
+// https://etherscan.io/address/0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d
+const ON_TOKEN_ETH = '0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d'
+
 const config: HardhatUserConfig = {
     paths: {
         cache: 'cache/hardhat',
@@ -59,8 +64,15 @@ const config: HardhatUserConfig = {
                         // toward per-call efficiency over deploy cost.
                         runs: 20_000,
                     },
-                    // metadata.bytecodeHash is left as default ('ipfs').
-                    // Hardhat and Foundry must agree on this for source-verification reproducibility.
+                    // Pinned so Hardhat and Foundry produce identical bytecode.
+                    // Both fields must match across toolchains for Etherscan source
+                    // verification to succeed. 'shanghai' is the highest target
+                    // solc 0.8.22 supports; both Ethereum and BSC mainnet support
+                    // shanghai opcodes (PUSH0).
+                    evmVersion: 'shanghai',
+                    metadata: {
+                        bytecodeHash: 'ipfs',
+                    },
                 },
             },
         ],
@@ -82,6 +94,9 @@ const config: HardhatUserConfig = {
             // RPC_URL_ETH=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
             url: process.env.RPC_URL_ETH || 'https://eth.llamarpc.com',
             accounts,
+            wrappedOft: {
+                reserveAddress: ON_TOKEN_ETH,
+            },
         },
         hardhat: {
             // Need this for testing because TestHelperOz5.sol is exceeding the compiled contract size limit

@@ -5,7 +5,7 @@ LayerZero V2 OFT bridge for the **ON** token.
 | Chain | Contract | Token | Role |
 |-------|----------|-------|------|
 | **BSC** mainnet | `ONOFTAdapter` | wraps existing [`ON`](https://bscscan.com/address/0x0e4F6209eD984b21EDEA43acE6e09559eD051D48) at `0x0e4F...1D48` | Locks ON on outbound; releases on inbound. |
-| **Ethereum** mainnet | `WrappedON` | mints/burns `wON` ("Wrapped ON") | Mints wON on inbound; burns on outbound. |
+| **Ethereum** mainnet | `WrappedON` | mints/burns `wON` ("Wrapped ON"); holds `ON` reserve | Auto-unwraps to real ON when reserve covers, else mints wON. Manual `wrap` / `unwrap` / `seedReserve`. |
 
 Architecture rationale and the rejected alternatives are documented in [CLAUDE.md](./CLAUDE.md).
 
@@ -50,9 +50,13 @@ OWNER_ETH=0x<multisig that should own WrappedON (wON)>
 
 > Use `MNEMONIC=` instead of `PRIVATE_KEY` if you prefer; either works.
 
-## Step 3 — Sanity-check the BSC ON token
+## Step 3 — Sanity-check both ON tokens
 
-The `ONOFTAdapter` model assumes the inner token is **lossless** and **18 decimals**. Confirm before deploying:
+The bridge has two preconditions enforced or assumed at deploy time. **Both must hold** or the bridge will misbehave or fail to deploy.
+
+### 3a. BSC ON (locked by `ONOFTAdapter`)
+
+The `ONOFTAdapter` model assumes the inner token is **lossless** and **18 decimals**. Lossless is _not_ enforced on-chain — confirm by hand:
 
 ```sh
 # Decimals must be 18
@@ -66,6 +70,22 @@ cast call 0x0e4F6209eD984b21EDEA43acE6e09559eD051D48 "decimals()(uint8)" \
 
 If `decimals` ≠ 18 or the token has a transfer tax, **do not deploy**. Open an issue and re-evaluate.
 
+### 3b. ETH ON (held as the unwrap reserve by `WrappedON`)
+
+`WrappedON`'s constructor reverts with `DecimalsMismatch(actual)` if the reserve token does not return 18 — that's enforced. Fee-on-transfer behaviour is **not** caught at construction, but `wrap` / `seedReserve` revert with `UnexpectedTransferAmount` at call time if the actual transferred amount differs from the requested amount.
+
+```sh
+# Decimals must be 18 (enforced)
+cast call 0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d "decimals()(uint8)" \
+  --rpc-url $RPC_URL_ETH
+
+# Same fee/rebase sanity check as 3a — the auto-unwrap path will revert
+# inside _credit if a transfer charges fees, leaving the LZ message
+# undeliverable until the reserve is empty (fallback to mint).
+```
+
+If either chain's ON has unexpected behaviour, do not deploy. The forked dry-run in [Step 5](#step-5--forked-mainnet-dry-run) re-runs both checks programmatically against actual mainnet state.
+
 ## Step 4 — Compile
 
 ```sh
@@ -75,7 +95,27 @@ npm test               # forge test + hardhat test
 
 Both must pass before proceeding.
 
-## Step 5 — Deploy `ONOFTAdapter` on BSC
+## Step 5 — Forked-mainnet dry-run
+
+Before deploying for real, run the full bridge flow end-to-end against forked copies of BSC and Ethereum mainnet. The dry-run deploys both contracts against the **real** ON tokens on each fork and exercises every code path: BSC→ETH plain / seeded reserve / composed, ETH→BSC round trip, and the manual `wrap` / `unwrap` / `seedReserve` surface. It also asserts the Step 3 preconditions (BSC ON is lossless; ETH ON reports 18 decimals) on actual mainnet state. Real DVN/Executor infrastructure is bypassed — destination delivery is simulated by impersonating the LayerZero endpoint, so only the on-chain logic of the bridge contracts and the real ON tokens is exercised.
+
+```sh
+npm run test:dryrun        # picks up RPC_URL_BSC and RPC_URL_ETH from .env
+```
+
+Expect 7 passing tests in ~20 seconds against archive-quality RPCs. The test skips cleanly if either RPC env var is unset, so `npm test` stays green without RPC credentials.
+
+**If any test fails, do not deploy.** Most common failure modes:
+
+| Failing test | What it means |
+|---|---|
+| `test_bsc_innerToken_isLossless` | BSC ON has a transfer fee or rebases. The default `OFTAdapter` cannot handle this; the bridge will leak backing on every send. Stop and reconsider Solution 3. |
+| Constructor reverts with `DecimalsMismatch` | ETH ON does not return 18 decimals. Stop; the OFT decimal model assumes 18. |
+| `test_bridge_*` reverts inside `quoteSend` / `send` | The RPC is missing state needed by the LayerZero endpoint (default send library, DVN config). Use an archive-quality RPC. |
+
+Re-run the dry-run whenever the contracts, the ON token addresses, or the LZ endpoint configuration change. Implementation lives in [`test/foundry/DryRun.t.sol`](./test/foundry/DryRun.t.sol).
+
+## Step 6 — Deploy `ONOFTAdapter` on BSC
 
 ```sh
 npx hardhat lz:deploy --networks bsc --tags ONOFTAdapter
@@ -93,7 +133,7 @@ new ONOFTAdapter(
 
 Address is written to `deployments/bsc/ONOFTAdapter.json`. **Save it** for Etherscan verification.
 
-## Step 6 — Deploy `WrappedON` (wON) on Ethereum
+## Step 7 — Deploy `WrappedON` (wON) on Ethereum
 
 ```sh
 npx hardhat lz:deploy --networks ethereum --tags WrappedON
@@ -106,13 +146,14 @@ new WrappedON(
     "Wrapped ON",                                         // name
     "wON",                                                // symbol
     0x1a44076050125825900e736c501f859c50fE728c,           // LayerZero EndpointV2
-    deployer                                              // initial owner + delegate
+    deployer,                                             // initial owner + delegate
+    0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d            // pre-existing ETH ON used as the unwrap reserve
 )
 ```
 
-Address is written to `deployments/ethereum/WrappedON.json`.
+Address is written to `deployments/ethereum/WrappedON.json`. The constructor reverts with `DecimalsMismatch(actual)` if the reserve token does not report 18 decimals — verify before retrying.
 
-## Step 7 — Verify source code on the explorers
+## Step 8 — Verify source code on the explorers
 
 ```sh
 # BSC
@@ -125,12 +166,13 @@ npx hardhat verify --network bsc <ADAPTER_ADDR> \
 npx hardhat verify --network ethereum <WON_ADDR> \
   "Wrapped ON" "wON" \
   "0x1a44076050125825900e736c501f859c50fE728c" \
-  "<DEPLOYER_ADDR>"
+  "<DEPLOYER_ADDR>" \
+  "0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d"
 ```
 
 > API keys are read from `.env` via the `etherscan` block in `hardhat.config.ts`. Hardhat-verify routes by chainId, so the `mainnet` key is used for Ethereum and the `bsc` key for BSC.
 
-## Step 8 — Wire (set peers + DVNs + executor + enforced options)
+## Step 9 — Wire (set peers + DVNs + executor + enforced options)
 
 This is the single most important step. It applies the entire `layerzero.config.ts` (peers, two required DVNs, confirmations, enforced `LZ_RECEIVE` options) to both contracts in one run.
 
@@ -151,11 +193,11 @@ Expect roughly:
 - 1× `setPeer` on Ethereum (peer = adapter on BSC)
 - 1× `setConfig` on each side for **send** ULN (DVN = LayerZero Labs + Google Cloud, confirmations)
 - 1× `setConfig` on each side for **receive** ULN
-- 1× `setEnforcedOptions` on each side (200k `LZ_RECEIVE` gas)
+- 1× `setEnforcedOptions` on each side (250k `LZ_RECEIVE` gas)
 
 If wire fails partway, **rerun it** — it's idempotent and will pick up where it left off.
 
-## Step 9 — Verify peers and config
+## Step 10 — Verify peers and config
 
 ```sh
 npx hardhat lz:oapp:peers:get --oapp-config layerzero.config.ts
@@ -166,9 +208,9 @@ Both sides should show:
 - Peer correctly set to the counterpart contract
 - Required DVNs: 2 (LayerZero Labs + Google Cloud)
 - Confirmations: 20 BSC→ETH, 15 ETH→BSC
-- Enforced `LZ_RECEIVE` gas: 200,000
+- Enforced `LZ_RECEIVE` gas: 250,000
 
-## Step 10 — Smoke test with a tiny amount
+## Step 11 — Smoke test with a tiny amount
 
 Bridge a small amount end-to-end **before** transferring ownership. Use a wallet you control on both chains.
 
@@ -210,7 +252,7 @@ After delivery, confirm:
 
 If any of these are off, **do not transfer ownership yet** — investigate.
 
-## Step 11 — Transfer ownership and delegate to multisig
+## Step 12 — Transfer ownership and delegate to multisig
 
 Final step. After this, the deployer EOA has no admin power.
 
@@ -238,6 +280,39 @@ cast call <WON_ADDR>     "owner()(address)" --rpc-url $RPC_URL_ETH   # → $OWNE
 🎉 The bridge is live.
 
 ---
+
+## Reserve operations (operator)
+
+`WrappedON` exposes three reserve-management entrypoints. Anyone can call them; the owner does **not** have a privileged path to drain the reserve.
+
+| Function | What it does | Who calls |
+|----------|--------------|-----------|
+| `seedReserve(amount)` | Pulls `amount` real ON from caller into the reserve. **Does not** mint wON. **One-way subsidy**: the donor gets nothing back; the funds can be paid out to any wON holder via `unwrap` or to any inbound bridge user via auto-unwrap. | Treasury — only when the donation is genuinely intended as overcollateralization, not as a recoverable deposit. For a recoverable deposit use `wrap` instead. |
+| `wrap(amount)` | Pulls `amount` real ON from caller, mints `amount` wON to caller. 1:1. Reverts with `UnexpectedTransferAmount` if the ON token is fee-on-transfer. | Legacy ETH ON holders bridging out, or the operator depositing recoverable liquidity. Caller must `approve` first. |
+| `unwrap(amount)` | Burns `amount` wON from caller, transfers `amount` real ON to caller. 1:1. Reverts with `ReserveInsufficient` if reserve is dry. | Any wON holder once the reserve has been refilled. |
+
+```sh
+# Seed the reserve with 100,000 ON from a treasury wallet
+cast send 0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d \
+  "approve(address,uint256)" <WON_ADDR> 100000000000000000000000 \
+  --private-key $TREASURY_KEY --rpc-url $RPC_URL_ETH
+cast send <WON_ADDR> "seedReserve(uint256)" 100000000000000000000000 \
+  --private-key $TREASURY_KEY --rpc-url $RPC_URL_ETH
+
+# Read current reserve
+cast call <WON_ADDR> "reserve()(uint256)" --rpc-url $RPC_URL_ETH
+
+# User-initiated unwrap (must hold wON)
+cast send <WON_ADDR> "unwrap(uint256)" <amount_wei> \
+  --private-key $USER_KEY --rpc-url $RPC_URL_ETH
+```
+
+**Operator obligations:** sustained net BSC→ETH flow drains the reserve. Off-chain monitoring should alert when `reserve()` falls below an agreed threshold. Refill paths: bridge wON ETH→BSC to unlock real ON on BSC and acquire fresh ETH ON off-chain, or commit treasury ON directly via `seedReserve`. There is no autonomous on-chain refill.
+
+**Known limitations:**
+- **Front-running grief.** A wON holder can `unwrap` while a user's BSC→ETH bridge is in flight (~60s LZ delivery), forcing the inbound user onto the wON fallback. Auto-unwrap is best-effort, not guaranteed.
+- **ON pause/blacklist.** If the ON token is paused or blacklists the recipient, the auto-unwrap branch reverts inside `_credit`, making the LayerZero message undeliverable until the lock lifts. Operators should monitor delivery health.
+- **Composed messages.** `SEND_AND_CALL` always mints wON, even when the reserve covers the amount. The compose handler downstream needs wON for its own logic; auto-unwrap would deliver real ON instead. Recipients of composed messages can call `unwrap` separately.
 
 ## End-user send flow (for integrators)
 
@@ -275,3 +350,9 @@ Reverse direction (ETH → BSC) is identical against `wON` — no `approve` need
 | wON balance on ETH doesn't match expected amount | Decimal mismatch — almost certainly impossible since both are 18, but if a future ON deploys with different decimals it WILL silently lose dust | Check `decimalConversionRate()` on both contracts |
 
 For deep debugging see [LayerZero V2 docs — Debugging](https://docs.layerzero.network/v2/developers/evm/troubleshooting/debugging-messages).
+
+---
+
+## License
+
+Apache-2.0. See [`LICENSE`](./LICENSE).

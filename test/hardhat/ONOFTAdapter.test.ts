@@ -18,6 +18,7 @@ describe('ONOFTAdapter Test', function () {
     let ownerB: SignerWithAddress
     let endpointOwner: SignerWithAddress
     let token: Contract
+    let ethReserveToken: Contract
     let myOFTAdapter: Contract
     let myOFTB: Contract
     let mockEndpointV2A: Contract
@@ -57,10 +58,19 @@ describe('ONOFTAdapter Test', function () {
         mockEndpointV2B = await EndpointV2Mock.deploy(eidB)
 
         token = await ERC20Mock.deploy('Token', 'TOKEN')
+        // Reserve token on the wrapper-side chain. Empty reserve in this test, so
+        // every inbound message falls back to minting wON.
+        ethReserveToken = await ERC20Mock.deploy('Reserve ON', 'ON')
 
         // Deploying two instances of WrappedON contract with different identifiers and linking them to the mock LZEndpoint
         myOFTAdapter = await ONOFTAdapter.deploy(token.address, mockEndpointV2A.address, ownerA.address)
-        myOFTB = await WrappedON.deploy('bOFT', 'bOFT', mockEndpointV2B.address, ownerB.address)
+        myOFTB = await WrappedON.deploy(
+            'bOFT',
+            'bOFT',
+            mockEndpointV2B.address,
+            ownerB.address,
+            ethReserveToken.address
+        )
 
         // Setting destination endpoints in the LZEndpoint mock for each WrappedON instance
         await mockEndpointV2A.setDestLzEndpoint(myOFTB.address, mockEndpointV2B.address)
