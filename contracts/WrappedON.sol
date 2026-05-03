@@ -7,7 +7,6 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { OFTMsgCodec } from "@layerzerolabs/oft-evm/contracts/libs/OFTMsgCodec.sol";
-import { OFTComposeMsgCodec } from "@layerzerolabs/oft-evm/contracts/libs/OFTComposeMsgCodec.sol";
 import { Origin } from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
 
 /**
@@ -40,10 +39,17 @@ import { Origin } from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/I
 contract WrappedON is OFT {
     using SafeERC20 for IERC20;
     using OFTMsgCodec for bytes;
-    using OFTMsgCodec for bytes32;
 
     /// @notice Pre-existing, non-mintable ON ERC20 used as the reserve asset.
     IERC20 public immutable ON;
+
+    /// @dev Set in `_lzReceive` for the duration of one inbound message so that
+    ///      `_credit` (called by `super._lzReceive`) can route composed messages
+    ///      to the mint path without re-implementing the upstream lzReceive logic.
+    ///      Reset to false at the end of `_lzReceive`. Not exposed externally.
+    ///      A regular storage slot (not transient) because evm_version=shanghai
+    ///      does not include EIP-1153.
+    bool private _composedFlag;
 
     event AutoUnwrap(address indexed to, uint256 amount);
     event UnwrapFallbackToMint(address indexed to, uint256 amount);
@@ -122,24 +128,45 @@ contract WrappedON is OFT {
         emit ReserveSeeded(msg.sender, received);
     }
 
-    /// @dev Override of OFT's default `_credit` (which always mints). Auto-unwraps
-    ///      when the reserve covers the full amount; falls back to minting wON
-    ///      otherwise. Single payout per message — never split.
-    /// @dev The auto-unwrap branch performs a pre/post balance-delta check on
-    ///      both sides of the transfer. If the inner ON token ever ships
-    ///      fee-on-transfer or rebasing semantics (recipient receives less than
-    ///      requested, or the reserve drops by an unexpected amount), the call
-    ///      reverts with `UnexpectedTransferAmount` rather than silently
-    ///      under-paying the recipient. The LZ message is then retryable; once
-    ///      the reserve is drained below `_amountLD` (e.g. via `unwrap`), the
-    ///      retry will route through the mint fallback. Operators must monitor
-    ///      and respond.
+    /// @dev Override of OFTCore._lzReceive. Sets a per-message flag the `_credit`
+    ///      override consults to force the mint path on composed messages, then
+    ///      delegates to super so the upstream compose dispatch and `OFTReceived`
+    ///      emission remain a single source of truth. The flag is cleared on the
+    ///      way out so it cannot leak across messages.
+    function _lzReceive(
+        Origin calldata _origin,
+        bytes32 _guid,
+        bytes calldata _message,
+        address _executor,
+        bytes calldata _extraData
+    ) internal virtual override {
+        _composedFlag = _message.isComposed();
+        super._lzReceive(_origin, _guid, _message, _executor, _extraData);
+        _composedFlag = false;
+    }
+
+    /// @dev Override of OFT's default `_credit` (which always mints). Branches:
+    ///      - Composed message (`_composedFlag` set): always mint wON. The compose
+    ///        handler downstream operates on `amountReceivedLD` assuming it was
+    ///        credited as wON; auto-unwrapping would deliver real ON instead.
+    ///      - Plain message + reserve covers the request: transfer real ON, no
+    ///        wON minted. Pre/post balance-delta-checks on both sides defend
+    ///        against fee-on-transfer or rebasing on the reserve token; on
+    ///        mismatch the call reverts and the LZ message becomes retryable.
+    ///      - Plain message + reserve insufficient: mint wON (recipient can later
+    ///        `unwrap` once the reserve is refilled).
+    ///      Single payout per message — never split.
     function _credit(
         address _to,
         uint256 _amountLD,
         uint32 /*_srcEid*/
     ) internal virtual override returns (uint256 amountReceivedLD) {
         if (_to == address(0x0)) _to = address(0xdead);
+
+        if (_composedFlag) {
+            _mint(_to, _amountLD);
+            return _amountLD;
+        }
 
         uint256 reserveBefore = ON.balanceOf(address(this));
         if (reserveBefore >= _amountLD) {
@@ -156,38 +183,5 @@ contract WrappedON is OFT {
             emit UnwrapFallbackToMint(_to, _amountLD);
         }
         return _amountLD;
-    }
-
-    /// @dev Override of OFTCore._lzReceive. For composed messages, force the mint
-    ///      path — the compose handler downstream will operate on `amountReceivedLD`
-    ///      assuming it received wON, so we must actually deliver wON. Plain
-    ///      messages route through `_credit` (super) where auto-unwrap can fire.
-    function _lzReceive(
-        Origin calldata _origin,
-        bytes32 _guid,
-        bytes calldata _message,
-        address _executor,
-        bytes calldata _extraData
-    ) internal virtual override {
-        if (!_message.isComposed()) {
-            super._lzReceive(_origin, _guid, _message, _executor, _extraData);
-            return;
-        }
-
-        address toAddress = _message.sendTo().bytes32ToAddress();
-        uint256 amountLD = _toLD(_message.amountSD());
-        if (toAddress == address(0x0)) toAddress = address(0xdead);
-
-        _mint(toAddress, amountLD);
-        emit UnwrapFallbackToMint(toAddress, amountLD);
-
-        bytes memory composeMsg = OFTComposeMsgCodec.encode(
-            _origin.nonce,
-            _origin.srcEid,
-            amountLD,
-            _message.composeMsg()
-        );
-        endpoint.sendCompose(toAddress, _guid, 0, composeMsg);
-        emit OFTReceived(_guid, _origin.srcEid, toAddress, amountLD);
     }
 }
