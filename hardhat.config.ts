@@ -16,6 +16,7 @@ import { EndpointId } from '@layerzerolabs/lz-definitions'
 
 import './type-extensions'
 import './tasks/sendOFT'
+import './tasks/handoff'
 
 // Set your preferred authentication method
 //
