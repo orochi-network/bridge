@@ -125,6 +125,15 @@ contract WrappedON is OFT {
     /// @dev Override of OFT's default `_credit` (which always mints). Auto-unwraps
     ///      when the reserve covers the full amount; falls back to minting wON
     ///      otherwise. Single payout per message — never split.
+    /// @dev The auto-unwrap branch performs a pre/post balance-delta check on
+    ///      both sides of the transfer. If the inner ON token ever ships
+    ///      fee-on-transfer or rebasing semantics (recipient receives less than
+    ///      requested, or the reserve drops by an unexpected amount), the call
+    ///      reverts with `UnexpectedTransferAmount` rather than silently
+    ///      under-paying the recipient. The LZ message is then retryable; once
+    ///      the reserve is drained below `_amountLD` (e.g. via `unwrap`), the
+    ///      retry will route through the mint fallback. Operators must monitor
+    ///      and respond.
     function _credit(
         address _to,
         uint256 _amountLD,
@@ -132,8 +141,15 @@ contract WrappedON is OFT {
     ) internal virtual override returns (uint256 amountReceivedLD) {
         if (_to == address(0x0)) _to = address(0xdead);
 
-        if (ON.balanceOf(address(this)) >= _amountLD) {
+        uint256 reserveBefore = ON.balanceOf(address(this));
+        if (reserveBefore >= _amountLD) {
+            uint256 toBefore = ON.balanceOf(_to);
             ON.safeTransfer(_to, _amountLD);
+            uint256 received = ON.balanceOf(_to) - toBefore;
+            uint256 spent = reserveBefore - ON.balanceOf(address(this));
+            if (received != _amountLD || spent != _amountLD) {
+                revert UnexpectedTransferAmount(_amountLD, received);
+            }
             emit AutoUnwrap(_to, _amountLD);
         } else {
             _mint(_to, _amountLD);
