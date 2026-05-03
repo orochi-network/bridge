@@ -6,6 +6,11 @@ import { OFTMock } from "../mocks/OFTMock.sol";
 import { OFTAdapterMock } from "../mocks/OFTAdapterMock.sol";
 import { ERC20Mock } from "../mocks/ERC20Mock.sol";
 import { OFTComposerMock } from "../mocks/OFTComposerMock.sol";
+import { ONOFTAdapterMock } from "../../contracts/mocks/ONOFTAdapterMock.sol";
+import { ONOFTAdapter } from "../../contracts/ONOFTAdapter.sol";
+
+// OZ imports
+import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 // OApp imports
 import { IOAppOptionsType3, EnforcedOptionParam } from "@layerzerolabs/oapp-evm/contracts/oapp/libs/OAppOptionsType3.sol";
@@ -176,5 +181,69 @@ contract ONOFTAdapterTest is TestHelperOz5 {
         assertEq(composer.extraData(), composerMsg_); // default to setting the extraData to the message as well to test
     }
 
-    // TODO import the rest of oft tests?
+    // -------------------------------------------------------------------------
+    // fee-on-transfer guard on _debit
+    // -------------------------------------------------------------------------
+
+    /// @dev Confirms the override added in `ONOFTAdapter._debit` refuses to
+    ///      under-collateralise the destination chain when the inner token
+    ///      ships fee-on-transfer behaviour. Without the guard, the adapter
+    ///      reports `amountSentLD` to LayerZero while having received less,
+    ///      breaking the conservation invariant. With it, the send reverts.
+    function test_debit_revertsOnFeeOnTransferInnerToken() public {
+        FeeOnTransferERC20 feeOn = new FeeOnTransferERC20();
+        ONOFTAdapterMock fotAdapter = ONOFTAdapterMock(
+            _deployOApp(
+                type(ONOFTAdapterMock).creationCode,
+                abi.encode(address(feeOn), address(endpoints[aEid]), address(this))
+            )
+        );
+
+        feeOn.mint(userA, 100 ether);
+
+        bytes memory options = OptionsBuilder.newOptions().addExecutorLzReceiveOption(200000, 0);
+        SendParam memory sendParam = SendParam(
+            bEid,
+            addressToBytes32(userB),
+            100 ether,
+            100 ether,
+            options,
+            "",
+            ""
+        );
+        // quoteSend would normally be called first to size native fee; the
+        // FoT detection happens during `send()` in `_debit` and reverts
+        // before the message is dispatched, so the fee value doesn't matter.
+        MessagingFee memory fee = MessagingFee(0, 0);
+
+        vm.startPrank(userA);
+        feeOn.approve(address(fotAdapter), 100 ether);
+        vm.expectRevert(
+            abi.encodeWithSelector(ONOFTAdapter.UnexpectedTransferAmount.selector, uint256(100 ether), uint256(99 ether))
+        );
+        fotAdapter.send{ value: fee.nativeFee }(sendParam, fee, payable(userA));
+        vm.stopPrank();
+    }
+}
+
+/// @dev 18-decimal ERC20 that burns 1% on every user-to-user transfer,
+///      matching the FoT helper used in WrappedON.t.sol. Kept duplicated
+///      rather than centralised because both test files compile in
+///      isolation; this is a self-contained helper.
+contract FeeOnTransferERC20 is ERC20 {
+    constructor() ERC20("Fee On Transfer", "FOT") {}
+
+    function mint(address _to, uint256 _amount) external {
+        _mint(_to, _amount);
+    }
+
+    function _update(address from, address to, uint256 value) internal override {
+        if (from != address(0) && to != address(0)) {
+            uint256 fee = value / 100;
+            super._update(from, address(0xdead), fee);
+            super._update(from, to, value - fee);
+        } else {
+            super._update(from, to, value);
+        }
+    }
 }
