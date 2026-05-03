@@ -12,6 +12,15 @@ const deploy: DeployFunction = async (hre) => {
 
     assert(deployer, 'Missing named deployer account')
 
+    // Hard guard: this is a test mock and must never land on a live network.
+    // `hre.network.live` is true for any network not flagged `live: false`
+    // (only the local hardhat network is non-live by default), so a stray
+    // `--tags MyERC20Mock --network bsc` cannot waste mainnet gas on it.
+    if (hre.network.live) {
+        console.warn(`Refusing to deploy ${contractName} on live network ${hre.network.name}.`)
+        return
+    }
+
     console.log(`Network: ${hre.network.name}`)
     console.log(`Deployer: ${deployer}`)
 
