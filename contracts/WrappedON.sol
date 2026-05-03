@@ -146,6 +146,12 @@ contract WrappedON is OFT {
     }
 
     /// @dev Override of OFT's default `_credit` (which always mints). Branches:
+    ///      - Recipient is `address(0)` or `address(this)`: redirect to `0xdead`
+    ///        and force the mint path. Sending real reserve to either is either
+    ///        a permanent burn (`0xdead`) or a free `seedReserve` paid by the
+    ///        BSC sender (`address(this)`); minting wON instead keeps the
+    ///        stranded amount visible in `totalSupply` and avoids leaking
+    ///        reserve.
     ///      - Composed message (`_composedFlag` set): always mint wON. The compose
     ///        handler downstream operates on `amountReceivedLD` assuming it was
     ///        credited as wON; auto-unwrapping would deliver real ON instead.
@@ -161,10 +167,15 @@ contract WrappedON is OFT {
         uint256 _amountLD,
         uint32 /*_srcEid*/
     ) internal virtual override returns (uint256 amountReceivedLD) {
-        if (_to == address(0x0)) _to = address(0xdead);
+        bool rerouted = false;
+        if (_to == address(0x0) || _to == address(this)) {
+            _to = address(0xdead);
+            rerouted = true;
+        }
 
-        if (_composedFlag) {
+        if (_composedFlag || rerouted) {
             _mint(_to, _amountLD);
+            if (rerouted && !_composedFlag) emit UnwrapFallbackToMint(_to, _amountLD);
             return _amountLD;
         }
 
