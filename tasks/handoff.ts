@@ -74,15 +74,19 @@ task('lz:oapp:handoff', 'Transfer delegate then ownership of an OApp to the prod
         )
 
         const currentOwner: string = await oapp.owner()
-        if (currentOwner.toLowerCase() !== deployer.toLowerCase()) {
-            throw new Error(
-                `Refusing to hand off: ${args.contract} owner is ${currentOwner}, expected deployer ${deployer}. ` +
-                    `Either the handoff already happened or the deployer is not the current owner.`
-            )
-        }
+        // Idempotency: if the handoff already completed, exit cleanly so the
+        // task is safe to re-run from operator automation. This must run
+        // before the deployer-ownership guard, which would otherwise throw
+        // for the (correct) post-handoff state where owner is the multisig.
         if (currentOwner.toLowerCase() === multisig.toLowerCase()) {
             console.log(`Owner already equals multisig (${multisig}); nothing to do.`)
             return
+        }
+        if (currentOwner.toLowerCase() !== deployer.toLowerCase()) {
+            throw new Error(
+                `Refusing to hand off: ${args.contract} owner is ${currentOwner}, expected deployer ${deployer} or multisig ${multisig}. ` +
+                    `The contract is owned by an unexpected address — investigate before proceeding.`
+            )
         }
 
         console.log(`Network:        ${network.name}`)
