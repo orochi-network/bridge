@@ -46,10 +46,23 @@ const ethContract: OmniPointHardhat = {
 //   - BSC inbound: 250k. Plain `safeTransfer` unlock; no compose dispatch.
 // Unused gas is refunded by the executor; over-budgeting is a safety knob, not a cost.
 //
+// msgType 1 = SEND (plain transfer); msgType 2 = SEND_AND_CALL (composed transfer).
+// Both message types get the same minimum LZ_RECEIVE gas so that integrators who
+// send a SEND_AND_CALL without remembering to add lzReceive options still land
+// in a correctly-gassed _lzReceive. The lzCompose gas budget is NOT enforced
+// here because it is fully application-specific; integrators must supply their
+// own addExecutorLzComposeOption when using composeMsg.
+//
 // To learn more, see https://docs.layerzero.network/v2/concepts/applications/oapp-standard#execution-options-and-enforced-settings
 const ETH_ENFORCED_OPTIONS: OAppEnforcedOption[] = [
     {
         msgType: 1,
+        optionType: ExecutorOptionType.LZ_RECEIVE,
+        gas: 300000,
+        value: 0,
+    },
+    {
+        msgType: 2, // SEND_AND_CALL
         optionType: ExecutorOptionType.LZ_RECEIVE,
         gas: 300000,
         value: 0,
@@ -59,6 +72,12 @@ const ETH_ENFORCED_OPTIONS: OAppEnforcedOption[] = [
 const BSC_ENFORCED_OPTIONS: OAppEnforcedOption[] = [
     {
         msgType: 1,
+        optionType: ExecutorOptionType.LZ_RECEIVE,
+        gas: 250000,
+        value: 0,
+    },
+    {
+        msgType: 2, // SEND_AND_CALL
         optionType: ExecutorOptionType.LZ_RECEIVE,
         gas: 250000,
         value: 0,

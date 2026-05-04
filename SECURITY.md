@@ -78,12 +78,17 @@ fix references the commit that lands it.
   then `super._lzReceive` is called and the composed path is implemented
   inside `_credit`. Single source of truth, no duplicated event emission.
 
-#### M2 — Enforced executor gas was symmetric (250k both directions)
-- **Where:** `layerzero.config.ts` applied 250k to both legs. Composed
-  inbound on ETH (`_mint` + `endpoint.sendCompose` + LZ plumbing) realistically
-  consumes ~200–220k, leaving only ~30k slack.
-- **Fix (this branch):** options are split: BSC leg keeps 250k (plain
-  unlock), ETH leg raised to 300k for the composed-inbound headroom.
+#### M2 — Enforced executor gas was symmetric and missing for composed sends
+- **Where:** `layerzero.config.ts` applied 250k to both legs and only
+  configured `msgType: 1` (SEND). Composed inbound on ETH (`_mint` +
+  `endpoint.sendCompose` + LZ plumbing) realistically consumes ~200–220k,
+  leaving only ~30k slack on the symmetric budget. Worse, `msgType: 2`
+  (SEND_AND_CALL) had no enforced `LZ_RECEIVE` gas at all — the very budget
+  the 300k figure was sized for never applied to the path that needed it.
+- **Fix (this branch):** options are split per leg AND per msgType. BSC leg
+  is 250k (plain unlock); ETH leg is 300k for the composed-inbound headroom.
+  Both `msgType: 1` and `msgType: 2` are enforced. `lzCompose` gas is
+  intentionally left unenforced (application-specific).
 
 #### M3 — DVN config 2-required + 0-optional (operator decision)
 - **Where:** `layerzero.config.ts` declares `requiredDVNs = [LayerZero Labs,
@@ -93,14 +98,24 @@ fix references the commit that lands it.
   DVN provides identical security at materially better liveness for one
   extra DVN fee per message.
 
-#### M4 — `_credit` self-recipient and zero-recipient handling
-- **Where:** `_credit` only redirected `address(0)` to `0xdead`; a recipient
-  of `address(this)` was reachable as a free `seedReserve`, and the
-  redirected zero-address case in the auto-unwrap branch burned real reserve
-  to `0xdead` permanently.
-- **Fix (this branch):** both `_to == address(0)` and `_to == address(this)`
-  are routed to `0xdead`, and when redirected the path mints wON instead of
-  burning real reserve. Real reserve is never sent to a dead recipient.
+#### M4 — `_credit` self-recipient and zero-recipient handling on both sides
+- **Where:** Asymmetric on both contracts. `WrappedON._credit` only
+  redirected `address(0)` to `0xdead`; a recipient of `address(this)` was
+  reachable as a free `seedReserve` paid by the BSC sender, and the
+  redirected zero-address case in the auto-unwrap branch burned real
+  reserve to `0xdead` permanently. `ONOFTAdapter._credit` (inherited)
+  guarded neither: a `_to == address(0)` recipient made the LZ message
+  permanently undeliverable (OZ ERC20 rejects zero-address `safeTransfer`),
+  and a `_to == address(adapter)` recipient was a self-transfer no-op that
+  silently burned the user's funds while the LZ message was marked
+  delivered (wON burned on ETH, ON still locked on BSC — conservation
+  break).
+- **Fix (this branch):** both contracts now redirect `address(0)` and
+  `address(this)` to `address(0xdead)`. On `WrappedON._credit` the
+  redirected path forces the mint branch so real reserve is never sent to
+  a dead recipient. On `ONOFTAdapter._credit` the inner ON is transferred
+  to `0xdead`, which is visible on-chain as a burn rather than a stuck or
+  silently-lost message.
 
 ### LOW / cleanup
 
