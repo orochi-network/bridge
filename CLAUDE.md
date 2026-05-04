@@ -89,7 +89,7 @@ Both Hardhat and Foundry are kept. Hardhat does deploy + wire; Foundry does fast
 Hardhat and Foundry must produce **identical bytecode** for Etherscan / BSCScan source verification to succeed against either toolchain. The following are pinned in both `foundry.toml` and `hardhat.config.ts`:
 
 - `solc` / `solidity.version` = `0.8.34`
-- `evm_version` / `evmVersion` = `'shanghai'` (deliberately conservative — solc 0.8.34 supports newer EVM targets, but shanghai is the floor for both Ethereum and BSC mainnet, including PUSH0; staying here keeps BSC bytecode portable)
+- `evm_version` / `evmVersion` = `'cancun'` (Ethereum Cancun shipped 2024-03-13; BSC Tycho hardfork shipped Cancun-equivalent semantics including EIP-1153 on 2024-06-20 via BEP-343, so PUSH0 + TLOAD/TSTORE are safe on both mainnets — `WrappedON._composedFlag` uses transient storage)
 - `bytecode_hash` / `metadata.bytecodeHash` = `'ipfs'`
 - `optimizer_runs` / `optimizer.runs` = `20_000`
 
@@ -146,6 +146,10 @@ npx hardhat lz:oapp:wire --oapp-config layerzero.config.ts
 # Verify peers
 npx hardhat lz:oapp:peers:get --oapp-config layerzero.config.ts
 
+# Hand off owner + delegate to the multisig (atomic, idempotent)
+npx hardhat lz:oapp:handoff --network bsc --contract ONOFTAdapter
+npx hardhat lz:oapp:handoff --network ethereum --contract WrappedON
+
 # Send (BSC → ETH)
 npx hardhat lz:oft:send --network bsc --src-eid 30102 --dst-eid 30101 --to 0xRECIPIENT --amount 1.0
 # Send (ETH → BSC)
@@ -158,9 +162,10 @@ npx hardhat lz:oft:send --network ethereum --src-eid 30101 --dst-eid 30102 --to 
 2. ✅ Run `lz:oapp:wire` — confirm both peers, DVN config, and enforced options applied.
 3. ✅ Run `lz:oapp:peers:get` to confirm bidirectional peers.
 4. ✅ Send a small test amount BSC→ETH and ETH→BSC; confirm balances move losslessly.
-5. ✅ `transferOwnership(OWNER_BSC)` on `ONOFTAdapter`, `transferOwnership(OWNER_ETH)` on `WrappedON`.
-6. ✅ `setDelegate(OWNER_BSC)` and `setDelegate(OWNER_ETH)` (LayerZero config authority).
-7. ✅ Have multisig signers confirm they can call admin functions (sanity check).
+5. ✅ Run `lz:oapp:handoff` on each network to atomically `setDelegate(multisig)` then `transferOwnership(multisig)` (correct order; the task is idempotent and refuses to run if the current owner is unexpected). Reads multisig from `OWNER_BSC` / `OWNER_ETH`.
+6. ✅ Have multisig signers confirm they can call admin functions (sanity check).
+
+Steps 1–5 should run in a single operator session — every minute the deployer EOA holds `owner` is a minute a hot-key compromise can rewire peers or forge messages.
 
 ## Important gotchas
 
@@ -170,7 +175,11 @@ npx hardhat lz:oft:send --network ethereum --src-eid 30101 --dst-eid 30102 --to 
 - **Only ONE OFTAdapter per global mesh.** BSC is it. If a third chain is added later, deploy another `WrappedON` (mintable), never another adapter.
 - **Endpoint V2 address.** `0x1a44076050125825900e736c501f859c50fE728c` on every supported EVM mainnet/testnet. The Hardhat plugin pulls this automatically based on `eid`.
 - **Approval before send (BSC side).** Users must `approve(adapter, amount)` on the ON token before calling `send()` on `ONOFTAdapter`.
-- **Multisig hand-off.** Deployer EOA owns the contracts until step 5–6 of the post-deploy checklist. Don't go live without finishing the hand-off.
+- **Multisig hand-off.** Deployer EOA owns the contracts until step 5 of the post-deploy checklist (`lz:oapp:handoff`). Don't go live without finishing the hand-off — until then, the deploy key can rewire peers and forge inbound messages.
+
+## Security
+
+`SECURITY.md` documents the trust assumptions, audit findings, fixes, and operator obligations for the bridge. Read it before any production change. Reporting a vulnerability: chiro@orochi.network.
 
 ## What we deliberately did NOT do
 
