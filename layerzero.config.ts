@@ -32,17 +32,31 @@ const ethContract: OmniPointHardhat = {
 // Integrators that forget to pass options will still get reliable destination delivery.
 //
 // gas budget for _lzReceive on the destination:
-//   - ETH (WrappedON, plain msg, mint fallback):     ~60-80k
-//   - ETH (WrappedON, plain msg, auto-unwrap path):  ~50-90k (vanilla ERC20)
-//                                                   higher if the ON token has hooks
-//   - ETH (WrappedON, composed msg):                  mint + endpoint.sendCompose ~120-160k
+//   - ETH (WrappedON, plain msg, mint fallback):      ~60-80k
+//   - ETH (WrappedON, plain msg, auto-unwrap path):   ~50-90k (vanilla ERC20)
+//                                                    higher if the ON token has hooks
+//   - ETH (WrappedON, composed msg):                  mint + endpoint.sendCompose ~120-220k
 //   - BSC (ONOFTAdapter, plain msg):                  ~50-80k
 //   - LayerZero plumbing overhead:                    ~40-60k
-// 250k absorbs the worst case (composed inbound on ETH with a hooky ON token).
+//
+// The two sides have asymmetric worst cases, so the enforced options are split:
+//   - ETH inbound: 300k. Headroom for the composed-mint path under realistic
+//                 plumbing overhead. The previous 250k left only ~30k slack on
+//                 the worst case, risking stuck high-value messages.
+//   - BSC inbound: 250k. Plain `safeTransfer` unlock; no compose dispatch.
 // Unused gas is refunded by the executor; over-budgeting is a safety knob, not a cost.
 //
 // To learn more, see https://docs.layerzero.network/v2/concepts/applications/oapp-standard#execution-options-and-enforced-settings
-const EVM_ENFORCED_OPTIONS: OAppEnforcedOption[] = [
+const ETH_ENFORCED_OPTIONS: OAppEnforcedOption[] = [
+    {
+        msgType: 1,
+        optionType: ExecutorOptionType.LZ_RECEIVE,
+        gas: 300000,
+        value: 0,
+    },
+]
+
+const BSC_ENFORCED_OPTIONS: OAppEnforcedOption[] = [
     {
         msgType: 1,
         optionType: ExecutorOptionType.LZ_RECEIVE,
@@ -72,7 +86,7 @@ const pathways: TwoWayConfig[] = [
         ethContract, // Chain B (ETH, WrappedON / wON)
         [REQUIRED_DVNS, []], // [ requiredDVN[], [ optionalDVN[], threshold ] ]
         [BSC_TO_ETH_CONFIRMATIONS, ETH_TO_BSC_CONFIRMATIONS], // [A->B confirmations, B->A confirmations]
-        [EVM_ENFORCED_OPTIONS, EVM_ENFORCED_OPTIONS], // [Chain B enforcedOptions (recv on B), Chain A enforcedOptions (recv on A)]
+        [ETH_ENFORCED_OPTIONS, BSC_ENFORCED_OPTIONS], // [Chain B enforcedOptions (recv on B = ETH), Chain A enforcedOptions (recv on A = BSC)]
     ],
 ]
 

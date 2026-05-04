@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-pragma solidity 0.8.22;
+pragma solidity 0.8.34;
 
 import { WrappedON } from "../WrappedON.sol";
 
@@ -15,5 +15,9 @@ contract WrappedONMock is WrappedON {
 
     function mint(address _to, uint256 _amount) public {
         _mint(_to, _amount);
+    }
+
+    function credit(address _to, uint256 _amountLD, uint32 _srcEid) public returns (uint256) {
+        return _credit(_to, _amountLD, _srcEid);
     }
 }

@@ -80,7 +80,7 @@ Scaffolded by copying `examples/oft-adapter` from [`LayerZero-Labs/devtools`](ht
 | Node | ≥18.16 | See `.nvmrc` |
 | Hardhat | 2.28.6 | Required for `lz:oapp:wire` (applies DVN/executor/enforced-options config) |
 | Foundry | latest stable | For unit/integration tests via `forge test` |
-| Solidity | `0.8.22` (exact) | Production contracts use `pragma solidity 0.8.22;` (no caret); pinned in both `foundry.toml` and `hardhat.config.ts` |
+| Solidity | `0.8.34` (exact) | Production contracts use `pragma solidity 0.8.34;` (no caret); pinned in both `foundry.toml` and `hardhat.config.ts`. Hardhat 2.28.6 prints a "0.8.34 is not fully supported yet" warning — this only degrades stack traces; bytecode is correct. |
 
 Both Hardhat and Foundry are kept. Hardhat does deploy + wire; Foundry does fast tests.
 
@@ -88,8 +88,8 @@ Both Hardhat and Foundry are kept. Hardhat does deploy + wire; Foundry does fast
 
 Hardhat and Foundry must produce **identical bytecode** for Etherscan / BSCScan source verification to succeed against either toolchain. The following are pinned in both `foundry.toml` and `hardhat.config.ts`:
 
-- `solc` / `solidity.version` = `0.8.22`
-- `evm_version` / `evmVersion` = `'shanghai'` (highest target solc 0.8.22 supports; both Ethereum and BSC mainnet support shanghai opcodes including PUSH0)
+- `solc` / `solidity.version` = `0.8.34`
+- `evm_version` / `evmVersion` = `'shanghai'` (deliberately conservative — solc 0.8.34 supports newer EVM targets, but shanghai is the floor for both Ethereum and BSC mainnet, including PUSH0; staying here keeps BSC bytecode portable)
 - `bytecode_hash` / `metadata.bytecodeHash` = `'ipfs'`
 - `optimizer_runs` / `optimizer.runs` = `20_000`
 

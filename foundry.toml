@@ -1,9 +1,10 @@
 [profile.default]
-solc = '0.8.22'
+solc = '0.8.34'
 # Pinned so Hardhat and Foundry produce identical bytecode (Etherscan
 # verification depends on the metadata + EVM target matching).
-# 'shanghai' is the highest target solc 0.8.22 supports; both Ethereum
-# and BSC mainnet support shanghai opcodes (PUSH0).
+# 'shanghai' is a deliberately conservative target — solc 0.8.34 supports
+# newer EVM versions, but shanghai is the floor for both Ethereum and BSC
+# mainnet (PUSH0 included) so we stay there to keep BSC bytecode portable.
 evm_version = 'shanghai'
 bytecode_hash = 'ipfs'
 src = 'contracts'

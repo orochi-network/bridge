@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.20;
 
+import { Vm } from "forge-std/Vm.sol";
+
 import { TestHelperOz5 } from "@layerzerolabs/test-devtools-evm-foundry/contracts/TestHelperOz5.sol";
 import { OptionsBuilder } from "@layerzerolabs/oapp-evm/contracts/oapp/libs/OptionsBuilder.sol";
 import { SendParam, OFTReceipt } from "@layerzerolabs/oft-evm/contracts/interfaces/IOFT.sol";
@@ -337,6 +339,162 @@ contract WrappedONTest is TestHelperOz5 {
         );
         wON_fot.seedReserve(100 ether);
         vm.stopPrank();
+    }
+
+    // -------------------------------------------------------------------------
+    // recipient hardening: address(0) and address(this) reroute to mint
+    // -------------------------------------------------------------------------
+
+    function _bridgeRawTo(bytes32 _toBytes32, uint256 _amount) internal {
+        bytes memory options = OptionsBuilder.newOptions().addExecutorLzReceiveOption(200_000, 0);
+        SendParam memory p = SendParam(ETH_EID, _toBytes32, _amount, _amount, options, "", "");
+        MessagingFee memory fee = adapter.quoteSend(p, false);
+
+        vm.startPrank(alice);
+        bscON.approve(address(adapter), _amount);
+        adapter.send{ value: fee.nativeFee }(p, fee, payable(alice));
+        vm.stopPrank();
+
+        verifyPackets(ETH_EID, addressToBytes32(address(wON)));
+    }
+
+    function test_inbound_zeroRecipient_redirectsToDeadAndMints() public {
+        _seed(500 ether); // reserve is full so the auto-unwrap path would otherwise fire
+
+        _bridgeRawTo(bytes32(0), 100 ether);
+
+        // Reserve must NOT be drained — sending real ON to 0xdead would burn it.
+        assertEq(wON.reserve(), 500 ether, "reserve untouched");
+        assertEq(wON.balanceOf(address(0xdead)), 100 ether, "wON minted to 0xdead");
+        assertEq(ethON.balanceOf(address(0xdead)), 0, "no real ON paid to 0xdead");
+    }
+
+    function test_inbound_selfRecipient_redirectsToDeadAndMints() public {
+        _seed(500 ether);
+
+        _bridgeRawTo(addressToBytes32(address(wON)), 100 ether);
+
+        // Self-recipient was a free `seedReserve` paid by the BSC sender; the
+        // reroute now mints to 0xdead instead of inflating the reserve.
+        assertEq(wON.reserve(), 500 ether, "reserve untouched (no free seed)");
+        assertEq(wON.balanceOf(address(0xdead)), 100 ether, "wON minted to 0xdead");
+        assertEq(wON.balanceOf(address(wON)), 0, "no wON minted to self");
+    }
+
+    // -------------------------------------------------------------------------
+    // ETH-side auto-unwrap fee-on-transfer detection
+    // -------------------------------------------------------------------------
+
+    /// @dev If the reserve token ever ships fee-on-transfer behaviour, the
+    ///      auto-unwrap branch must refuse to silently underpay the recipient.
+    ///      Driving `_credit` directly via the mock isolates the guard from
+    ///      LayerZero plumbing — the upstream test helper would otherwise
+    ///      catch the revert at the endpoint and store it as a failed-message
+    ///      alert, masking the assertion.
+    function test_credit_autoUnwrap_revertsOnFeeOnTransferReserveToken() public {
+        FeeOnTransferERC20 feeOn = new FeeOnTransferERC20();
+        WrappedONMock wON_fot = WrappedONMock(
+            _deployOApp(
+                type(WrappedONMock).creationCode,
+                abi.encode("Wrapped ON FOT", "wON-FOT", address(endpoints[ETH_EID]), address(this), address(feeOn))
+            )
+        );
+        // Mint bypasses the FoT guard on wrap/seed; simulates FoT activating
+        // on a token that already has reserve liquidity.
+        feeOn.mint(address(wON_fot), 200 ether);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(WrappedON.UnexpectedTransferAmount.selector, uint256(100 ether), uint256(99 ether))
+        );
+        wON_fot.credit(bob, 100 ether, BSC_EID);
+    }
+
+    /// @dev Liveness preservation: when the reserve cannot cover the request,
+    ///      the fallback-mint path runs unaffected by FoT. Bridge stays usable
+    ///      even after a hostile inner-token migration, just without auto-unwrap.
+    function test_credit_fallbackMint_unaffectedByFeeOnTransferReserveToken() public {
+        FeeOnTransferERC20 feeOn = new FeeOnTransferERC20();
+        WrappedONMock wON_fot = WrappedONMock(
+            _deployOApp(
+                type(WrappedONMock).creationCode,
+                abi.encode("Wrapped ON FOT", "wON-FOT", address(endpoints[ETH_EID]), address(this), address(feeOn))
+            )
+        );
+        // Reserve below the request → fallback to mint, FoT never touched.
+        feeOn.mint(address(wON_fot), 50 ether);
+
+        wON_fot.credit(bob, 100 ether, BSC_EID);
+        assertEq(wON_fot.balanceOf(bob), 100 ether);
+        assertEq(feeOn.balanceOf(address(wON_fot)), 50 ether, "reserve untouched");
+    }
+
+    // -------------------------------------------------------------------------
+    // composed-message: no UnwrapFallbackToMint emission
+    // -------------------------------------------------------------------------
+
+    /// @dev `UnwrapFallbackToMint` previously fired on every composed message,
+    ///      producing false positives for any reserve-low monitor. After the
+    ///      _lzReceive refactor the event signal is clean: only depleted
+    ///      reserves on plain messages emit it.
+    function test_inbound_composedMessage_doesNotEmitFallbackEvent() public {
+        _seed(500 ether);
+
+        OFTComposerMock composer = new OFTComposerMock();
+        bytes memory options = OptionsBuilder
+            .newOptions()
+            .addExecutorLzReceiveOption(300_000, 0)
+            .addExecutorLzComposeOption(0, 500_000, 0);
+        SendParam memory p = SendParam(
+            ETH_EID,
+            addressToBytes32(address(composer)),
+            100 ether,
+            100 ether,
+            options,
+            hex"1234",
+            ""
+        );
+        MessagingFee memory fee = adapter.quoteSend(p, false);
+
+        vm.startPrank(alice);
+        bscON.approve(address(adapter), 100 ether);
+        adapter.send{ value: fee.nativeFee }(p, fee, payable(alice));
+        vm.stopPrank();
+
+        // Record logs across the inbound delivery and assert no
+        // UnwrapFallbackToMint event was emitted by `wON`.
+        vm.recordLogs();
+        verifyPackets(ETH_EID, addressToBytes32(address(wON)));
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        bytes32 fallbackSig = keccak256("UnwrapFallbackToMint(address,uint256)");
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == address(wON) && logs[i].topics[0] == fallbackSig) {
+                revert("composed message must not emit UnwrapFallbackToMint");
+            }
+        }
+        assertEq(wON.balanceOf(address(composer)), 100 ether, "composer holds wON");
+    }
+
+    // -------------------------------------------------------------------------
+    // access control
+    // -------------------------------------------------------------------------
+
+    function test_setPeer_revertsForNonOwner() public {
+        vm.prank(alice);
+        vm.expectRevert(); // OZ Ownable: OwnableUnauthorizedAccount(alice)
+        wON.setPeer(BSC_EID, addressToBytes32(address(0xBEEF)));
+    }
+
+    function test_setDelegate_revertsForNonOwner() public {
+        vm.prank(alice);
+        vm.expectRevert();
+        wON.setDelegate(alice);
+    }
+
+    function test_transferOwnership_revertsForNonOwner() public {
+        vm.prank(alice);
+        vm.expectRevert();
+        wON.transferOwnership(alice);
     }
 }
 
