@@ -7,7 +7,7 @@ LayerZero V2 OFT bridge for the **ON** token.
 | **BSC** mainnet | `ONOFTAdapter` | wraps existing [`ON`](https://bscscan.com/address/0x0e4F6209eD984b21EDEA43acE6e09559eD051D48) at `0x0e4F...1D48` | Locks ON on outbound; releases on inbound. |
 | **Ethereum** mainnet | `WrappedON` | mints/burns `wON` ("Wrapped ON"); holds `ON` reserve | Auto-unwraps to real ON when reserve covers, else mints wON. Manual `wrap` / `unwrap` / `seedReserve`. |
 
-Architecture rationale and the rejected alternatives are documented in [CLAUDE.md](./CLAUDE.md).
+Architecture rationale and the rejected alternatives are documented in [CLAUDE.md](./CLAUDE.md). Trust assumptions, audit findings, and operator obligations are in [SECURITY.md](./SECURITY.md) — read it before any production change. To report a vulnerability: chiro@orochi.network.
 
 ---
 
@@ -193,7 +193,7 @@ Expect roughly:
 - 1× `setPeer` on Ethereum (peer = adapter on BSC)
 - 1× `setConfig` on each side for **send** ULN (DVN = LayerZero Labs + Google Cloud, confirmations)
 - 1× `setConfig` on each side for **receive** ULN
-- 1× `setEnforcedOptions` on each side (250k `LZ_RECEIVE` gas)
+- 1× `setEnforcedOptions` on each side (`LZ_RECEIVE` gas, applied to both `msgType: 1` SEND and `msgType: 2` SEND_AND_CALL — BSC inbound = 250k; ETH inbound = 300k for the composed-mint headroom)
 
 If wire fails partway, **rerun it** — it's idempotent and will pick up where it left off.
 
@@ -208,7 +208,7 @@ Both sides should show:
 - Peer correctly set to the counterpart contract
 - Required DVNs: 2 (LayerZero Labs + Google Cloud)
 - Confirmations: 20 BSC→ETH, 15 ETH→BSC
-- Enforced `LZ_RECEIVE` gas: 250,000
+- Enforced `LZ_RECEIVE` gas, applied to both `msgType: 1` (SEND) and `msgType: 2` (SEND_AND_CALL): 250,000 on BSC inbound, 300,000 on ETH inbound
 
 ## Step 11 — Smoke test with a tiny amount
 
@@ -257,18 +257,14 @@ If any of these are off, **do not transfer ownership yet** — investigate.
 Final step. After this, the deployer EOA has no admin power.
 
 ```sh
-# BSC — transfer ONOFTAdapter ownership + LayerZero delegate
-cast send <ADAPTER_ADDR> "transferOwnership(address)" $OWNER_BSC \
-  --private-key $PRIVATE_KEY --rpc-url $RPC_URL_BSC
-cast send <ADAPTER_ADDR> "setDelegate(address)" $OWNER_BSC \
-  --private-key $PRIVATE_KEY --rpc-url $RPC_URL_BSC
+# BSC — atomic setDelegate(OWNER_BSC) + transferOwnership(OWNER_BSC) on ONOFTAdapter
+npx hardhat lz:oapp:handoff --network bsc --contract ONOFTAdapter
 
-# Ethereum — transfer WrappedON (wON) ownership + LayerZero delegate
-cast send <WON_ADDR> "transferOwnership(address)" $OWNER_ETH \
-  --private-key $PRIVATE_KEY --rpc-url $RPC_URL_ETH
-cast send <WON_ADDR> "setDelegate(address)" $OWNER_ETH \
-  --private-key $PRIVATE_KEY --rpc-url $RPC_URL_ETH
+# Ethereum — atomic setDelegate(OWNER_ETH) + transferOwnership(OWNER_ETH) on WrappedON
+npx hardhat lz:oapp:handoff --network ethereum --contract WrappedON
 ```
+
+The task reads the multisig from `OWNER_BSC` / `OWNER_ETH` in `.env`, calls `setDelegate` first (still requires the deployer as owner), then `transferOwnership`. It refuses to run if the current owner is unexpected and is a no-op if the handoff already completed, so it's safe to re-run from operator automation.
 
 Confirm:
 
@@ -276,6 +272,8 @@ Confirm:
 cast call <ADAPTER_ADDR> "owner()(address)" --rpc-url $RPC_URL_BSC   # → $OWNER_BSC
 cast call <WON_ADDR>     "owner()(address)" --rpc-url $RPC_URL_ETH   # → $OWNER_ETH
 ```
+
+> Steps 6–12 should run in a single operator session. Every minute the deployer EOA holds `owner` is a minute a hot-key compromise can rewire peers or forge messages.
 
 🎉 The bridge is live.
 
