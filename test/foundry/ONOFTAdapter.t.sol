@@ -224,6 +224,51 @@ contract ONOFTAdapterTest is TestHelperOz5 {
         fotAdapter.send{ value: fee.nativeFee }(sendParam, fee, payable(userA));
         vm.stopPrank();
     }
+
+    // -------------------------------------------------------------------------
+    // _credit recipient hardening: address(0) and address(this) reroute to 0xdead
+    // -------------------------------------------------------------------------
+
+    /// @dev Confirms that `ONOFTAdapter._credit` redirects `address(0)` and
+    ///      `address(this)` to `address(0xdead)`.
+    ///
+    ///      - `address(0)` would cause `safeTransfer` to revert on a standard
+    ///        ERC20 (OpenZeppelin rejects zero-address receivers), making the
+    ///        inbound LayerZero message permanently undeliverable.
+    ///      - `address(this)` is a self-transfer no-op on standard ERC20; the
+    ///        message is marked delivered but the recipient receives nothing
+    ///        (silent fund loss).
+    ///
+    ///      Both are redirected to 0xdead so the message always delivers.
+    function test_credit_redirectsBadRecipientToDeadAddress() public {
+        ERC20Mock token = new ERC20Mock("Token", "TOKEN");
+        ONOFTAdapterMock fotAdapter = ONOFTAdapterMock(
+            _deployOApp(
+                type(ONOFTAdapterMock).creationCode,
+                abi.encode(address(token), address(endpoints[aEid]), address(this))
+            )
+        );
+
+        // Seed the adapter with locked tokens (simulating prior BSC-side inflows).
+        uint256 locked = 200 ether;
+        token.mint(address(fotAdapter), locked);
+
+        uint256 amount = 10 ether;
+
+        // Case 1: address(0) recipient → redirected to 0xdead.
+        fotAdapter.credit(address(0), amount, bEid);
+        assertEq(token.balanceOf(address(0xdead)), amount, "address(0) must redirect to 0xdead");
+        assertEq(token.balanceOf(address(fotAdapter)), locked - amount, "adapter balance reduced");
+
+        // Case 2: address(this) (the adapter itself) → redirected to 0xdead.
+        fotAdapter.credit(address(fotAdapter), amount, bEid);
+        assertEq(
+            token.balanceOf(address(0xdead)),
+            2 * amount,
+            "address(this) must redirect to 0xdead"
+        );
+        assertEq(token.balanceOf(address(fotAdapter)), locked - 2 * amount, "adapter balance reduced again");
+    }
 }
 
 /// @dev 18-decimal ERC20 that burns 1% on every user-to-user transfer,

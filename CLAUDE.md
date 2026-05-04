@@ -63,13 +63,13 @@ At rest (no in-flight messages): every wON in circulation is a claim on real ON 
 
 ## Origin
 
-Scaffolded by copying `examples/oft-adapter` from [`LayerZero-Labs/devtools`](https://github.com/LayerZero-Labs/devtools/tree/main/examples/oft-adapter) (the same template `npx create-lz-oapp -e oft-adapter` produces). `ONOFTAdapter.sol` is **byte-identical** to the upstream template (only constructor pass-through). `WrappedON.sol` **diverges** from the template: it adds the auto-unwrap `_credit` override and the `wrap`/`unwrap`/`seedReserve` surface described above.
+Scaffolded by copying `examples/oft-adapter` from [`LayerZero-Labs/devtools`](https://github.com/LayerZero-Labs/devtools/tree/main/examples/oft-adapter) (the same template `npx create-lz-oapp -e oft-adapter` produces). `ONOFTAdapter.sol` **diverges** from the upstream template in two places: `_debit` adds a balance-delta guard for fee-on-transfer tokens, and `_credit` redirects `address(0)` / `address(this)` recipients to `address(0xdead)` (matching the same hardening in WrappedON). `WrappedON.sol` **diverges** from the template: it adds the auto-unwrap `_credit` override and the `wrap`/`unwrap`/`seedReserve` surface described above.
 
 ## Production configuration decisions (locked in)
 
 - **DVNs**: 2 required, 0 optional → `['LayerZero Labs', 'Google Cloud']`. `metadata-tools` resolves names to per-chain addresses at `lz:oapp:wire` time.
 - **Confirmations**: BSC→ETH = 20 (~60s on BSC's ~3s blocks); ETH→BSC = 15 (~3 min on ETH's 12s blocks).
-- **Enforced executor options**: 250,000 gas, 0 value on `LZ_RECEIVE` for both directions. Sized to absorb the worst path (composed inbound on ETH with a hooky ON token); unused gas is refunded.
+- **Enforced executor options**: `LZ_RECEIVE` enforced for both `msgType 1` (SEND) and `msgType 2` (SEND_AND_CALL). ETH-inbound: 300,000 gas; BSC-inbound: 250,000 gas. `lzCompose` gas is NOT enforced (application-specific; integrators must supply their own `addExecutorLzComposeOption` when using `composeMsg`). Unused gas is refunded by the executor.
 - **Ownership flow**: deploy with EOA, then `lz:oapp:wire`, then transfer `owner` and `setDelegate` to a multisig. Multisig addresses go in `.env` (`OWNER_BSC`, `OWNER_ETH`).
 - **wON metadata**: `name = "Wrapped ON"`, `symbol = "wON"`, decimals 18 (OZ ERC20 default).
 
@@ -104,7 +104,7 @@ Apache-2.0. See `LICENSE` at the repo root and the `SPDX-License-Identifier` hea
 ```
 bridge/
 ├── contracts/
-│   ├── ONOFTAdapter.sol     ← BSC: pass-through over OFTAdapter (LZ template, unchanged)
+│   ├── ONOFTAdapter.sol     ← BSC: OFTAdapter + FoT _debit guard + bad-recipient _credit redirect
 │   ├── WrappedON.sol        ← ETH: OFT + reserve-backed auto-unwrap, wrap/unwrap/seedReserve
 │   └── mocks/
 ├── deploy/
@@ -174,7 +174,6 @@ npx hardhat lz:oft:send --network ethereum --src-eid 30101 --dst-eid 30102 --to 
 
 ## What we deliberately did NOT do
 
-- No custom logic in `ONOFTAdapter.sol` — byte-identical to the LZ template.
 - No `MintBurnOFTAdapter` / `NativeOFTAdapter`.
 - No LayerZero V1.
 - No autonomous reserve refill / no on-chain liquidity oracle. Treasury monitors and refills off-chain.
