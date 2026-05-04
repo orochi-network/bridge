@@ -43,13 +43,12 @@ contract WrappedON is OFT {
     /// @notice Pre-existing, non-mintable ON ERC20 used as the reserve asset.
     IERC20 public immutable ON;
 
-    /// @dev Set in `_lzReceive` for the duration of one inbound message so that
-    ///      `_credit` (called by `super._lzReceive`) can route composed messages
-    ///      to the mint path without re-implementing the upstream lzReceive logic.
-    ///      Reset to false at the end of `_lzReceive`. Not exposed externally.
-    ///      A regular storage slot (not transient) because evm_version=shanghai
-    ///      does not include EIP-1153.
-    bool private _composedFlag;
+    /// @dev Set in `_lzReceive` so that `_credit` (called by `super._lzReceive`)
+    ///      can route composed messages to the mint path without re-implementing
+    ///      the upstream lzReceive logic. EIP-1153 transient storage: the slot
+    ///      is auto-cleared at end-of-transaction, so no manual reset is needed
+    ///      and the value cannot leak across messages. Not exposed externally.
+    bool private transient _composedFlag;
 
     event AutoUnwrap(address indexed to, uint256 amount);
     event UnwrapFallbackToMint(address indexed to, uint256 amount);
@@ -128,11 +127,12 @@ contract WrappedON is OFT {
         emit ReserveSeeded(msg.sender, received);
     }
 
-    /// @dev Override of OFTCore._lzReceive. Sets a per-message flag the `_credit`
-    ///      override consults to force the mint path on composed messages, then
-    ///      delegates to super so the upstream compose dispatch and `OFTReceived`
-    ///      emission remain a single source of truth. The flag is cleared on the
-    ///      way out so it cannot leak across messages.
+    /// @dev Override of OFTCore._lzReceive. Sets a per-message transient flag
+    ///      the `_credit` override consults to force the mint path on composed
+    ///      messages, then delegates to super so the upstream compose dispatch
+    ///      and `OFTReceived` emission remain a single source of truth.
+    ///      Transient storage auto-clears at end-of-transaction, so no manual
+    ///      reset is needed.
     function _lzReceive(
         Origin calldata _origin,
         bytes32 _guid,
@@ -142,7 +142,6 @@ contract WrappedON is OFT {
     ) internal virtual override {
         _composedFlag = _message.isComposed();
         super._lzReceive(_origin, _guid, _message, _executor, _extraData);
-        _composedFlag = false;
     }
 
     /// @dev Override of OFT's default `_credit` (which always mints). Branches:

@@ -67,11 +67,12 @@ const config: HardhatUserConfig = {
                     },
                     // Pinned so Hardhat and Foundry produce identical bytecode.
                     // Both fields must match across toolchains for Etherscan source
-                    // verification to succeed. 'shanghai' is a deliberately
-                    // conservative target — solc 0.8.34 supports newer EVM versions,
-                    // but shanghai is the floor for both Ethereum and BSC mainnet
-                    // (PUSH0 included) so we stay there to keep BSC bytecode portable.
-                    evmVersion: 'shanghai',
+                    // verification to succeed. Both Ethereum (Cancun, 2024-03-13)
+                    // and BSC mainnet (Tycho hardfork, BEP-343, 2024-06-20) have
+                    // shipped Cancun, so PUSH0 + TLOAD/TSTORE are safe on both.
+                    // Targeting cancun lets WrappedON use transient storage for
+                    // the per-message _composedFlag.
+                    evmVersion: 'cancun',
                     metadata: {
                         bytecodeHash: 'ipfs',
                     },
