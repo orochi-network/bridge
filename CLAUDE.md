@@ -89,7 +89,7 @@ Both Hardhat and Foundry are kept. Hardhat does deploy + wire; Foundry does fast
 Hardhat and Foundry must produce **identical bytecode** for Etherscan / BSCScan source verification to succeed against either toolchain. The following are pinned in both `foundry.toml` and `hardhat.config.ts`:
 
 - `solc` / `solidity.version` = `0.8.34`
-- `evm_version` / `evmVersion` = `'shanghai'` (deliberately conservative — solc 0.8.34 supports newer EVM targets, but shanghai is the floor for both Ethereum and BSC mainnet, including PUSH0; staying here keeps BSC bytecode portable)
+- `evm_version` / `evmVersion` = `'cancun'` (Ethereum Cancun shipped 2024-03-13; BSC Tycho hardfork shipped Cancun-equivalent semantics including EIP-1153 on 2024-06-20 via BEP-343, so PUSH0 + TLOAD/TSTORE are safe on both mainnets — `WrappedON._composedFlag` uses transient storage)
 - `bytecode_hash` / `metadata.bytecodeHash` = `'ipfs'`
 - `optimizer_runs` / `optimizer.runs` = `20_000`
 
