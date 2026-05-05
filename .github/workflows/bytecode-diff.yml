@@ -23,7 +23,7 @@ on:
       - 'scripts/check-bytecode.js'
       - '.github/workflows/bytecode-diff.yml'
       - 'package.json'
-      - 'pnpm-lock.yaml'
+      - 'yarn.lock'
 
 jobs:
   diff:
@@ -35,19 +35,21 @@ jobs:
         with:
           node-version-file: '.nvmrc'
 
-      - uses: pnpm/action-setup@v4
-        with:
-          run_install: false
+      # Yarn 4 is provisioned via the `packageManager` field in package.json
+      # plus corepack (built into Node 24+). enable corepack so `yarn` resolves
+      # to the project's pinned version.
+      - name: Enable corepack (provides yarn from packageManager field)
+        run: corepack enable
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: yarn install --immutable
 
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
 
       - name: Compile (Hardhat + Foundry)
-        run: pnpm run compile
+        run: yarn compile
 
       - name: Diff Hardhat vs Foundry runtime bytecode
         run: node scripts/check-bytecode.js

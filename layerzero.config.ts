@@ -88,11 +88,13 @@ const BSC_ENFORCED_OPTIONS: OAppEnforcedOption[] = [
 //   - LayerZero Labs (default DVN, run by LayerZero)
 //   - Google         (DVN operated by Google Cloud)
 // Both must attest to a message before it can be executed on the destination.
-// `metadata-tools` resolves these strings via an exact match on `canonicalName`
-// in the LayerZero metadata registry, so the strings must be the registry's
-// canonical names — not the vendor's marketing name. The DVN run by Google
+// `metadata-tools` resolves these strings via an exact (`===`) match on
+// `canonicalName` in the LayerZero metadata registry — the same exact-match
+// rule it applies to executor names, so any custom executor would have to
+// use its registry canonicalName too. The strings must be the registry's
+// canonical names, not the vendor's marketing name. The DVN run by Google
 // Cloud is registered under canonicalName `Google` (id `google-cloud`).
-// Verify pre-deploy with `npm run check:dvn`.
+// Verify pre-deploy with `yarn check:dvn`.
 const REQUIRED_DVNS = ['LayerZero Labs', 'Google']
 
 // Block confirmations before the source DVN attests.

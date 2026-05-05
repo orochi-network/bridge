@@ -67,7 +67,7 @@ Scaffolded by copying `examples/oft-adapter` from [`LayerZero-Labs/devtools`](ht
 
 ## Production configuration decisions (locked in)
 
-- **DVNs**: 2 required, 0 optional → `['LayerZero Labs', 'Google']`. `metadata-tools` resolves these to per-chain addresses at `lz:oapp:wire` time via an **exact match on `canonicalName`** in the LZ metadata registry. The DVN run by Google Cloud is registered under canonicalName `Google` (id `google-cloud`); the marketing name `'Google Cloud'` would not resolve. Liveness probe: `npm run check:dvn`.
+- **DVNs**: 2 required, 0 optional → `['LayerZero Labs', 'Google']`. `metadata-tools` resolves these to per-chain addresses at `lz:oapp:wire` time via an **exact (`===`) match on `canonicalName`** in the LZ metadata registry — the same exact-match rule it applies to executor names. The DVN run by Google Cloud is registered under canonicalName `Google` (id `google-cloud`); the marketing name `'Google Cloud'` would not resolve. Liveness probe: `yarn check:dvn`.
 - **Confirmations**: BSC→ETH = 30 (~90s on BSC's ~3s blocks; raised from 20 to clear historical reorg depth); ETH→BSC = 15 (~3 min on ETH's 12s blocks).
 - **Enforced executor options**: `LZ_RECEIVE` enforced for both `msgType 1` (SEND) and `msgType 2` (SEND_AND_CALL). ETH-inbound: 300,000 gas; BSC-inbound: 250,000 gas. `lzCompose` gas is NOT enforced (application-specific; integrators must supply their own `addExecutorLzComposeOption` when using `composeMsg`). Unused gas is refunded by the executor.
 - **Ownership flow**: deploy with EOA, then `lz:oapp:wire`, then transfer `owner` and `setDelegate` to a multisig. Multisig addresses go in `.env` (`OWNER_BSC`, `OWNER_ETH`).
@@ -130,11 +130,11 @@ bridge/
 ```sh
 # One-time setup
 cp .env.example .env         # fill in PRIVATE_KEY (or MNEMONIC) and RPC URLs
-npm install                  # or pnpm install — pnpm-lock.yaml is the canonical lockfile
-npm run compile              # Hardhat + Foundry compile
+yarn install                 # yarn.lock is the canonical lockfile (yarn 4 via packageManager field)
+yarn compile                 # Hardhat + Foundry compile
 
 # Tests
-npm test                     # forge test + hardhat test
+yarn test                    # forge test + hardhat test
 
 # Deploy
 npx hardhat lz:deploy        # CLI prompts for networks; pick `bsc` and `ethereum`
@@ -210,16 +210,16 @@ is simulated by impersonating the LayerZero endpoint, so only the on-chain
 logic of the bridge contracts (and of the real ON tokens) is exercised.
 
 ```sh
-RPC_URL_BSC=https://... RPC_URL_ETH=https://... npm run test:dryrun
+RPC_URL_BSC=https://... RPC_URL_ETH=https://... yarn test:dryrun
 ```
 
-The test skips cleanly if either RPC env var is unset, so `npm test` stays
+The test skips cleanly if either RPC env var is unset, so `yarn test` stays
 green without RPC credentials. Run the dry-run before every mainnet deploy.
 
 ## Things still to fill in before production deploy
 
 - [ ] `.env` — `PRIVATE_KEY` (deployer), `RPC_URL_BSC`, `RPC_URL_ETH`, `BSCSCAN_API_KEY`, `ETHERSCAN_API_KEY`, `OWNER_BSC`, `OWNER_ETH`.
-- [ ] Run `npm run test:dryrun` against archive RPCs — covers BSC ON lossless transfer, ETH ON 18 decimals, full BSC↔ETH bridge flow, auto-unwrap vs fallback vs composed paths, manual wrap/unwrap/seedReserve.
-- [ ] Run `npm run check:dvn` against archive RPCs — fetches the LZ metadata registry, resolves `LayerZero Labs` and `Google` DVN canonical names per chain, and probes that each contract has bytecode and responds to `quorum()` on BSC and Ethereum mainnet.
+- [ ] Run `yarn test:dryrun` against archive RPCs — covers BSC ON lossless transfer, ETH ON 18 decimals, full BSC↔ETH bridge flow, auto-unwrap vs fallback vs composed paths, manual wrap/unwrap/seedReserve.
+- [ ] Run `yarn check:dvn` against archive RPCs — fetches the LZ metadata registry, resolves `LayerZero Labs` and `Google` DVN canonical names per chain, and probes that each contract has bytecode and responds to `quorum()` on BSC and Ethereum mainnet.
 - [ ] Decide multisig threshold + signers; have the multisig deployed on both chains.
 - [ ] Decide reserve seeding strategy: how much real ETH ON to commit on day-1, who funds it, what the low-water alert threshold is.

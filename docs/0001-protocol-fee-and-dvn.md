@@ -107,7 +107,7 @@ const REQUIRED_DVNS = ['LayerZero Labs', 'Google']
 | DVN #2 | Google Cloud | `Google` (id `google-cloud`) | No |
 | Executor | Default LayerZero Executor | n/a | No |
 
-`metadata-tools.generateConnectionsConfig` resolves the DVN names to per-chain addresses at `lz:oapp:wire` time via an exact match on the registry's `canonicalName`. The vendor we know as "Google Cloud" appears in the registry under canonical name `Google`; the `'Google Cloud'` string would not resolve. Pre-deploy verification: `npm run check:dvn`. The Executor is the LZ default; no `executor` override appears in the config.
+`metadata-tools.generateConnectionsConfig` resolves the DVN names to per-chain addresses at `lz:oapp:wire` time via an exact (`===`) match on the registry's `canonicalName`. The same exact-match rule is applied to executor names, so a custom executor would have to use its registry canonicalName too — we use the LZ default executor and pass no override here. The vendor we know as "Google Cloud" appears in the registry under canonical name `Google`; the `'Google Cloud'` string would not resolve. Pre-deploy verification: `yarn check:dvn`.
 
 ### Why we don't self-operate
 

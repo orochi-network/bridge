@@ -25,7 +25,7 @@ the conservation invariant.
 | BSC ON has 18 decimals. | OFT shared-decimals math expects 18 LD. | Forked dry-run (`DryRun.t.sol`) and `WrappedON.constructor` both check 18. |
 | ETH ON token (`0x33f6...B59d`) has 18 decimals. | wON is 18-decimal; 1:1 swap requires the reserve token to match. | Constructor `DecimalsMismatch` revert. |
 | ETH ON token does not silently re-enter `WrappedON` from inside `safeTransfer`. | `_credit` and `unwrap` use checks-effects-interactions but do not gate with `ReentrancyGuard`. | Manual analysis: ON is a vanilla ERC20 (no ERC777-style hooks). Documented assumption. |
-| Both DVNs (`LayerZero Labs`, `Google` — the DVN run by Google Cloud) act independently. | Compromise of either DVN halts the bridge but does not steal funds. Compromise of both ⇒ arbitrary message forgery. | Operational obligation (DVN diversity). Liveness probe: `npm run check:dvn`. |
+| Both DVNs (`LayerZero Labs`, `Google` — the DVN run by Google Cloud) act independently. | Compromise of either DVN halts the bridge but does not steal funds. Compromise of both ⇒ arbitrary message forgery. | Operational obligation (DVN diversity). Liveness probe: `yarn check:dvn`. |
 | The deployer EOA is fully handed off to a multisig before going live. | Until handoff, the EOA can rewire peers and mint unbounded wON. | Tracked by the post-deploy checklist; automated by `tasks/handoff.ts` (Fix #6). |
 
 ## Audit findings
@@ -102,7 +102,7 @@ fix references the commit that lands it.
   triaged, not silently routed around. A third DVN would be added only if
   the operational cost of liveness incidents exceeded the cost of an extra
   DVN fee per message — which is not the case at the bridge's current
-  message profile. Liveness is verified pre-deploy by `npm run check:dvn`.
+  message profile. Liveness is verified pre-deploy by `yarn check:dvn`.
 
 #### M4 — `_credit` self-recipient and zero-recipient handling on both sides
 - **Where:** Asymmetric on both contracts. `WrappedON._credit` only
@@ -132,15 +132,16 @@ fix references the commit that lands it.
 - Required DVN canonical name corrected from `'Google Cloud'` to `'Google'`
   in `layerzero.config.ts`. The LayerZero metadata registry's
   `canonicalName` for the DVN run by Google Cloud is `Google` (its `id` is
-  `google-cloud`). `metadata-tools` does an exact `canonicalName` match at
-  `lz:oapp:wire` time; the previous string would have failed wire with
+  `google-cloud`). `metadata-tools` does an exact (`===`) `canonicalName`
+  match at `lz:oapp:wire` time — the same exact-match rule applies to
+  executor names — and the previous string would have failed wire with
   `Can't find DVN: "Google Cloud" on chainKey: "bsc"`.
 - Pre-deploy DVN liveness probe added (`scripts/check-dvn.js`, exposed as
-  `npm run check:dvn`). Fetches the LZ metadata registry, resolves each
+  `yarn check:dvn`). Fetches the LZ metadata registry, resolves each
   required DVN canonical name to a per-chain address, then verifies the
   contract has bytecode and responds to `quorum()` on each mainnet.
 - Bytecode-diff CI added (`.github/workflows/bytecode-diff.yml` +
-  `scripts/check-bytecode.js`, exposed as `npm run check:bytecode`).
+  `scripts/check-bytecode.js`, exposed as `yarn check:bytecode`).
   Compares Hardhat and Foundry `deployedBytecode` for every production
   contract after stripping the CBOR metadata trailer (which embeds an IPFS
   hash that legitimately differs between toolchains because of source-path
@@ -165,8 +166,8 @@ fix references the commit that lands it.
 
 ### Outstanding (operator action items, not code changes)
 
-- Run `npm run check:dvn` against archive RPCs immediately before every
-  mainnet deploy, in addition to the existing `npm run test:dryrun`.
+- Run `yarn check:dvn` against archive RPCs immediately before every
+  mainnet deploy, in addition to the existing `yarn test:dryrun`.
 
 ## Acknowledged design trade-offs (not bugs)
 
@@ -191,9 +192,9 @@ The following are documented in `CLAUDE.md` and remain by design.
 
 ## Operator obligations
 
-- Run `npm run test:dryrun` against archive RPCs before every mainnet
+- Run `yarn test:dryrun` against archive RPCs before every mainnet
   deploy.
-- Run `npm run check:dvn` immediately before `lz:oapp:wire` to confirm
+- Run `yarn check:dvn` immediately before `lz:oapp:wire` to confirm
   both required DVNs are reachable on BSC and Ethereum mainnet.
 - Compress deploy → `lz:oapp:wire` → `tasks/handoff.ts` into a single
   operator session. Do not leave the deployer EOA as owner overnight.

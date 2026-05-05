@@ -9,7 +9,8 @@
 //   1. Pulls the LayerZero metadata registry (the same source of truth used
 //      by `metadata-tools` at `lz:oapp:wire` time).
 //   2. Resolves each required DVN's address on BSC and Ethereum by exact
-//      `canonicalName` match — the same resolution `metadata-tools` does.
+//      (`===`) `canonicalName` match — the same exact-match rule
+//      `metadata-tools` applies to both DVN names AND executor names.
 //   3. Verifies the resolved address has bytecode and responds to a view
 //      call (`quorum()` exists on every LZ V2 DVN implementation).
 //   4. Reports the chain head's age so a stale RPC is obvious.
@@ -21,7 +22,7 @@
 //
 // Usage:
 //   RPC_URL_BSC=... RPC_URL_ETH=... node scripts/check-dvn.js
-//   (or rely on .env via dotenv — `npm run check:dvn`)
+//   (or rely on .env via dotenv — `yarn check:dvn`)
 //
 // Exit code 0 if every required DVN passes on every chain, 1 otherwise.
 

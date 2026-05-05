@@ -16,8 +16,16 @@ artifacts
 # foundry test compilation files
 out
 
-# pnpm
-pnpm-error.log
+# yarn 4 (Berry) — see https://yarnpkg.com/getting-started/qa#which-files-should-be-gitignored
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+.pnp.*
+yarn-debug.log
+yarn-error.log
 
 # Editor and OS files
 .DS_Store
