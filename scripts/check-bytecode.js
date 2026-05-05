@@ -36,14 +36,14 @@ function readJson(p) {
 
 function loadHardhat(contract) {
     const p = path.join(ROOT, 'artifacts/contracts', `${contract}.sol`, `${contract}.json`)
-    if (!fs.existsSync(p)) throw new Error(`Hardhat artifact missing: ${p}. Run \`npm run compile:hardhat\` first.`)
+    if (!fs.existsSync(p)) throw new Error(`Hardhat artifact missing: ${p}. Run \`yarn compile:hardhat\` first.`)
     const j = readJson(p)
     return j.deployedBytecode
 }
 
 function loadFoundry(contract) {
     const p = path.join(ROOT, 'out', `${contract}.sol`, `${contract}.json`)
-    if (!fs.existsSync(p)) throw new Error(`Foundry artifact missing: ${p}. Run \`npm run compile:forge\` first.`)
+    if (!fs.existsSync(p)) throw new Error(`Foundry artifact missing: ${p}. Run \`yarn compile:forge\` first.`)
     const j = readJson(p)
     // Foundry wraps deployedBytecode in `{ object, sourceMap, ... }`.
     return j.deployedBytecode.object || j.deployedBytecode

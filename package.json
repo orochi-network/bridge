@@ -83,7 +83,7 @@
     "solidity-bytes-utils": "0.8.4",
     "ts-node": "10.9.2",
     "typescript": "5.9.3",
-    "zod": "4.4.3"
+    "zod": "3.25.76"
   },
   "engines": {
     "node": ">=18.16.0"
