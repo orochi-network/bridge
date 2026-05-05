@@ -49,7 +49,14 @@ const deploy: DeployFunction = async (hre) => {
             deployer, // owner
         ],
         log: true,
-        skipIfAlreadyDeployed: false,
+        // Idempotent on re-run: if a deployment artifact already records a
+        // contract for this name on this network, do NOT issue a fresh CREATE.
+        // An OFTAdapter is a singleton in the global mesh — a redeploy would
+        // orphan locked supply on-chain and silently corrupt the canonical
+        // address recorded in deployments/<network>/. To force a redeploy on
+        // test networks, delete the artifact (`rm deployments/<network>/<Name>.json`)
+        // or run with `npx hardhat deploy --reset`.
+        skipIfAlreadyDeployed: true,
     })
 
     console.log(`Deployed contract: ${contractName}, network: ${hre.network.name}, address: ${address}`)
