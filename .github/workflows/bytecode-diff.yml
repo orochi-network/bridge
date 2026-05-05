@@ -1,0 +1,53 @@
+name: bytecode-diff
+
+# Enforces that Hardhat and Foundry produce byte-identical runtime bytecode
+# for every production contract. The CBOR metadata trailer is stripped before
+# comparison because it embeds an IPFS hash of the compiler metadata JSON,
+# which legitimately differs between toolchains (different source path
+# resolution and remappings) and is not part of the executed code.
+#
+# This workflow uses no fields from github.event.*, so the workflow-injection
+# patterns (issue titles, PR bodies, commit messages, head_ref, etc.) do not
+# apply here. All `run:` commands are static, fixed strings.
+#
+# Documented in SECURITY.md.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'contracts/**'
+      - 'foundry.toml'
+      - 'hardhat.config.ts'
+      - 'scripts/check-bytecode.js'
+      - '.github/workflows/bytecode-diff.yml'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+
+jobs:
+  diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Compile (Hardhat + Foundry)
+        run: pnpm run compile
+
+      - name: Diff Hardhat vs Foundry runtime bytecode
+        run: node scripts/check-bytecode.js

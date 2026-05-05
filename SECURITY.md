@@ -25,7 +25,7 @@ the conservation invariant.
 | BSC ON has 18 decimals. | OFT shared-decimals math expects 18 LD. | Forked dry-run (`DryRun.t.sol`) and `WrappedON.constructor` both check 18. |
 | ETH ON token (`0x33f6...B59d`) has 18 decimals. | wON is 18-decimal; 1:1 swap requires the reserve token to match. | Constructor `DecimalsMismatch` revert. |
 | ETH ON token does not silently re-enter `WrappedON` from inside `safeTransfer`. | `_credit` and `unwrap` use checks-effects-interactions but do not gate with `ReentrancyGuard`. | Manual analysis: ON is a vanilla ERC20 (no ERC777-style hooks). Documented assumption. |
-| Both DVNs (`LayerZero Labs`, `Google Cloud`) act independently. | Compromise of either DVN halts the bridge but does not steal funds. Compromise of both ⇒ arbitrary message forgery. | Operational obligation (DVN diversity). |
+| Both DVNs (`LayerZero Labs`, `Google` — the DVN run by Google Cloud) act independently. | Compromise of either DVN halts the bridge but does not steal funds. Compromise of both ⇒ arbitrary message forgery. | Operational obligation (DVN diversity). Liveness probe: `npm run check:dvn`. |
 | The deployer EOA is fully handed off to a multisig before going live. | Until handoff, the EOA can rewire peers and mint unbounded wON. | Tracked by the post-deploy checklist; automated by `tasks/handoff.ts` (Fix #6). |
 
 ## Audit findings
@@ -60,12 +60,15 @@ fix references the commit that lands it.
   deploy/wire/handoff sequence should be performed in a single operator
   session.
 
-#### H3 — BSC→ETH confirmations policy (operator decision)
-- **Where:** `layerzero.config.ts` sets BSC→ETH = 20 confirmations.
-- **Status:** Open. 20 BSC blocks is *fast finality* per BNB Chain
-  documentation but historical reorgs deeper than 20 blocks exist. The team
-  must sign off on whether 20 is acceptable for the maximum per-message size
-  the bridge will permit, or raise the BSC-side confirmations.
+#### H3 — BSC→ETH confirmations policy
+- **Where:** `layerzero.config.ts` previously set BSC→ETH = 20 confirmations.
+- **Why it matters:** 20 BSC blocks is *fast finality* per BNB Chain
+  documentation but historical reorgs deeper than 20 blocks exist; a deeper
+  reorg can re-order or drop a send the destination has already accepted.
+- **Fix (this branch):** `BSC_TO_ETH_CONFIRMATIONS` raised from 20 to 30
+  (~90s on BSC's ~3s blocks). The extra ~30s of latency is acceptable for
+  the bridge's expected message profile and clears all historical reorg
+  depths we have observed. ETH→BSC remains 15 (~3 min on ETH's 12s blocks).
 
 ### MEDIUM
 
@@ -90,13 +93,16 @@ fix references the commit that lands it.
   Both `msgType: 1` and `msgType: 2` are enforced. `lzCompose` gas is
   intentionally left unenforced (application-specific).
 
-#### M3 — DVN config 2-required + 0-optional (operator decision)
-- **Where:** `layerzero.config.ts` declares `requiredDVNs = [LayerZero Labs,
-  Google Cloud]`, `optionalDVNs = []`.
-- **Status:** Open. 2-of-2-required means either DVN going down halts the
-  bridge entirely. A 2-required + 1-optional model with a third independent
-  DVN provides identical security at materially better liveness for one
-  extra DVN fee per message.
+#### M3 — DVN config 2-required + 0-optional
+- **Where:** `layerzero.config.ts` declares
+  `requiredDVNs = ['LayerZero Labs', 'Google']`, `optionalDVNs = []`.
+- **Decision (this branch):** keep 2-of-2 required, no optionals. Either
+  DVN going down halts the bridge entirely, but the simpler topology is the
+  intended security posture: a delivery failure must be visible and
+  triaged, not silently routed around. A third DVN would be added only if
+  the operational cost of liveness incidents exceeded the cost of an extra
+  DVN fee per message — which is not the case at the bridge's current
+  message profile. Liveness is verified pre-deploy by `npm run check:dvn`.
 
 #### M4 — `_credit` self-recipient and zero-recipient handling on both sides
 - **Where:** Asymmetric on both contracts. `WrappedON._credit` only
@@ -123,16 +129,44 @@ fix references the commit that lands it.
   exact pin `0.8.34` to match the project policy.
 - `deploy/MyERC20Mock.ts` gated with `network.live` so a stray
   `--tags MyERC20Mock` cannot deploy a useless mock to mainnet.
+- Required DVN canonical name corrected from `'Google Cloud'` to `'Google'`
+  in `layerzero.config.ts`. The LayerZero metadata registry's
+  `canonicalName` for the DVN run by Google Cloud is `Google` (its `id` is
+  `google-cloud`). `metadata-tools` does an exact `canonicalName` match at
+  `lz:oapp:wire` time; the previous string would have failed wire with
+  `Can't find DVN: "Google Cloud" on chainKey: "bsc"`.
+- Pre-deploy DVN liveness probe added (`scripts/check-dvn.js`, exposed as
+  `npm run check:dvn`). Fetches the LZ metadata registry, resolves each
+  required DVN canonical name to a per-chain address, then verifies the
+  contract has bytecode and responds to `quorum()` on each mainnet.
+- Bytecode-diff CI added (`.github/workflows/bytecode-diff.yml` +
+  `scripts/check-bytecode.js`, exposed as `npm run check:bytecode`).
+  Compares Hardhat and Foundry `deployedBytecode` for every production
+  contract after stripping the CBOR metadata trailer (which embeds an IPFS
+  hash that legitimately differs between toolchains because of source-path
+  resolution). Asserts byte-identical runtime code on every PR touching
+  `contracts/` or compiler settings. Stripped runtime is currently
+  identical for both `ONOFTAdapter` (13,161 bytes) and `WrappedON`
+  (18,098 bytes).
 
-### Outstanding (not auto-fixed; require operator decisions)
+### Resolved (no further action)
 
-- **H3** confirmation depth policy.
-- **M3** DVN topology (2-of-2 vs 2-required + 1-optional).
-- Pre-deploy verification that Google Cloud DVN is live on both BSC and
-  Ethereum mainnet.
-- Bytecode diff between Foundry and Hardhat in CI.
-- Migration plan if the ETH ON token ever upgrades to a fee-on-transfer or
-  pausable behaviour.
+- **Migration plan if the ETH ON token ever upgrades.** Both ON tokens are
+  immutable on their deployed addresses: BSC ON
+  (`0x0e4F...1D48`) and ETH ON (`0x33f6...B59d`) have no owner-controlled
+  upgrade path, no proxy, and the issuer has confirmed they will not be
+  changed. There is no fee-on-transfer; protocol fees that may apply to
+  the token live outside the ERC20 transfer path and do not affect the
+  amount delivered by `transferFrom`. The losslessness invariant is
+  re-asserted on every BSC-side send by the `_debit` balance-delta guard
+  and on every ETH-side `wrap` / `seedReserve` by the
+  `UnexpectedTransferAmount` guard, so any future deviation would surface
+  as an explicit revert rather than silent loss.
+
+### Outstanding (operator action items, not code changes)
+
+- Run `npm run check:dvn` against archive RPCs immediately before every
+  mainnet deploy, in addition to the existing `npm run test:dryrun`.
 
 ## Acknowledged design trade-offs (not bugs)
 
@@ -159,6 +193,8 @@ The following are documented in `CLAUDE.md` and remain by design.
 
 - Run `npm run test:dryrun` against archive RPCs before every mainnet
   deploy.
+- Run `npm run check:dvn` immediately before `lz:oapp:wire` to confirm
+  both required DVNs are reachable on BSC and Ethereum mainnet.
 - Compress deploy → `lz:oapp:wire` → `tasks/handoff.ts` into a single
   operator session. Do not leave the deployer EOA as owner overnight.
 - Monitor `WrappedON.reserve()` against a daily-flow threshold; refill via

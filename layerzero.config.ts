@@ -86,15 +86,22 @@ const BSC_ENFORCED_OPTIONS: OAppEnforcedOption[] = [
 
 // Two required DVNs for production defense-in-depth:
 //   - LayerZero Labs (default DVN, run by LayerZero)
-//   - Google Cloud   (independent operator)
+//   - Google         (DVN operated by Google Cloud)
 // Both must attest to a message before it can be executed on the destination.
-// `metadata-tools` resolves these names to per-chain DVN addresses at wire time.
-const REQUIRED_DVNS = ['LayerZero Labs', 'Google Cloud']
+// `metadata-tools` resolves these strings via an exact match on `canonicalName`
+// in the LayerZero metadata registry, so the strings must be the registry's
+// canonical names — not the vendor's marketing name. The DVN run by Google
+// Cloud is registered under canonicalName `Google` (id `google-cloud`).
+// Verify pre-deploy with `npm run check:dvn`.
+const REQUIRED_DVNS = ['LayerZero Labs', 'Google']
 
 // Block confirmations before the source DVN attests.
-// BSC: ~3s blocks → 20 confs ≈ 60s
+// BSC: ~3s blocks → 30 confs ≈ 90s. Raised from 20 (the BNB Chain "fast
+//   finality" guideline) to clear historical reorgs that have exceeded 20
+//   blocks. The extra ~30s of latency is acceptable for the bridge's
+//   message profile.
 // ETH: ~12s blocks → 15 confs ≈ 3 min
-const BSC_TO_ETH_CONFIRMATIONS = 20
+const BSC_TO_ETH_CONFIRMATIONS = 30
 const ETH_TO_BSC_CONFIRMATIONS = 15
 
 // With the config generator, pathways declared are automatically bidirectional

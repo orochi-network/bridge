@@ -15,7 +15,9 @@
     "test": "$npm_execpath run test:forge && $npm_execpath run test:hardhat",
     "test:forge": "forge test",
     "test:hardhat": "hardhat test",
-    "test:dryrun": "forge test --match-contract DryRun -vv"
+    "test:dryrun": "forge test --match-contract DryRun -vv",
+    "check:bytecode": "$npm_execpath run compile && node scripts/check-bytecode.js",
+    "check:dvn": "node scripts/check-dvn.js"
   },
   "resolutions": {
     "ethers": "5.8.0",
