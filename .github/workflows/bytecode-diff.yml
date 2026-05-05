@@ -34,20 +34,38 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
-          cache: 'yarn'
 
       # Yarn 4 is provisioned by corepack (bundled with Node since 16.9.x)
       # using the version pinned in `packageManager` in package.json.
       # Nothing under .yarn/ is committed — corepack downloads the yarn
       # release on first invocation.
-      - name: Enable corepack
-        run: corepack enable
+      #
+      # Why not setup-node's `cache: 'yarn'`? GitHub's ubuntu-latest image
+      # pre-installs yarn classic 1.22, and setup-node queries `yarn config
+      # get cacheFolder` *before* corepack is enabled. That query hits
+      # yarn 1 and points at the wrong cache directory; later, yarn 1's
+      # own `packageManager` policy refuses to run with `yarn@4.14.1`
+      # declared, breaking the install. We enable corepack first, force
+      # yarn 4.14.1 active (overriding the classic shim), then cache
+      # yarn 4's project-local `.yarn/cache` directly via actions/cache.
+      - name: Enable corepack and activate yarn 4.14.1
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+        run: |
+          corepack enable
+          corepack prepare yarn@4.14.1 --activate
+          yarn --version
+
+      - name: Restore yarn 4 cache
+        uses: actions/cache@v4
+        with:
+          path: .yarn/cache
+          key: yarn-${{ runner.os }}-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            yarn-${{ runner.os }}-
 
       - name: Install dependencies
         env:
-          # Defensive: keep first-run yarn invocations non-interactive on
-          # any future Node version that ships a corepack with the prompt
-          # behaviour enabled by default.
           COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
         run: yarn install --immutable
 
