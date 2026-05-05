@@ -16,13 +16,10 @@ artifacts
 # foundry test compilation files
 out
 
-# yarn 4 (Berry) — see https://yarnpkg.com/getting-started/qa#which-files-should-be-gitignored
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/sdks
-!.yarn/versions
+# yarn 4 (Berry) — yarn binary is provisioned by corepack via the
+# `packageManager` field in package.json, so nothing under .yarn/ is
+# committed. .pnp.* is unused (we run with nodeLinker: node-modules).
+.yarn
 .pnp.*
 yarn-debug.log
 yarn-error.log

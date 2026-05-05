@@ -36,10 +36,10 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'yarn'
 
-      # Yarn 4 is pinned via .yarnrc.yml -> yarnPath, which points at a
-      # committed binary in .yarn/releases/. Corepack (bundled with Node
-      # since 16.9.x) is enabled so `yarn` on PATH delegates to that
-      # binary; the npm registry never has to serve yarn itself.
+      # Yarn 4 is provisioned by corepack (bundled with Node since 16.9.x)
+      # using the version pinned in `packageManager` in package.json.
+      # Nothing under .yarn/ is committed — corepack downloads the yarn
+      # release on first invocation.
       - name: Enable corepack
         run: corepack enable
 
