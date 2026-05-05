@@ -77,7 +77,8 @@ Scaffolded by copying `examples/oft-adapter` from [`LayerZero-Labs/devtools`](ht
 
 | Tool | Version | Notes |
 |------|---------|-------|
-| Node | ≥18.16 | See `.nvmrc` |
+| Node | ≥18.16 | See `.nvmrc` (currently `v18.18.0`). Provides `corepack`. |
+| Yarn | 4.14.1 | Provisioned via `corepack` from the `packageManager` field in `package.json`. **Nothing under `.yarn/` is committed** — `.gitignore` excludes it; `corepack` materialises the binary on first invocation. `.yarnrc.yml` carries the `nodeLinker: node-modules`, `packageExtensions` (silencing benign upstream LZ peer-dep warnings), and `logFilters` config. |
 | Hardhat | 2.28.6 | Required for `lz:oapp:wire` (applies DVN/executor/enforced-options config) |
 | Foundry | latest stable | For unit/integration tests via `forge test` |
 | Solidity | `0.8.34` (exact) | Production contracts use `pragma solidity 0.8.34;` (no caret); pinned in both `foundry.toml` and `hardhat.config.ts`. Hardhat 2.28.6 prints a "0.8.34 is not fully supported yet" warning — this only degrades stack traces; bytecode is correct. |
@@ -93,7 +94,7 @@ Hardhat and Foundry must produce **identical bytecode** for Etherscan / BSCScan 
 - `bytecode_hash` / `metadata.bytecodeHash` = `'ipfs'`
 - `optimizer_runs` / `optimizer.runs` = `20_000`
 
-Don't edit one without the other.
+Don't edit one without the other. CI enforces this on every PR via `.github/workflows/bytecode-diff.yml` + `scripts/check-bytecode.js`: it strips the CBOR metadata trailer (which embeds an IPFS hash that is path-dependent and legitimately differs between toolchains) and asserts the runtime bytecode is byte-identical. The IPFS hash divergence is reported informationally; a runtime mismatch fails the workflow.
 
 ## License
 
@@ -114,12 +115,20 @@ bridge/
 ├── tasks/
 │   ├── sendOFT.ts           ← `hardhat send` task: quote + approve + send
 │   ├── sendEvm.ts
+│   ├── handoff.ts           ← `lz:oapp:handoff` — atomic, idempotent setDelegate + transferOwnership
 │   └── ...
+├── scripts/
+│   ├── check-bytecode.js    ← Hardhat vs Foundry runtime bytecode diff (strips CBOR metadata)
+│   └── check-dvn.js         ← pre-deploy DVN liveness probe (LZ metadata registry + RPC)
 ├── test/                    ← Foundry + Hardhat tests
+├── .github/
+│   └── workflows/bytecode-diff.yml  ← CI: enforces cross-toolchain bytecode determinism
 ├── foundry.toml
 ├── hardhat.config.ts        ← networks: bsc (oftAdapter.tokenAddress) + ethereum (wrappedOft.reserveAddress)
 ├── layerzero.config.ts      ← BSC↔ETH pathway, 2 DVNs, confirmations, enforced options
-├── package.json
+├── package.json             ← `packageManager: yarn@4.14.1` (corepack)
+├── .yarnrc.yml              ← yarn 4 config (nodeLinker, packageExtensions, logFilters)
+├── yarn.lock
 ├── .env.example             ← commented placeholders for RPC / keys / multisigs
 ├── LICENSE                  ← Apache-2.0
 └── CLAUDE.md                ← this file
@@ -176,6 +185,10 @@ Steps 1–5 should run in a single operator session — every minute the deploye
 - **Endpoint V2 address.** `0x1a44076050125825900e736c501f859c50fE728c` on every supported EVM mainnet/testnet. The Hardhat plugin pulls this automatically based on `eid`.
 - **Approval before send (BSC side).** Users must `approve(adapter, amount)` on the ON token before calling `send()` on `ONOFTAdapter`.
 - **Multisig hand-off.** Deployer EOA owns the contracts until step 5 of the post-deploy checklist (`lz:oapp:handoff`). Don't go live without finishing the hand-off — until then, the deploy key can rewire peers and forge inbound messages.
+
+## CI
+
+- **`.github/workflows/bytecode-diff.yml`** — runs on every push to `main` and on PRs that touch `contracts/`, `foundry.toml`, `hardhat.config.ts`, the bytecode script, the workflow itself, `package.json`, or `yarn.lock`. Provisions yarn 4 via `corepack prepare yarn@4.14.1 --activate` (NOT just `corepack enable`, because GHA's ubuntu-latest pre-installs yarn classic 1.22 and the classic shim wins on PATH unless we explicitly activate). Caches `.yarn/cache` keyed on `yarn.lock` via `actions/cache@v4` rather than `setup-node`'s `cache: 'yarn'` (which would query yarn classic for the cache folder *before* corepack runs). Compiles with both Hardhat and Foundry, then asserts byte-identical runtime bytecode.
 
 ## Security
 
