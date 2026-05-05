@@ -27,7 +27,7 @@ Architecture rationale and the rejected alternatives are documented in [CLAUDE.m
 ```sh
 git clone <this-repo> bridge
 cd bridge
-npm install            # or: pnpm install (pnpm-lock.yaml is canonical)
+yarn install           # yarn.lock is the canonical lockfile (yarn 4 via packageManager field)
 ```
 
 ## Step 2 — Configure `.env`
@@ -89,8 +89,8 @@ If either chain's ON has unexpected behaviour, do not deploy. The forked dry-run
 ## Step 4 — Compile
 
 ```sh
-npm run compile        # Hardhat + Foundry parallel compile
-npm test               # forge test + hardhat test
+yarn compile           # Hardhat + Foundry parallel compile
+yarn test              # forge test + hardhat test
 ```
 
 Both must pass before proceeding.
@@ -100,10 +100,10 @@ Both must pass before proceeding.
 Before deploying for real, run the full bridge flow end-to-end against forked copies of BSC and Ethereum mainnet. The dry-run deploys both contracts against the **real** ON tokens on each fork and exercises every code path: BSC→ETH plain / seeded reserve / composed, ETH→BSC round trip, and the manual `wrap` / `unwrap` / `seedReserve` surface. It also asserts the Step 3 preconditions (BSC ON is lossless; ETH ON reports 18 decimals) on actual mainnet state. Real DVN/Executor infrastructure is bypassed — destination delivery is simulated by impersonating the LayerZero endpoint, so only the on-chain logic of the bridge contracts and the real ON tokens is exercised.
 
 ```sh
-npm run test:dryrun        # picks up RPC_URL_BSC and RPC_URL_ETH from .env
+yarn test:dryrun           # picks up RPC_URL_BSC and RPC_URL_ETH from .env
 ```
 
-Expect 7 passing tests in ~20 seconds against archive-quality RPCs. The test skips cleanly if either RPC env var is unset, so `npm test` stays green without RPC credentials.
+Expect 7 passing tests in ~20 seconds against archive-quality RPCs. The test skips cleanly if either RPC env var is unset, so `yarn test` stays green without RPC credentials.
 
 **If any test fails, do not deploy.** Most common failure modes:
 
@@ -114,6 +114,21 @@ Expect 7 passing tests in ~20 seconds against archive-quality RPCs. The test ski
 | `test_bridge_*` reverts inside `quoteSend` / `send` | The RPC is missing state needed by the LayerZero endpoint (default send library, DVN config). Use an archive-quality RPC. |
 
 Re-run the dry-run whenever the contracts, the ON token addresses, or the LZ endpoint configuration change. Implementation lives in [`test/foundry/DryRun.t.sol`](./test/foundry/DryRun.t.sol).
+
+### 5b. Verify required DVNs are live
+
+The bridge requires both `LayerZero Labs` and `Google` (the DVN run by Google Cloud) to attest before a message is delivered. If either is unavailable on either chain at deploy time, `lz:oapp:wire` will write a config that cannot deliver messages. Run:
+
+```sh
+yarn check:dvn             # picks up RPC_URL_BSC and RPC_URL_ETH from .env
+```
+
+The script fetches the [LayerZero metadata registry](https://metadata.layerzero-api.com/v1/metadata) (the same source `metadata-tools` uses at wire time), resolves each required DVN's canonical name to its per-chain address, then on each mainnet:
+
+- confirms the resolved address has bytecode,
+- calls `quorum()` to confirm the DVN responds.
+
+It exits non-zero if anything is missing. Run it again immediately before `lz:oapp:wire` (Step 9) — it's the last opportunity to catch a DVN that has been deprecated or rotated since you last checked.
 
 ## Step 6 — Deploy `ONOFTAdapter` on BSC
 
@@ -191,7 +206,7 @@ Expect roughly:
 
 - 1× `setPeer` on BSC (peer = wON on Ethereum)
 - 1× `setPeer` on Ethereum (peer = adapter on BSC)
-- 1× `setConfig` on each side for **send** ULN (DVN = LayerZero Labs + Google Cloud, confirmations)
+- 1× `setConfig` on each side for **send** ULN (DVN = LayerZero Labs + Google [the DVN run by Google Cloud], confirmations)
 - 1× `setConfig` on each side for **receive** ULN
 - 1× `setEnforcedOptions` on each side (`LZ_RECEIVE` gas, applied to both `msgType: 1` SEND and `msgType: 2` SEND_AND_CALL — BSC inbound = 250k; ETH inbound = 300k for the composed-mint headroom)
 
@@ -206,8 +221,8 @@ npx hardhat lz:oapp:config:get --oapp-config layerzero.config.ts
 
 Both sides should show:
 - Peer correctly set to the counterpart contract
-- Required DVNs: 2 (LayerZero Labs + Google Cloud)
-- Confirmations: 20 BSC→ETH, 15 ETH→BSC
+- Required DVNs: 2 (LayerZero Labs + Google — DVN canonical names; Google here is the DVN run by Google Cloud)
+- Confirmations: 30 BSC→ETH, 15 ETH→BSC
 - Enforced `LZ_RECEIVE` gas, applied to both `msgType: 1` (SEND) and `msgType: 2` (SEND_AND_CALL): 250,000 on BSC inbound, 300,000 on ETH inbound
 
 ## Step 11 — Smoke test with a tiny amount
@@ -343,7 +358,7 @@ Reverse direction (ETH → BSC) is identical against `wON` — no `approve` need
 | `lz:deploy` says "oftAdapter not configured, skipping" on Ethereum | Working as intended — ETH only deploys `WrappedON`, BSC only deploys `ONOFTAdapter` | none |
 | `lz:oapp:wire` shows zero diff after deploy | Already wired — re-running is a no-op | none |
 | Send tx reverts with `LZ_DefaultSendLibUnavailable` or similar | Wire step never ran or failed | Run `lz:oapp:wire` |
-| Send succeeds on source but never delivers on destination | DVN issue, executor underfunded, or insufficient confirmations elapsed | Check [LayerZero Scan](https://layerzeroscan.com/), ensure both DVNs attested. Default confirmations take ≈ 60s (BSC→ETH) and ≈ 3min (ETH→BSC). |
+| Send succeeds on source but never delivers on destination | DVN issue, executor underfunded, or insufficient confirmations elapsed | Check [LayerZero Scan](https://layerzeroscan.com/), ensure both DVNs attested. Default confirmations take ≈ 90s (BSC→ETH, 30 confs × ~3s) and ≈ 3min (ETH→BSC, 15 confs × ~12s). |
 | `transferFrom` reverts inside `send()` | User didn't `approve(adapter, amount)` on the ON token | Approve first |
 | wON balance on ETH doesn't match expected amount | Decimal mismatch — almost certainly impossible since both are 18, but if a future ON deploys with different decimals it WILL silently lose dust | Check `decimalConversionRate()` on both contracts |
 

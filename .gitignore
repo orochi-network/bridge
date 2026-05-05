@@ -16,8 +16,13 @@ artifacts
 # foundry test compilation files
 out
 
-# pnpm
-pnpm-error.log
+# yarn 4 (Berry) — yarn binary is provisioned by corepack via the
+# `packageManager` field in package.json, so nothing under .yarn/ is
+# committed. .pnp.* is unused (we run with nodeLinker: node-modules).
+.yarn
+.pnp.*
+yarn-debug.log
+yarn-error.log
 
 # Editor and OS files
 .DS_Store
