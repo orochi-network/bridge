@@ -162,7 +162,7 @@ npx hardhat lz:oft:send --network ethereum --src-eid 30101 --dst-eid 30102 --to 
 2. ✅ Run `lz:oapp:wire` — confirm both peers, DVN config, and enforced options applied.
 3. ✅ Run `lz:oapp:peers:get` to confirm bidirectional peers.
 4. ✅ Send a small test amount BSC→ETH and ETH→BSC; confirm balances move losslessly.
-5. ✅ Run `lz:oapp:handoff` on each network to atomically `setDelegate(multisig)` then `transferOwnership(multisig)` (correct order; the task is idempotent and refuses to run if the current owner is unexpected). Reads multisig from `OWNER_BSC` / `OWNER_ETH`.
+5. ✅ Run `lz:oapp:handoff` on each network to atomically `setDelegate(multisig)` then `transferOwnership(multisig)` (correct order; the task is idempotent, refuses to run if the current owner is unexpected, and self-verifies `lz:oapp:wire` completion via the `peers(remoteEid)` and `endpoint.delegates(oapp)` pre-flight checks before transferring). Reads multisig from `OWNER_BSC` / `OWNER_ETH`.
 6. ✅ Have multisig signers confirm they can call admin functions (sanity check).
 
 Steps 1–5 should run in a single operator session — every minute the deployer EOA holds `owner` is a minute a hot-key compromise can rewire peers or forge messages.

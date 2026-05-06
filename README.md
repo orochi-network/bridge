@@ -279,7 +279,7 @@ npx hardhat lz:oapp:handoff --network bsc --contract ONOFTAdapter
 npx hardhat lz:oapp:handoff --network ethereum --contract WrappedON
 ```
 
-The task reads the multisig from `OWNER_BSC` / `OWNER_ETH` in `.env`, calls `setDelegate` first (still requires the deployer as owner), then `transferOwnership`. It refuses to run if the current owner is unexpected and is a no-op if the handoff already completed, so it's safe to re-run from operator automation.
+The task reads the multisig from `OWNER_BSC` / `OWNER_ETH` in `.env`, calls `setDelegate` first (still requires the deployer as owner), then `transferOwnership`. It refuses to run if the current owner is unexpected and is a no-op if the handoff already completed, so it's safe to re-run from operator automation. It also refuses to run if `lz:oapp:wire` has not been applied on this side — `peers(remoteEid)` must be non-zero and a delegate must be set on the LayerZero endpoint — so the multisig never inherits a partially-wired OApp.
 
 Confirm:
 

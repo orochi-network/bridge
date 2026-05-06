@@ -1,6 +1,8 @@
 import { task, types } from 'hardhat/config'
 import { HardhatRuntimeEnvironment } from 'hardhat/types'
 
+import { EndpointId } from '@layerzerolabs/lz-definitions'
+
 /**
  * `lz:oapp:handoff` — atomic ownership + delegate transfer to the production
  * multisig.
@@ -12,6 +14,16 @@ import { HardhatRuntimeEnvironment } from 'hardhat/types'
  * peer. The post-deploy checklist required two manual transactions per
  * chain; this task collapses them into a single command per network so the
  * deploy → wire → handoff sequence is atomic from the operator's view.
+ *
+ * Pre-flight: refuses to proceed unless the OApp is already wired. Concretely
+ *   - peers(remoteEid) on the OApp must be non-zero (proves `lz:oapp:wire`
+ *     applied the BSC↔ETH peer set on this side); and
+ *   - delegates(oapp) on the LayerZero endpoint must be non-zero (proves a
+ *     delegate was set; otherwise transferring ownership would leave the
+ *     OApp without anyone able to call setDelegate / setEnforcedOptions
+ *     except via the multisig).
+ * This protects against handing off a partially-wired OApp to the multisig,
+ * which would force every remaining wire step through N-of-M signatures.
  *
  * Usage:
  *   OWNER_BSC=0x... npx hardhat lz:oapp:handoff --network bsc \
@@ -34,6 +46,13 @@ interface HandoffArgs {
 const ENV_KEY_BY_NETWORK: Record<string, string> = {
     bsc: 'OWNER_BSC',
     ethereum: 'OWNER_ETH',
+}
+
+// Mirror of the BSC↔ETH pathway declared in layerzero.config.ts. Used by the
+// pre-flight check to assert that `peers(remoteEid)` was set on this side.
+const REMOTE_EID_BY_NETWORK: Record<string, number> = {
+    bsc: EndpointId.ETHEREUM_V2_MAINNET,
+    ethereum: EndpointId.BSC_V2_MAINNET,
 }
 
 task('lz:oapp:handoff', 'Transfer delegate then ownership of an OApp to the production multisig')
@@ -67,6 +86,8 @@ task('lz:oapp:handoff', 'Transfer delegate then ownership of an OApp to the prod
             deployment.address,
             [
                 'function owner() view returns (address)',
+                'function endpoint() view returns (address)',
+                'function peers(uint32) view returns (bytes32)',
                 'function setDelegate(address)',
                 'function transferOwnership(address)',
             ],
@@ -86,6 +107,48 @@ task('lz:oapp:handoff', 'Transfer delegate then ownership of an OApp to the prod
             throw new Error(
                 `Refusing to hand off: ${args.contract} owner is ${currentOwner}, expected deployer ${deployer} or multisig ${multisig}. ` +
                     `The contract is owned by an unexpected address — investigate before proceeding.`
+            )
+        }
+
+        // Pre-flight: refuse to hand off an OApp that has not been wired.
+        // After ownership transfers to the multisig, every remaining wire
+        // step (setPeer, setDelegate, setEnforcedOptions, setSendLibrary,
+        // setReceiveLibrary, setConfig) requires N-of-M multisig signatures.
+        // Catching the unwired state here keeps the deploy → wire → handoff
+        // sequence operator-recoverable.
+        const remoteEid = REMOTE_EID_BY_NETWORK[network.name]
+        if (remoteEid === undefined) {
+            throw new Error(
+                `Unknown network "${network.name}": cannot determine remote EID for the peer pre-flight check. ` +
+                    `Update REMOTE_EID_BY_NETWORK in tasks/handoff.ts if you have added a new network.`
+            )
+        }
+        const peer: string = await oapp.peers(remoteEid)
+        if (ethers.BigNumber.from(peer).isZero()) {
+            throw new Error(
+                `Refusing to hand off: peers(${remoteEid}) is bytes32(0) on ${args.contract}. ` +
+                    `Run \`npx hardhat lz:oapp:wire --oapp-config layerzero.config.ts\` first; the multisig is not the right party to set peers.`
+            )
+        }
+
+        const endpointAddress: string = await oapp.endpoint()
+        const endpoint = new ethers.Contract(
+            endpointAddress,
+            ['function delegates(address) view returns (address)'],
+            signer
+        )
+        const delegate: string = await endpoint.delegates(deployment.address)
+        if (delegate === ethers.constants.AddressZero) {
+            throw new Error(
+                `Refusing to hand off: endpoint.delegates(${deployment.address}) is address(0). ` +
+                    `Run \`npx hardhat lz:oapp:wire --oapp-config layerzero.config.ts\` first to set a delegate; ` +
+                    `transferring ownership now would leave the OApp with no delegate to call setEnforcedOptions / setConfig.`
+            )
+        }
+        if (delegate.toLowerCase() !== deployer.toLowerCase()) {
+            console.warn(
+                `WARNING: current delegate (${delegate}) is not the deployer (${deployer}). ` +
+                    `Proceeding will overwrite it with the multisig.`
             )
         }
 

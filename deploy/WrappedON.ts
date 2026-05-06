@@ -38,7 +38,12 @@ const deploy: DeployFunction = async (hre) => {
             hre.network.config.wrappedOft.reserveAddress, // pre-existing ETH ON used as the unwrap reserve
         ],
         log: true,
-        skipIfAlreadyDeployed: false,
+        // Idempotent on re-run: a redeploy would mint a fresh wON with an
+        // empty reserve, no peer, and the EOA as owner — orphaning the
+        // production instance plus any seeded reserve and outstanding wON.
+        // Force redeploys on test networks by removing the artifact or
+        // running `npx hardhat deploy --reset`.
+        skipIfAlreadyDeployed: true,
     })
 
     console.log(`Deployed contract: ${contractName}, network: ${hre.network.name}, address: ${address}`)
