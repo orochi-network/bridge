@@ -7,7 +7,7 @@ LayerZero V2 OFT bridge for the **ON** token.
 | **BSC** mainnet | `ONOFTAdapter` | wraps existing [`ON`](https://bscscan.com/address/0x0e4F6209eD984b21EDEA43acE6e09559eD051D48) at `0x0e4F...1D48` | Locks ON on outbound; releases on inbound. |
 | **Ethereum** mainnet | `WrappedON` | mints/burns `wON` ("Wrapped ON"); holds `ON` reserve | Auto-unwraps to real ON when reserve covers, else mints wON. Manual `wrap` / `unwrap` / `seedReserve`. |
 
-Architecture rationale and the rejected alternatives are documented in [CLAUDE.md](./CLAUDE.md). Trust assumptions, audit findings, and operator obligations are in [SECURITY.md](./SECURITY.md) — read it before any production change. To report a vulnerability: chiro@orochi.network.
+Architecture rationale and the rejected alternatives are documented in [CLAUDE.md](./CLAUDE.md). Trust assumptions, audit findings, and operator obligations are in [docs/SECURITY.md](./docs/SECURITY.md) — read it before any production change. To report a vulnerability: chiro@orochi.network.
 
 ---
 

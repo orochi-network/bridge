@@ -123,33 +123,6 @@ fix references the commit that lands it.
   to `0xdead`, which is visible on-chain as a burn rather than a stuck or
   silently-lost message.
 
-### LOW / cleanup
-
-- Caret pragma in `contracts/mocks/ONOFTAdapterMock.sol` replaced with the
-  exact pin `0.8.34` to match the project policy.
-- `deploy/MyERC20Mock.ts` gated with `network.live` so a stray
-  `--tags MyERC20Mock` cannot deploy a useless mock to mainnet.
-- Required DVN canonical name corrected from `'Google Cloud'` to `'Google'`
-  in `layerzero.config.ts`. The LayerZero metadata registry's
-  `canonicalName` for the DVN run by Google Cloud is `Google` (its `id` is
-  `google-cloud`). `metadata-tools` does an exact (`===`) `canonicalName`
-  match at `lz:oapp:wire` time — the same exact-match rule applies to
-  executor names — and the previous string would have failed wire with
-  `Can't find DVN: "Google Cloud" on chainKey: "bsc"`.
-- Pre-deploy DVN liveness probe added (`scripts/check-dvn.js`, exposed as
-  `yarn check:dvn`). Fetches the LZ metadata registry, resolves each
-  required DVN canonical name to a per-chain address, then verifies the
-  contract has bytecode and responds to `quorum()` on each mainnet.
-- Bytecode-diff CI added (`.github/workflows/bytecode-diff.yml` +
-  `scripts/check-bytecode.js`, exposed as `yarn check:bytecode`).
-  Compares Hardhat and Foundry `deployedBytecode` for every production
-  contract after stripping the CBOR metadata trailer (which embeds an IPFS
-  hash that legitimately differs between toolchains because of source-path
-  resolution). Asserts byte-identical runtime code on every PR touching
-  `contracts/` or compiler settings. Stripped runtime is currently
-  identical for both `ONOFTAdapter` (13,161 bytes) and `WrappedON`
-  (18,098 bytes).
-
 #### M5 — No throttle on outbound flow per EID
 
 - **Where:** `ONOFTAdapter._debit` and `WrappedON._debit` (inherited from
@@ -176,6 +149,33 @@ fix references the commit that lands it.
   bounds a *single-window* drain, not a sustained one — operators must
   still monitor cumulative outbound flow off-chain and tighten or reset
   if the protocol comes under attack across multiple windows.
+
+### LOW / cleanup
+
+- Caret pragma in `contracts/mocks/ONOFTAdapterMock.sol` replaced with the
+  exact pin `0.8.34` to match the project policy.
+- `deploy/MyERC20Mock.ts` gated with `network.live` so a stray
+  `--tags MyERC20Mock` cannot deploy a useless mock to mainnet.
+- Required DVN canonical name corrected from `'Google Cloud'` to `'Google'`
+  in `layerzero.config.ts`. The LayerZero metadata registry's
+  `canonicalName` for the DVN run by Google Cloud is `Google` (its `id` is
+  `google-cloud`). `metadata-tools` does an exact (`===`) `canonicalName`
+  match at `lz:oapp:wire` time — the same exact-match rule applies to
+  executor names — and the previous string would have failed wire with
+  `Can't find DVN: "Google Cloud" on chainKey: "bsc"`.
+- Pre-deploy DVN liveness probe added (`scripts/check-dvn.js`, exposed as
+  `yarn check:dvn`). Fetches the LZ metadata registry, resolves each
+  required DVN canonical name to a per-chain address, then verifies the
+  contract has bytecode and responds to `quorum()` on each mainnet.
+- Bytecode-diff CI added (`.github/workflows/bytecode-diff.yml` +
+  `scripts/check-bytecode.js`, exposed as `yarn check:bytecode`).
+  Compares Hardhat and Foundry `deployedBytecode` for every production
+  contract after stripping the CBOR metadata trailer (which embeds an IPFS
+  hash that legitimately differs between toolchains because of source-path
+  resolution). Asserts byte-identical runtime code on every PR touching
+  `contracts/` or compiler settings. Stripped runtime is currently
+  identical for both `ONOFTAdapter` (13,161 bytes) and `WrappedON`
+  (18,098 bytes).
 
 ### Resolved (no further action)
 

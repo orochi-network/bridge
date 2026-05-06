@@ -10,7 +10,7 @@ name: bytecode-diff
 # patterns (issue titles, PR bodies, commit messages, head_ref, etc.) do not
 # apply here. All `run:` commands are static, fixed strings.
 #
-# Documented in SECURITY.md.
+# Documented in docs/SECURITY.md.
 
 on:
   push:

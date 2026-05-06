@@ -195,9 +195,39 @@ Steps 1–5 should run in a single operator session — every minute the deploye
 
 - **`.github/workflows/bytecode-diff.yml`** — runs on every push to `main` and on PRs that touch `contracts/`, `foundry.toml`, `hardhat.config.ts`, the bytecode script, the workflow itself, `package.json`, or `yarn.lock`. Provisions yarn 4 via `corepack prepare yarn@4.14.1 --activate` (NOT just `corepack enable`, because GHA's ubuntu-latest pre-installs yarn classic 1.22 and the classic shim wins on PATH unless we explicitly activate). Caches `.yarn/cache` keyed on `yarn.lock` via `actions/cache@v4` rather than `setup-node`'s `cache: 'yarn'` (which would query yarn classic for the cache folder *before* corepack runs). Compiles with both Hardhat and Foundry, then asserts byte-identical runtime bytecode.
 
-## Security
+## Security posture
 
-`SECURITY.md` documents the trust assumptions, audit findings, fixes, and operator obligations for the bridge. Read it before any production change. Reporting a vulnerability: chiro@orochi.network.
+Full audit findings, fixes, decisions, and operator obligations are in [docs/SECURITY.md](./docs/SECURITY.md). Read it before any production change. Vulnerability reports: chiro@orochi.network.
+
+Status snapshot of the audit findings on commit `04b16f6`:
+
+**Fixed in code (HIGH).**
+- **H1** Asymmetric fee-on-transfer protection — balance-delta guards in both `ONOFTAdapter._debit` and `WrappedON._credit` (auto-unwrap branch falls back to mint on mismatch).
+- **H2** Manual ownership / delegate handoff — automated and made idempotent by `tasks/handoff.ts` (`lz:oapp:handoff`), with pre-flight checks that the OApp is wired before transferring.
+- **H3** BSC→ETH confirmations 20 → 30 to clear historical reorg depths.
+
+**Fixed in code (MEDIUM).**
+- **M1** `_lzReceive` composed branch duplicated upstream logic — refactored to a transient flag + `super._lzReceive`, so `UnwrapFallbackToMint` no longer false-positives on every composed message.
+- **M2** Enforced executor gas symmetric and missing for composed sends — split per-leg AND per-msgType (BSC inbound 250k; ETH inbound 300k for `msgType 1` and `msgType 2`).
+- **M4** `_credit` recipient hardening — both contracts redirect `address(0)` and `address(this)` to `address(0xdead)`; on `WrappedON` the redirect forces the mint branch so reserve is never sent to a dead recipient.
+- **M5** No throttle on outbound flow per EID — LayerZero `RateLimiter` mixed in on both contracts (outbound only, per-EID, owner-only setters; unconfigured EIDs are unlimited so a fresh deploy is usable until the multisig dials in caps).
+
+**Fixed in code (LOW / cleanup).** Exact `0.8.34` pragma pin in mocks; `MyERC20Mock` deploy gated to non-live networks; DVN canonical name `'Google Cloud'` → `'Google'` (the metadata registry uses an exact canonicalName match); pre-deploy `yarn check:dvn` script; bytecode-diff CI (`yarn check:bytecode`) asserting Hardhat/Foundry runtime parity.
+
+**Decision (no code change).**
+- **M3** DVN config kept at 2-required + 0-optional. A delivery failure must be visible and triaged, not silently routed around. A third DVN would only be added if liveness incidents outweighed the per-message DVN fee, which is not the case at the bridge's current message profile.
+
+**Resolved (no further action).**
+- ETH ON token migration plan — both ON tokens are immutable on their deployed addresses, the issuer confirmed no upgrade path, and the on-chain delta guards re-assert losslessness on every send / `wrap` / `seedReserve` so any future deviation surfaces as an explicit revert.
+
+**Outstanding (operator obligations, not code).**
+- Pre-deploy: run `yarn test:dryrun` and `yarn check:dvn` against archive RPCs.
+- Compress deploy → `lz:oapp:wire` → `lz:oapp:handoff` into a single operator session — every minute the deployer EOA holds `owner` is exposure.
+- Post-handoff: multisig calls `setRateLimits` on both contracts (Step 7 in the post-deploy checklist). Until then, both EIDs are unconfigured → unlimited.
+- Monitor `WrappedON.reserve()` against an agreed daily-flow threshold; refill via `wrap` (recoverable) or `seedReserve` (one-way subsidy).
+- Monitor cumulative outbound flow per EID off-chain — the on-chain RateLimiter only bounds a single window, not a multi-window sustained drain.
+- Subscribe to `UnwrapFallbackToMint` event alerts; after the M1 fix, every emission indicates either a depleted reserve or a fee-on-transfer mismatch in the auto-unwrap path.
+- Coordinate with the ON token issuer on both chains before any pause / upgrade / blacklist change.
 
 ## What we deliberately did NOT do
 
