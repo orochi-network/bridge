@@ -150,6 +150,33 @@ fix references the commit that lands it.
   identical for both `ONOFTAdapter` (13,161 bytes) and `WrappedON`
   (18,098 bytes).
 
+#### M5 — No throttle on outbound flow per EID
+
+- **Where:** `ONOFTAdapter._debit` and `WrappedON._debit` (inherited from
+  upstream OFT) accept arbitrarily large per-window outbound flow. A
+  compromised hot key on a user account, or a contract-level exploit that
+  drains an integrator, can move the entire bucket in a single block with
+  no on-chain ceiling.
+- **Why it matters:** the canonical reserve on BSC and the unwrap reserve
+  on ETH are bounded resources. An unbounded drain is more destructive
+  than a metered one — operators have no time-window to react before the
+  reserve is gone.
+- **Fix (this branch):** both contracts inherit the LayerZero
+  `RateLimiter` extension and call `_outflow(dstEid, amountSentLD)` in
+  `_debit` after the lossless-transfer guard. Owner-only setters
+  (`setRateLimits` / `resetRateLimits`) are exposed for the multisig.
+  Inbound (`_credit`) is intentionally NOT rate-limited: an arrived
+  message has already been debited on the source chain, so throttling it
+  can only brick LayerZero delivery (the message becomes permanently
+  stuck when the cap is hit) without recovering any tokens. Unconfigured
+  EIDs (`limit==0 && window==0`) bypass the check so a freshly-deployed
+  contract is usable before the multisig dials in production limits.
+  Sizing guidance and the failure mode (`RateLimitExceeded`) are
+  documented in the README "Rate limiting" section. Note: rate limiting
+  bounds a *single-window* drain, not a sustained one — operators must
+  still monitor cumulative outbound flow off-chain and tighten or reset
+  if the protocol comes under attack across multiple windows.
+
 ### Resolved (no further action)
 
 - **Migration plan if the ETH ON token ever upgrades.** Both ON tokens are
@@ -203,5 +230,14 @@ The following are documented in `CLAUDE.md` and remain by design.
 - Subscribe to alerts on `UnwrapFallbackToMint` events: the false-positive
   case from M1 is gone, so every emission now indicates either a depleted
   reserve or a fee-on-transfer mismatch in the auto-unwrap path.
+- Configure outbound rate limits on both contracts via `setRateLimits`
+  immediately after the Step-12 multisig handoff. Unconfigured EIDs are
+  treated as disabled — the bridge is usable from block one but
+  unprotected against single-block drain until the multisig dials limits
+  in. See README "Rate limiting" for sizing guidance.
+- Monitor cumulative outbound flow per EID off-chain. The on-chain
+  `RateLimiter` only bounds a single window; sustained attack traffic
+  can still drain over several windows. Tighten or reset limits if
+  cumulative flow looks anomalous.
 - Coordinate with the ON token issuer on both chains before any pause /
   upgrade / blacklist change.

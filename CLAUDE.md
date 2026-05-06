@@ -63,7 +63,11 @@ At rest (no in-flight messages): every wON in circulation is a claim on real ON 
 
 ## Origin
 
-Scaffolded by copying `examples/oft-adapter` from [`LayerZero-Labs/devtools`](https://github.com/LayerZero-Labs/devtools/tree/main/examples/oft-adapter) (the same template `npx create-lz-oapp -e oft-adapter` produces). `ONOFTAdapter.sol` **diverges** from the upstream template in two places: `_debit` adds a balance-delta guard for fee-on-transfer tokens, and `_credit` redirects `address(0)` / `address(this)` recipients to `address(0xdead)` (matching the same hardening in WrappedON). `WrappedON.sol` **diverges** from the template: it adds the auto-unwrap `_credit` override and the `wrap`/`unwrap`/`seedReserve` surface described above.
+Scaffolded by copying `examples/oft-adapter` from [`LayerZero-Labs/devtools`](https://github.com/LayerZero-Labs/devtools/tree/main/examples/oft-adapter) (the same template `npx create-lz-oapp -e oft-adapter` produces). `ONOFTAdapter.sol` **diverges** from the upstream template in three places: `_debit` adds a balance-delta guard for fee-on-transfer tokens AND consults the LayerZero `RateLimiter` extension (outbound-only, per-EID); `_credit` redirects `address(0)` / `address(this)` recipients to `address(0xdead)` (matching the same hardening in WrappedON). `WrappedON.sol` **diverges** from the template: it adds the auto-unwrap `_credit` override, the `wrap`/`unwrap`/`seedReserve` surface described above, and the same outbound `RateLimiter` integration.
+
+## Rate limiting
+
+Both contracts mix in `@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLimiter`. **Outbound only** (per-EID, sliding window with linear decay); inbound is intentionally NOT rate-limited because an arrived message is the tail of an already-debited outbound, so throttling can only brick LayerZero delivery. Owner-only: `setRateLimits(RateLimitConfig[])`, `resetRateLimits(uint32[])`. Unconfigured EIDs (`limit==0 && window==0`) are treated as **disabled** so a fresh deploy is usable from block one; the multisig sets production limits via `setRateLimits` after the Step-12 handoff. Failure mode: `RateLimitExceeded()` reverts on the source-chain `send` call before any LayerZero plumbing engages, so users keep their funds. See README "Rate limiting" for sizing guidance and the multisig workflow.
 
 ## Production configuration decisions (locked in)
 
@@ -173,6 +177,7 @@ npx hardhat lz:oft:send --network ethereum --src-eid 30101 --dst-eid 30102 --to 
 4. ✅ Send a small test amount BSC→ETH and ETH→BSC; confirm balances move losslessly.
 5. ✅ Run `lz:oapp:handoff` on each network to atomically `setDelegate(multisig)` then `transferOwnership(multisig)` (correct order; the task is idempotent, refuses to run if the current owner is unexpected, and self-verifies `lz:oapp:wire` completion via the `peers(remoteEid)` and `endpoint.delegates(oapp)` pre-flight checks before transferring). Reads multisig from `OWNER_BSC` / `OWNER_ETH`.
 6. ✅ Have multisig signers confirm they can call admin functions (sanity check).
+7. ✅ Multisig calls `setRateLimits` on both contracts to apply production caps for the BSC↔ETH pathway. Until this runs, both EIDs are unconfigured and unlimited (see "Rate limiting" above).
 
 Steps 1–5 should run in a single operator session — every minute the deployer EOA holds `owner` is a minute a hot-key compromise can rewire peers or forge messages.
 

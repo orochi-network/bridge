@@ -8,6 +8,7 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { OFTMsgCodec } from "@layerzerolabs/oft-evm/contracts/libs/OFTMsgCodec.sol";
 import { Origin } from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
+import { RateLimiter } from "@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLimiter.sol";
 
 /**
  * @title WrappedON (wON)
@@ -35,8 +36,15 @@ import { Origin } from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/I
  *      - If the ON token is paused or blacklists the recipient, the auto-unwrap
  *        branch reverts inside `_credit`, making the LayerZero message
  *        undeliverable until the lock lifts.
+ *
+ *      Outbound rate limiting (LayerZero `RateLimiter` extension) is applied
+ *      per destination EID in `_debit`. Inbound is intentionally NOT rate
+ *      limited: an inbound message is the tail of an already-sent outbound, so
+ *      throttling it cannot prevent the source-chain debit and only adds a way
+ *      to brick LayerZero delivery. Operators dial limits via `setRateLimits`
+ *      (owner-only). Unconfigured EIDs are unlimited — see `_outflowOrSkip`.
  */
-contract WrappedON is OFT {
+contract WrappedON is OFT, RateLimiter {
     using SafeERC20 for IERC20;
     using OFTMsgCodec for bytes;
 
@@ -85,6 +93,21 @@ contract WrappedON is OFT {
         return ON.balanceOf(address(this));
     }
 
+    /// @notice Owner-only: set per-destination outbound rate limits. See
+    ///         `RateLimiter.RateLimitConfig` for the struct layout.
+    /// @dev    Existing `amountInFlight` and `lastUpdated` are PRESERVED
+    ///         across a reconfigure (upstream `_setRateLimits` checkpoints
+    ///         decay at the old rate first).
+    function setRateLimits(RateLimitConfig[] calldata _rateLimitConfigs) external onlyOwner {
+        _setRateLimits(_rateLimitConfigs);
+    }
+
+    /// @notice Owner-only: zero out `amountInFlight` for the given EIDs.
+    ///         Use sparingly; discards the running window's accounting.
+    function resetRateLimits(uint32[] calldata _eids) external onlyOwner {
+        _resetRateLimits(_eids);
+    }
+
     /// @notice Burn `_amount` wON, receive `_amount` real ON 1:1. Reverts if the
     ///         reserve cannot cover the request.
     function unwrap(uint256 _amount) external {
@@ -125,6 +148,19 @@ contract WrappedON is OFT {
         uint256 received = ON.balanceOf(address(this)) - balanceBefore;
         if (received != _amount) revert UnexpectedTransferAmount(_amount, received);
         emit ReserveSeeded(msg.sender, received);
+    }
+
+    /// @dev Override of OFT's default `_debit`. Only addition vs. base is the
+    ///      pre-burn rate-limit check. The actual burn is delegated to super.
+    function _debit(
+        address _from,
+        uint256 _amountLD,
+        uint256 _minAmountLD,
+        uint32 _dstEid
+    ) internal virtual override returns (uint256 amountSentLD, uint256 amountReceivedLD) {
+        (amountSentLD, amountReceivedLD) = _debitView(_amountLD, _minAmountLD, _dstEid);
+        _outflowOrSkip(_dstEid, amountSentLD);
+        _burn(_from, amountSentLD);
     }
 
     /// @dev Override of OFTCore._lzReceive. Sets a per-message transient flag
@@ -193,5 +229,17 @@ contract WrappedON is OFT {
             emit UnwrapFallbackToMint(_to, _amountLD);
         }
         return _amountLD;
+    }
+
+    /// @dev RateLimiter._outflow rejects every send for any EID where both
+    ///      `limit` and `window` are zero (`amountCanBeSent == 0`), which is
+    ///      the storage default for an unconfigured EID. Treat that combo as
+    ///      "disabled" so a freshly-deployed contract remains usable until
+    ///      the multisig dials in production limits via `setRateLimits`.
+    ///      Setting either field non-zero opts that EID into enforcement.
+    function _outflowOrSkip(uint32 _dstEid, uint256 _amount) internal {
+        RateLimit storage rl = rateLimits[_dstEid];
+        if (rl.limit == 0 && rl.window == 0) return;
+        _outflow(_dstEid, _amount);
     }
 }

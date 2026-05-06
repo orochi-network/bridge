@@ -290,6 +290,10 @@ cast call <WON_ADDR>     "owner()(address)" --rpc-url $RPC_URL_ETH   # → $OWNE
 
 > Steps 6–12 should run in a single operator session. Every minute the deployer EOA holds `owner` is a minute a hot-key compromise can rewire peers or forge messages.
 
+## Step 13 — Configure rate limits (multisig)
+
+Both contracts ship with no rate limits set, which is treated as "disabled" so the bridge is usable from block one. **Configure production limits before opening the bridge to users** — see [Rate limiting](#rate-limiting) below for sizing guidance and the multisig calldata.
+
 🎉 The bridge is live.
 
 ---
@@ -326,6 +330,69 @@ cast send <WON_ADDR> "unwrap(uint256)" <amount_wei> \
 - **Front-running grief.** A wON holder can `unwrap` while a user's BSC→ETH bridge is in flight (~60s LZ delivery), forcing the inbound user onto the wON fallback. Auto-unwrap is best-effort, not guaranteed.
 - **ON pause/blacklist.** If the ON token is paused or blacklists the recipient, the auto-unwrap branch reverts inside `_credit`, making the LayerZero message undeliverable until the lock lifts. Operators should monitor delivery health.
 - **Composed messages.** `SEND_AND_CALL` always mints wON, even when the reserve covers the amount. The compose handler downstream needs wON for its own logic; auto-unwrap would deliver real ON instead. Recipients of composed messages can call `unwrap` separately.
+
+## Rate limiting
+
+Both contracts inherit the LayerZero [`RateLimiter`](https://docs.layerzero.network/v2/developers/evm/oft/quickstart#rate-limiting) extension, applied to **outbound** sends only, **per destination EID**, with a sliding-window linear-decay accounting model. Inbound (`_credit`) is intentionally NOT rate-limited — an inbound message is the tail of an already-debited outbound, so throttling it cannot prevent the source-chain transfer and only adds a way to brick LayerZero delivery.
+
+### Why
+
+- **Drain prevention.** Caps how much ON can leave BSC (or wON can be burned on ETH) inside any given window — bounds the blast radius of a key compromise or a contract bug.
+- **Reserve protection.** ETH-side outbound rate limiting bounds how fast wON holders can collectively unlock ON on BSC, smoothing reserve-management decisions on the ETH side.
+- **Compliance.** Bounded cross-chain velocity satisfies the controlled-transfer requirement many regulated treasuries impose on themselves.
+
+### Semantics
+
+| Term | Meaning |
+|------|---------|
+| `limit` (uint192) | Maximum LD-units that can be debited within one window per `dstEid`. |
+| `window` (uint64) | Window duration in seconds. Must be ≥ the chain's block time, otherwise the cap effectively resets every block. |
+| Decay | Linear: `(limit * elapsed) / window` is "freed up" every second from `amountInFlight`. After a full window of inactivity the bucket is fully refilled. |
+| Reconfigure | `setRateLimits` PRESERVES `amountInFlight` — tightening a limit cannot retroactively wipe the running window. The decay rate that applied to the prior window is checkpointed before the new rate kicks in. |
+| Reset | `resetRateLimits(eids)` zeros `amountInFlight` for the given EIDs — use sparingly, e.g. after a confirmed incident response. |
+
+### Defaults
+
+A freshly-deployed contract has **no rate limits set** for any EID. Both contracts treat the all-zero `(limit=0, window=0)` storage default as "disabled" and do not enforce a cap, so the bridge is usable from block one. The multisig is expected to dial in production limits via `setRateLimits` immediately after the post-deploy handoff.
+
+> Setting either `limit` OR `window` non-zero opts that EID into enforcement. To pause a previously-rate-limited EID without resetting in-flight accounting, set both back to zero.
+
+### Operator workflow
+
+```ts
+// example: cap BSC -> ETH outflow at 100,000 ON per hour
+const cfg = [
+  { dstEid: 30101 /* Ethereum */, limit: 100_000n * 10n ** 18n, window: 3600 },
+]
+await adapter.connect(multisig).setRateLimits(cfg)
+
+// example: same on the wON side, cap ETH -> BSC outflow at 100,000 wON per hour
+const cfgEth = [
+  { dstEid: 30102 /* BSC */, limit: 100_000n * 10n ** 18n, window: 3600 },
+]
+await wON.connect(multisig).setRateLimits(cfgEth)
+
+// query current bucket state (anyone can call)
+const [inFlight, canSend] = await adapter.getAmountCanBeSent(30101)
+```
+
+Both setters are `onlyOwner`. After Step 12 (handoff) the multisig is the only caller; before then the deployer EOA is.
+
+### Failure mode
+
+A send that would push `amountInFlight + amount > limit` reverts with `RateLimitExceeded()`. Integrators should catch this and either retry after enough time has elapsed for decay (poll `getAmountCanBeSent(dstEid)`) or fall back to a smaller send.
+
+### Sizing guidance
+
+- **Window ≥ chain block time × N.** On BSC (~3s) a 60-second window is the practical floor; on Ethereum (~12s) use ≥ 60s as well.
+- **Limit ≥ window.** When `limit < window` the per-second decay rounds to zero for small in-flight amounts, making the bucket lossy. Pick a limit denominated in whole ON, not wei.
+- **Set both sides.** BSC and ETH contracts have independent buckets — limiting only one side leaves the other free to drain in the opposite direction.
+
+### Known limitations
+
+- **Per-EID, not global.** The cap is keyed by destination EID. With only BSC↔ETH this is one bucket per direction; if a third chain is ever added (a second `WrappedON`), each direction needs its own configured limit.
+- **Block-ordering dependence.** Within a single block, transactions consume the bucket in execution order. A user transaction can be reordered behind another that exhausts the bucket and revert as a result.
+- **No global circuit breaker.** Rate limiting bounds a single-window drain, not a sustained one. Operators must still monitor cumulative outbound flow off-chain and reset/tighten if the protocol comes under attack across multiple windows.
 
 ## End-user send flow (for integrators)
 
