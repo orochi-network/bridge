@@ -8,6 +8,8 @@ import { SendParam } from "@layerzerolabs/oft-evm/contracts/interfaces/IOFT.sol"
 import { MessagingFee } from "@layerzerolabs/oft-evm/contracts/OFTCore.sol";
 
 import { ERC20Mock } from "../mocks/ERC20Mock.sol";
+import { ONOFTAdapter } from "../../contracts/ONOFTAdapter.sol";
+import { WrappedON } from "../../contracts/WrappedON.sol";
 import { ONOFTAdapterMock } from "../../contracts/mocks/ONOFTAdapterMock.sol";
 import { WrappedONMock } from "../../contracts/mocks/WrappedONMock.sol";
 
@@ -300,6 +302,63 @@ contract RateLimitTest is TestHelperOz5 {
     // -------------------------------------------------------------------------
     // setRateLimits emits + preserves in-flight on reconfigure
     // -------------------------------------------------------------------------
+
+    // -------------------------------------------------------------------------
+    // setRateLimits rejects the silent-disable shape (limit > 0, window = 0)
+    // -------------------------------------------------------------------------
+
+    /// @dev Upstream `_amountCanBeSent` substitutes `window = 1` when the
+    ///      configured window is 0 (div-by-zero guard). With `limit > 0`
+    ///      that makes the decay rate `limit` units per second, refilling
+    ///      the bucket every block while the contract still reports as
+    ///      "configured". `setRateLimits` rejects the shape so a fat-finger
+    ///      cannot silently disable enforcement.
+    function test_setRateLimits_rejectsWindowZeroWithNonZeroLimit_bsc() public {
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
+        cfg[0] = RateLimiter.RateLimitConfig({ dstEid: ETH_EID, limit: 100 ether, window: 0 });
+
+        vm.expectRevert(abi.encodeWithSelector(ONOFTAdapter.InvalidRateLimitConfig.selector, ETH_EID));
+        adapter.setRateLimits(cfg);
+    }
+
+    function test_setRateLimits_rejectsWindowZeroWithNonZeroLimit_eth() public {
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
+        cfg[0] = RateLimiter.RateLimitConfig({ dstEid: BSC_EID, limit: 100 ether, window: 0 });
+
+        vm.expectRevert(abi.encodeWithSelector(WrappedON.InvalidRateLimitConfig.selector, BSC_EID));
+        wON.setRateLimits(cfg);
+    }
+
+    /// @dev The all-zero `(0, 0)` sentinel must remain valid: it is the
+    ///      explicit "disabled" marker that `_outflowOrSkip` checks for.
+    function test_setRateLimits_acceptsAllZeroSentinel() public {
+        // First configure the EID, then "disable" it via the all-zero shape.
+        _setLimit(address(adapter), ETH_EID, 100 ether, 60);
+        _bscSend(alice, bob, 50 ether);
+
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
+        cfg[0] = RateLimiter.RateLimitConfig({ dstEid: ETH_EID, limit: 0, window: 0 });
+        adapter.setRateLimits(cfg);
+
+        // After disabling, an arbitrarily large send must succeed (bypass branch).
+        _bscSend(alice, bob, 500 ether);
+    }
+
+    /// @dev When the FIRST entry of the batch is invalid, the whole batch
+    ///      must revert before any storage write — verifies the validation
+    ///      runs before `_setRateLimits` and the EID id is reported correctly.
+    function test_setRateLimits_revertReportsOffendingEid() public {
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](2);
+        cfg[0] = RateLimiter.RateLimitConfig({ dstEid: ETH_EID, limit: 100 ether, window: 60 });
+        cfg[1] = RateLimiter.RateLimitConfig({ dstEid: 999, limit: 1 ether, window: 0 });
+
+        vm.expectRevert(abi.encodeWithSelector(ONOFTAdapter.InvalidRateLimitConfig.selector, uint32(999)));
+        adapter.setRateLimits(cfg);
+
+        // Confirm the valid entry was NOT applied (atomic revert).
+        (, uint256 canSend) = adapter.getAmountCanBeSent(ETH_EID);
+        assertEq(canSend, 0, "EID stayed unconfigured -> bypass-eligible, getAmountCanBeSent reads 0");
+    }
 
     function test_setRateLimits_preservesAmountInFlightAcrossReconfigure() public {
         _setLimit(address(adapter), ETH_EID, 100 ether, 60);

@@ -70,6 +70,7 @@ contract WrappedON is OFT, RateLimiter {
     error DecimalsMismatch(uint8 actual);
     error ReserveInsufficient(uint256 requested, uint256 available);
     error UnexpectedTransferAmount(uint256 expected, uint256 received);
+    error InvalidRateLimitConfig(uint32 dstEid);
 
     constructor(
         string memory _name,
@@ -98,7 +99,19 @@ contract WrappedON is OFT, RateLimiter {
     /// @dev    Existing `amountInFlight` and `lastUpdated` are PRESERVED
     ///         across a reconfigure (upstream `_setRateLimits` checkpoints
     ///         decay at the old rate first).
+    /// @dev    Rejects the silent-disable shape `(limit > 0, window = 0)`.
+    ///         Upstream `_amountCanBeSent` substitutes `window = 1` to avoid
+    ///         div-by-zero, which makes the decay rate `limit` units per
+    ///         second — the bucket effectively refills every block while
+    ///         `getAmountCanBeSent` reports a healthy "configured" view, so
+    ///         a fat-finger in multisig calldata can silently disable
+    ///         enforcement. The all-zero `(0, 0)` sentinel remains valid and
+    ///         is the explicit "disabled / unconfigured" marker.
     function setRateLimits(RateLimitConfig[] calldata _rateLimitConfigs) external onlyOwner {
+        for (uint256 i = 0; i < _rateLimitConfigs.length; i++) {
+            RateLimitConfig calldata cfg = _rateLimitConfigs[i];
+            if (cfg.window == 0 && cfg.limit != 0) revert InvalidRateLimitConfig(cfg.dstEid);
+        }
         _setRateLimits(_rateLimitConfigs);
     }
 
@@ -151,7 +164,11 @@ contract WrappedON is OFT, RateLimiter {
     }
 
     /// @dev Override of OFT's default `_debit`. Only addition vs. base is the
-    ///      pre-burn rate-limit check. The actual burn is delegated to super.
+    ///      pre-burn rate-limit check via `_outflowOrSkip`; the burn itself is
+    ///      issued inline via `_burn` (the base `_debit` is not called — the
+    ///      OZ ERC20 `_burn` and the upstream `OFT._debit` body are the same
+    ///      operation, so reproducing it inline keeps the override readable
+    ///      without a redundant `super._debit` round trip).
     function _debit(
         address _from,
         uint256 _amountLD,

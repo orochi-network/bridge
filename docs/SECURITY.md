@@ -135,9 +135,17 @@ fix references the commit that lands it.
   than a metered one — operators have no time-window to react before the
   reserve is gone.
 - **Fix (this branch):** both contracts inherit the LayerZero
-  `RateLimiter` extension and call `_outflow(dstEid, amountSentLD)` in
-  `_debit` after the lossless-transfer guard. Owner-only setters
-  (`setRateLimits` / `resetRateLimits`) are exposed for the multisig.
+  `RateLimiter` extension and call the `_outflowOrSkip(dstEid, amountSentLD)`
+  wrapper in `_debit` after the lossless-transfer guard. The wrapper
+  delegates to upstream `_outflow` when the EID is configured and skips
+  it for the all-zero `(limit=0, window=0)` sentinel so a freshly-deployed
+  contract is usable before the multisig dials in production limits.
+  `setRateLimits` rejects the silent-disable shape `(limit>0, window=0)`
+  with `InvalidRateLimitConfig` to prevent a fat-finger from silently
+  disabling enforcement (upstream's div-by-zero guard substitutes
+  `window=1`, which would refill the bucket every block).
+  Owner-only setters (`setRateLimits` / `resetRateLimits`) are exposed for
+  the multisig.
   Inbound (`_credit`) is intentionally NOT rate-limited: an arrived
   message has already been debited on the source chain, so throttling it
   can only brick LayerZero delivery (the message becomes permanently

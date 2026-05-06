@@ -60,6 +60,7 @@ contract ONOFTAdapter is OFTAdapter, RateLimiter {
     using SafeERC20 for IERC20;
 
     error UnexpectedTransferAmount(uint256 expected, uint256 received);
+    error InvalidRateLimitConfig(uint32 dstEid);
 
     constructor(
         address _token,
@@ -73,7 +74,19 @@ contract ONOFTAdapter is OFTAdapter, RateLimiter {
     ///         across a reconfigure (upstream `_setRateLimits` checkpoints
     ///         decay at the old rate first), so tightening limits cannot be
     ///         used to retroactively wipe the running window.
+    /// @dev    Rejects the silent-disable shape `(limit > 0, window = 0)`.
+    ///         Upstream `_amountCanBeSent` substitutes `window = 1` to avoid
+    ///         div-by-zero, which makes the decay rate `limit` units per
+    ///         second — the bucket effectively refills every block while
+    ///         `getAmountCanBeSent` reports a healthy "configured" view, so
+    ///         a fat-finger in multisig calldata can silently disable
+    ///         enforcement. The all-zero `(0, 0)` sentinel remains valid and
+    ///         is the explicit "disabled / unconfigured" marker.
     function setRateLimits(RateLimitConfig[] calldata _rateLimitConfigs) external onlyOwner {
+        for (uint256 i = 0; i < _rateLimitConfigs.length; i++) {
+            RateLimitConfig calldata cfg = _rateLimitConfigs[i];
+            if (cfg.window == 0 && cfg.limit != 0) revert InvalidRateLimitConfig(cfg.dstEid);
+        }
         _setRateLimits(_rateLimitConfigs);
     }
 
