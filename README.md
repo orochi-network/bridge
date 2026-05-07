@@ -292,7 +292,7 @@ cast call <WON_ADDR>     "owner()(address)" --rpc-url $RPC_URL_ETH   # → $OWNE
 
 ## Step 13 — Configure rate limits (multisig)
 
-Both contracts ship with no rate limits set, which is treated as "disabled" so the bridge is usable from block one. **Configure production limits before opening the bridge to users** — see [Rate limiting](#rate-limiting) below for sizing guidance and the multisig calldata.
+Both contracts ship with no rate limits set, which is treated as "fail-open" (unconfigured) so the bridge is usable from block one. **Configure production limits before opening the bridge to users** — see [Rate limiting](#rate-limiting) below for sizing guidance, the multisig calldata, and the deny-all idiom for halting an EID. Note: `setRateLimits([(eid, 0, 0)])` returns an EID to fail-open; it is **not** a pause.
 
 🎉 The bridge is live.
 

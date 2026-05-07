@@ -195,8 +195,9 @@ fix references the commit that lands it.
   hash that legitimately differs between toolchains because of source-path
   resolution). Asserts byte-identical runtime code on every PR touching
   `contracts/` or compiler settings. Stripped runtime is currently
-  identical for both `ONOFTAdapter` (13,161 bytes) and `WrappedON`
-  (18,098 bytes).
+  identical for both `ONOFTAdapter` (15,827 bytes) and `WrappedON`
+  (20,685 bytes); rerun `yarn check:bytecode` to refresh after any
+  contract or compiler-setting change.
 
 ### Resolved (no further action)
 
@@ -252,11 +253,12 @@ The following are documented in `CLAUDE.md` and remain by design.
   case from M1 is gone, so every emission now indicates either a depleted
   reserve or a fee-on-transfer mismatch in the auto-unwrap path.
 - Configure outbound rate limits on both contracts via `setRateLimits`
-  immediately after the Step-12 multisig handoff. Unconfigured EIDs are
-  fail-open — the bridge is usable from block one but unprotected against
-  single-block drain until the multisig dials limits in. To halt flow on
-  an EID, use the deny-all idiom (`limit=1, window=type(uint64).max`) —
-  do NOT write `(0, 0)`, which fail-opens. See README "Rate limiting" and
+  immediately after the multisig handoff (README Step 13 / CLAUDE.md
+  post-deploy checklist Step 7). Unconfigured EIDs are fail-open — the
+  bridge is usable from block one but unprotected against single-block
+  drain until the multisig dials limits in. To halt flow on an EID, use
+  the deny-all idiom (`limit=1, window=type(uint64).max`) — do NOT
+  write `(0, 0)`, which fail-opens. See README "Rate limiting" and
   "Pausing an EID" for the calldata.
 - Monitor cumulative outbound flow per EID off-chain. The on-chain
   `RateLimiter` only bounds a single window; sustained attack traffic

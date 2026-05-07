@@ -75,7 +75,7 @@ We inherit plain `OFT` / `OFTAdapter`, no `Fee` mixin. Default `_debitView` retu
 - BSC adapter locks gross == net; ETH `WrappedON` credits the same amount it received in the message.
 - Auto-unwrap / manual `wrap` / `unwrap` / `seedReserve` math is unchanged.
 - Conservation invariant (`circulating wON == locked ON on BSC`, at rest) holds tightly.
-- All 21 unit tests + 7 dry-run tests pass.
+- All Foundry unit tests pass (5 `ONOFTAdapter`, 26 `WrappedON`, 17 `RateLimit`, 7 `DryRun`) plus the Hardhat send test.
 
 The only thing forgone is operator revenue from bridging. No flow is degraded, no UX is worse, no invariant is loosened.
 
