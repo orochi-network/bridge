@@ -8,6 +8,7 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { OFTMsgCodec } from "@layerzerolabs/oft-evm/contracts/libs/OFTMsgCodec.sol";
 import { Origin } from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
+import { RateLimiter } from "@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLimiter.sol";
 
 /**
  * @title WrappedON (wON)
@@ -35,8 +36,17 @@ import { Origin } from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/I
  *      - If the ON token is paused or blacklists the recipient, the auto-unwrap
  *        branch reverts inside `_credit`, making the LayerZero message
  *        undeliverable until the lock lifts.
+ *
+ *      Outbound rate limiting (LayerZero `RateLimiter` extension) is applied
+ *      per destination EID in `_debit`. Inbound is intentionally NOT rate
+ *      limited: an inbound message is the tail of an already-sent outbound, so
+ *      throttling it cannot prevent the source-chain debit and only adds a way
+ *      to brick LayerZero delivery. Operators dial limits via `setRateLimits`
+ *      (owner-only). Unconfigured EIDs (`limit==0 && window==0`) are
+ *      fail-open — see the WARNING on `_outflowOrSkip`. To pause an EID use
+ *      a deny-all config, NOT `(0, 0)`.
  */
-contract WrappedON is OFT {
+contract WrappedON is OFT, RateLimiter {
     using SafeERC20 for IERC20;
     using OFTMsgCodec for bytes;
 
@@ -62,6 +72,7 @@ contract WrappedON is OFT {
     error DecimalsMismatch(uint8 actual);
     error ReserveInsufficient(uint256 requested, uint256 available);
     error UnexpectedTransferAmount(uint256 expected, uint256 received);
+    error InvalidRateLimitConfig(uint32 dstEid);
 
     constructor(
         string memory _name,
@@ -83,6 +94,37 @@ contract WrappedON is OFT {
     ///         direct ERC20 transfer of ON to this address.
     function reserve() external view returns (uint256) {
         return ON.balanceOf(address(this));
+    }
+
+    /// @notice Owner-only: set per-destination outbound rate limits. See
+    ///         `RateLimiter.RateLimitConfig` for the struct layout.
+    /// @dev    Existing `amountInFlight` and `lastUpdated` are PRESERVED
+    ///         across a reconfigure (upstream `_setRateLimits` checkpoints
+    ///         decay at the old rate first).
+    /// @dev    Rejects the silent-disable shape `(limit > 0, window = 0)`.
+    ///         Upstream `_amountCanBeSent` substitutes `window = 1` to avoid
+    ///         div-by-zero, which makes the decay rate `limit` units per
+    ///         second — the bucket effectively refills every block while
+    ///         `getAmountCanBeSent` reports a healthy "configured" view, so
+    ///         a fat-finger in multisig calldata can silently disable
+    ///         enforcement. The all-zero `(0, 0)` sentinel remains valid and
+    ///         is the canonical "unconfigured / fail-open" marker (storage
+    ///         zero-init and an explicit write-back-to-zero are
+    ///         indistinguishable, by design — this is NOT a pause; see
+    ///         `_outflowOrSkip` and the README "Pausing an EID" for the
+    ///         deny-all idiom that halts flow on an EID).
+    function setRateLimits(RateLimitConfig[] calldata _rateLimitConfigs) external onlyOwner {
+        for (uint256 i = 0; i < _rateLimitConfigs.length; i++) {
+            RateLimitConfig calldata cfg = _rateLimitConfigs[i];
+            if (cfg.window == 0 && cfg.limit != 0) revert InvalidRateLimitConfig(cfg.dstEid);
+        }
+        _setRateLimits(_rateLimitConfigs);
+    }
+
+    /// @notice Owner-only: zero out `amountInFlight` for the given EIDs.
+    ///         Use sparingly; discards the running window's accounting.
+    function resetRateLimits(uint32[] calldata _eids) external onlyOwner {
+        _resetRateLimits(_eids);
     }
 
     /// @notice Burn `_amount` wON, receive `_amount` real ON 1:1. Reverts if the
@@ -125,6 +167,23 @@ contract WrappedON is OFT {
         uint256 received = ON.balanceOf(address(this)) - balanceBefore;
         if (received != _amount) revert UnexpectedTransferAmount(_amount, received);
         emit ReserveSeeded(msg.sender, received);
+    }
+
+    /// @dev Override of OFT's default `_debit`. Only addition vs. base is the
+    ///      pre-burn rate-limit check via `_outflowOrSkip`; the burn itself is
+    ///      issued inline via `_burn` (the base `_debit` is not called — the
+    ///      OZ ERC20 `_burn` and the upstream `OFT._debit` body are the same
+    ///      operation, so reproducing it inline keeps the override readable
+    ///      without a redundant `super._debit` round trip).
+    function _debit(
+        address _from,
+        uint256 _amountLD,
+        uint256 _minAmountLD,
+        uint32 _dstEid
+    ) internal virtual override returns (uint256 amountSentLD, uint256 amountReceivedLD) {
+        (amountSentLD, amountReceivedLD) = _debitView(_amountLD, _minAmountLD, _dstEid);
+        _outflowOrSkip(_dstEid, amountSentLD);
+        _burn(_from, amountSentLD);
     }
 
     /// @dev Override of OFTCore._lzReceive. Sets a per-message transient flag
@@ -193,5 +252,28 @@ contract WrappedON is OFT {
             emit UnwrapFallbackToMint(_to, _amountLD);
         }
         return _amountLD;
+    }
+
+    /// @dev RateLimiter._outflow rejects every send for any EID where both
+    ///      `limit` and `window` are zero (`amountCanBeSent == 0`), which is
+    ///      the storage default for an unconfigured EID. Treat that combo as
+    ///      "unconfigured / fail-open" so a freshly-deployed contract remains
+    ///      usable until the multisig dials in production limits via
+    ///      `setRateLimits`. Setting either field non-zero opts that EID
+    ///      into enforcement.
+    ///
+    ///      WARNING: this branch cannot distinguish "never configured" from
+    ///      "operator wrote back to (0, 0)" — both have identical storage
+    ///      and both fail-open. `setRateLimits([(eid, 0, 0)])` therefore
+    ///      RETURNS the EID to the unenforced state; it does NOT pause it.
+    ///      To halt outbound flow to an EID, write a deny-all config (e.g.
+    ///      `limit=1, window=type(uint64).max`) — see README "Pausing an
+    ///      EID". The validator in `setRateLimits` blocks the silent-disable
+    ///      shape `(limit>0, window=0)` but explicitly allows `(0, 0)`,
+    ///      which is the canonical "unconfigured / fail-open" sentinel.
+    function _outflowOrSkip(uint32 _dstEid, uint256 _amount) internal {
+        RateLimit storage rl = rateLimits[_dstEid];
+        if (rl.limit == 0 && rl.window == 0) return;
+        _outflow(_dstEid, _amount);
     }
 }
