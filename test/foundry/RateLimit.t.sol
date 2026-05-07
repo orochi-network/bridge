@@ -329,10 +329,17 @@ contract RateLimitTest is TestHelperOz5 {
         wON.setRateLimits(cfg);
     }
 
-    /// @dev The all-zero `(0, 0)` sentinel must remain valid: it is the
-    ///      explicit "disabled" marker that `_outflowOrSkip` checks for.
+    /// @dev The all-zero `(0, 0)` sentinel must remain accepted by the
+    ///      validator: it is the canonical "unconfigured / fail-open"
+    ///      marker that `_outflowOrSkip` checks for. Storage zero-init
+    ///      and "operator wrote back to (0, 0)" are indistinguishable, so
+    ///      writing `(0, 0)` over a previously-configured EID returns it
+    ///      to the fail-open state — this is documented in the contract
+    ///      NatSpec and the README, and is NOT a pause. To pause an EID,
+    ///      operators use a deny-all config; that is exercised by
+    ///      `test_denyAllConfig_haltsOutboundFlow` below.
     function test_setRateLimits_acceptsAllZeroSentinel() public {
-        // First configure the EID, then "disable" it via the all-zero shape.
+        // First configure the EID, then write the all-zero shape over it.
         _setLimit(address(adapter), ETH_EID, 100 ether, 60);
         _bscSend(alice, bob, 50 ether);
 
@@ -340,8 +347,45 @@ contract RateLimitTest is TestHelperOz5 {
         cfg[0] = RateLimiter.RateLimitConfig({ dstEid: ETH_EID, limit: 0, window: 0 });
         adapter.setRateLimits(cfg);
 
-        // After disabling, an arbitrarily large send must succeed (bypass branch).
+        // After the (0, 0) write the EID is back to fail-open: an arbitrarily
+        // large send must succeed (the `_outflowOrSkip` bypass branch fires).
         _bscSend(alice, bob, 500 ether);
+    }
+
+    // -------------------------------------------------------------------------
+    // documented "pause" idiom: deny-all via (1, type(uint64).max)
+    // -------------------------------------------------------------------------
+
+    /// @dev README "Pausing an EID" tells operators to halt flow with
+    ///      `(limit=1, window=type(uint64).max)` rather than `(0, 0)`
+    ///      (which is fail-open, not pause). Verify the idiom actually
+    ///      halts outbound flow: any non-zero send must revert.
+    function test_denyAllConfig_haltsOutboundFlow() public {
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
+        cfg[0] = RateLimiter.RateLimitConfig({
+            dstEid: ETH_EID,
+            limit: 1,
+            window: type(uint64).max
+        });
+        adapter.setRateLimits(cfg);
+
+        bytes memory options = OptionsBuilder.newOptions().addExecutorLzReceiveOption(200_000, 0);
+        SendParam memory p = SendParam({
+            dstEid: ETH_EID,
+            to: addressToBytes32(bob),
+            amountLD: 1 ether,
+            minAmountLD: 1 ether,
+            extraOptions: options,
+            composeMsg: "",
+            oftCmd: ""
+        });
+        MessagingFee memory fee = adapter.quoteSend(p, false);
+
+        vm.startPrank(alice);
+        bscON.approve(address(adapter), 1 ether);
+        vm.expectRevert(RateLimiter.RateLimitExceeded.selector);
+        adapter.send{ value: fee.nativeFee }(p, fee, payable(alice));
+        vm.stopPrank();
     }
 
     /// @dev When the FIRST entry of the batch is invalid, the whole batch

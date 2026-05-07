@@ -138,14 +138,27 @@ fix references the commit that lands it.
   `RateLimiter` extension and call the `_outflowOrSkip(dstEid, amountSentLD)`
   wrapper in `_debit` after the lossless-transfer guard. The wrapper
   delegates to upstream `_outflow` when the EID is configured and skips
-  it for the all-zero `(limit=0, window=0)` sentinel so a freshly-deployed
-  contract is usable before the multisig dials in production limits.
-  `setRateLimits` rejects the silent-disable shape `(limit>0, window=0)`
-  with `InvalidRateLimitConfig` to prevent a fat-finger from silently
-  disabling enforcement (upstream's div-by-zero guard substitutes
-  `window=1`, which would refill the bucket every block).
-  Owner-only setters (`setRateLimits` / `resetRateLimits`) are exposed for
-  the multisig.
+  it for the all-zero `(limit=0, window=0)` sentinel — fail-open — so a
+  freshly-deployed contract is usable before the multisig dials in
+  production limits. `setRateLimits` rejects the silent-disable shape
+  `(limit>0, window=0)` with `InvalidRateLimitConfig` to prevent a
+  fat-finger from silently disabling enforcement (upstream's div-by-zero
+  guard substitutes `window=1`, which would refill the bucket every
+  block). Owner-only setters (`setRateLimits` / `resetRateLimits`) are
+  exposed for the multisig.
+- **Known limitation (acknowledged trade-off):** `(0, 0)` is the
+  canonical "unconfigured / fail-open" sentinel and is
+  indistinguishable from "operator wrote back to zero." Writing
+  `setRateLimits([(eid, 0, 0)])` therefore RETURNS the EID to the
+  unenforced state; it does NOT pause it. To halt outbound flow on an
+  EID, write a deny-all config (`limit=1, window=type(uint64).max`) —
+  documented in the README "Pausing an EID" section and called out
+  inline on `_outflowOrSkip` in both contracts. We accepted this
+  trade-off rather than introduce a separate `configured` storage flag
+  (one extra SLOAD per `_debit` + one first-time SSTORE per EID): the
+  deny-all idiom gives the operator a literal pause with the existing
+  surface, and the README + NatSpec warn against the `(0, 0)`
+  footgun.
   Inbound (`_credit`) is intentionally NOT rate-limited: an arrived
   message has already been debited on the source chain, so throttling it
   can only brick LayerZero delivery (the message becomes permanently
@@ -240,9 +253,11 @@ The following are documented in `CLAUDE.md` and remain by design.
   reserve or a fee-on-transfer mismatch in the auto-unwrap path.
 - Configure outbound rate limits on both contracts via `setRateLimits`
   immediately after the Step-12 multisig handoff. Unconfigured EIDs are
-  treated as disabled — the bridge is usable from block one but
-  unprotected against single-block drain until the multisig dials limits
-  in. See README "Rate limiting" for sizing guidance.
+  fail-open — the bridge is usable from block one but unprotected against
+  single-block drain until the multisig dials limits in. To halt flow on
+  an EID, use the deny-all idiom (`limit=1, window=type(uint64).max`) —
+  do NOT write `(0, 0)`, which fail-opens. See README "Rate limiting" and
+  "Pausing an EID" for the calldata.
 - Monitor cumulative outbound flow per EID off-chain. The on-chain
   `RateLimiter` only bounds a single window; sustained attack traffic
   can still drain over several windows. Tighten or reset limits if

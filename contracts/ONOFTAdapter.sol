@@ -23,8 +23,10 @@ import { RateLimiter } from "@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLi
  *
  *         3. The LayerZero `RateLimiter` extension is mixed in and `_debit`
  *            consults it on every outbound send. See `_outflowOrSkip` for the
- *            "unconfigured == disabled" semantics that keep the contract
- *            usable before the multisig has dialled in production limits.
+ *            "unconfigured == fail-open" semantics that keep the contract
+ *            usable before the multisig has dialled in production limits,
+ *            and the WARNING there explaining why `(0, 0)` is fail-open
+ *            rather than pause.
  *
  * @dev    The default `OFTAdapter` implementation assumes lossless transfers
  *         on the inner token. ON on BSC is lossless today (verified by the
@@ -81,7 +83,11 @@ contract ONOFTAdapter is OFTAdapter, RateLimiter {
     ///         `getAmountCanBeSent` reports a healthy "configured" view, so
     ///         a fat-finger in multisig calldata can silently disable
     ///         enforcement. The all-zero `(0, 0)` sentinel remains valid and
-    ///         is the explicit "disabled / unconfigured" marker.
+    ///         is the canonical "unconfigured / fail-open" marker (storage
+    ///         zero-init and an explicit write-back-to-zero are
+    ///         indistinguishable, by design — this is NOT a pause; see
+    ///         `_outflowOrSkip` and the README "Pausing an EID" for the
+    ///         deny-all idiom that halts flow on an EID).
     function setRateLimits(RateLimitConfig[] calldata _rateLimitConfigs) external onlyOwner {
         for (uint256 i = 0; i < _rateLimitConfigs.length; i++) {
             RateLimitConfig calldata cfg = _rateLimitConfigs[i];
@@ -138,9 +144,20 @@ contract ONOFTAdapter is OFTAdapter, RateLimiter {
     /// @dev RateLimiter._outflow rejects every send for any EID where both
     ///      `limit` and `window` are zero (`amountCanBeSent == 0`), which is
     ///      the storage default for an unconfigured EID. Treat that combo as
-    ///      "disabled" so a freshly-deployed adapter remains usable until the
-    ///      multisig dials in production limits via `setRateLimits`. Setting
-    ///      either field non-zero opts that EID into enforcement.
+    ///      "unconfigured / fail-open" so a freshly-deployed adapter remains
+    ///      usable until the multisig dials in production limits via
+    ///      `setRateLimits`. Setting either field non-zero opts that EID
+    ///      into enforcement.
+    ///
+    ///      WARNING: this branch cannot distinguish "never configured" from
+    ///      "operator wrote back to (0, 0)" — both have identical storage
+    ///      and both fail-open. `setRateLimits([(eid, 0, 0)])` therefore
+    ///      RETURNS the EID to the unenforced state; it does NOT pause it.
+    ///      To halt outbound flow to an EID, write a deny-all config (e.g.
+    ///      `limit=1, window=type(uint64).max`) — see README "Pausing an
+    ///      EID". The validator in `setRateLimits` blocks the silent-disable
+    ///      shape `(limit>0, window=0)` but explicitly allows `(0, 0)`,
+    ///      which is the canonical "unconfigured / fail-open" sentinel.
     function _outflowOrSkip(uint32 _dstEid, uint256 _amount) internal {
         RateLimit storage rl = rateLimits[_dstEid];
         if (rl.limit == 0 && rl.window == 0) return;

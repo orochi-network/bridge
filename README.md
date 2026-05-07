@@ -353,9 +353,9 @@ Both contracts inherit the LayerZero [`RateLimiter`](https://docs.layerzero.netw
 
 ### Defaults
 
-A freshly-deployed contract has **no rate limits set** for any EID. Both contracts treat the all-zero `(limit=0, window=0)` storage default as "disabled" and do not enforce a cap, so the bridge is usable from block one. The multisig is expected to dial in production limits via `setRateLimits` immediately after the post-deploy handoff.
+A freshly-deployed contract has **no rate limits set** for any EID. Both contracts treat the all-zero `(limit=0, window=0)` storage default as "unconfigured" and do not enforce a cap, so the bridge is usable from block one. The multisig is expected to dial in production limits via `setRateLimits` immediately after the post-deploy handoff.
 
-> Setting either `limit` OR `window` non-zero opts that EID into enforcement. To pause a previously-rate-limited EID without resetting in-flight accounting, set both back to zero.
+> ⚠️ **`(0, 0)` is fail-open, not pause.** `_outflowOrSkip` cannot distinguish "never configured" (zero-init storage) from "explicitly written back to zero by the multisig", so `setRateLimits([(eid, 0, 0)])` returns the EID to the unenforced state — it does **not** pause it. The validator added in `47e01cf` only blocks the silent-disable shape `(limit>0, window=0)`; the all-zero shape is allowed and means "fail-open." If you need to halt outbound flow on an EID, see "Pausing an EID" below — do not use `(0, 0)`.
 
 ### Operator workflow
 
@@ -378,6 +378,26 @@ const [inFlight, canSend] = await adapter.getAmountCanBeSent(30101)
 
 Both setters are `onlyOwner`. After Step 12 (handoff) the multisig is the only caller; before then the deployer EOA is.
 
+### Pausing an EID
+
+The contracts expose no dedicated pause function for an EID — by design, since the rate limiter already gives the operator a knob fine-grained enough to deny-all without adding privileged code paths. To halt outbound flow to a destination EID, set a deny-all configuration:
+
+```ts
+// "deny-all" — 1 wei per ~584 billion years.
+// limit=1 keeps the validator (limit>0 -> window must be >0) happy AND the
+// per-second decay so small that the bucket never refills meaningfully:
+//   decay/sec = 1 / type(uint64).max ≈ 0
+// Any non-zero `send` reverts with `RateLimitExceeded()`.
+const denyAll = [
+  { dstEid: 30101, limit: 1n, window: (1n << 64n) - 1n },
+]
+await adapter.connect(multisig).setRateLimits(denyAll)
+```
+
+`amountInFlight` is preserved across the pause — `_setRateLimits` checkpoints decay against the **prior** config before overwriting `(limit, window)`, and once the deny-all takes effect the per-second decay is effectively zero, so the bucket does not bleed during the pause. Resume by writing the previous `(limit, window)` back; the in-flight snapshot at the moment of pause carries forward. If you also want to clear in-flight on resume, call `resetRateLimits(eids)` first.
+
+> Do **not** use `setRateLimits([(eid, 0, 0)])` to pause — that returns the EID to fail-open (see Defaults above).
+
 ### Failure mode
 
 A send that would push `amountInFlight + amount > limit` reverts with `RateLimitExceeded()`. Integrators should catch this and either retry after enough time has elapsed for decay (poll `getAmountCanBeSent(dstEid)`) or fall back to a smaller send.
@@ -393,6 +413,7 @@ A send that would push `amountInFlight + amount > limit` reverts with `RateLimit
 - **Per-EID, not global.** The cap is keyed by destination EID. With only BSC↔ETH this is one bucket per direction; if a third chain is ever added (a second `WrappedON`), each direction needs its own configured limit.
 - **Block-ordering dependence.** Within a single block, transactions consume the bucket in execution order. A user transaction can be reordered behind another that exhausts the bucket and revert as a result.
 - **No global circuit breaker.** Rate limiting bounds a single-window drain, not a sustained one. Operators must still monitor cumulative outbound flow off-chain and reset/tighten if the protocol comes under attack across multiple windows.
+- **`(0, 0)` is fail-open, not pause.** Storage zero-init and "operator wrote back to zero" are indistinguishable, so the all-zero shape is treated as "unconfigured / unlimited." Use the deny-all idiom in [Pausing an EID](#pausing-an-eid) to halt flow.
 
 ## End-user send flow (for integrators)
 
