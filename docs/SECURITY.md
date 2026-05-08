@@ -21,12 +21,12 @@ the conservation invariant.
 
 | Assumption | Why it matters | Verified |
 |------------|----------------|----------|
-| BSC ON token (`0x0e4F...1D48`) is lossless: `transferFrom(amount)` moves exactly `amount`. | `ONOFTAdapter` reports `amountSentLD` to LayerZero; ETH side credits the full amount. A silent FoT/rebase ⇒ unbacked wON. | Per-call delta guard in `_debit` (see Fix #1). Forked-mainnet dry-run also asserts losslessness today. |
+| BSC ON token (`0x0e4F...1D48`) is lossless: `transferFrom(amount)` moves exactly `amount`. | `ONOFTAdapter` reports `amountSentLD` to LayerZero; ETH side credits the full amount. A silent FoT/rebase ⇒ unbacked wON. | Per-call delta guard in `_debit` (see Fix H1). Forked-mainnet dry-run also asserts losslessness today. |
 | BSC ON has 18 decimals. | OFT shared-decimals math expects 18 LD. | Forked dry-run (`DryRun.t.sol`) and `WrappedON.constructor` both check 18. |
 | ETH ON token (`0x33f6...B59d`) has 18 decimals. | wON is 18-decimal; 1:1 swap requires the reserve token to match. | Constructor `DecimalsMismatch` revert. |
 | ETH ON token does not silently re-enter `WrappedON` from inside `safeTransfer`. | `_credit` and `unwrap` use checks-effects-interactions but do not gate with `ReentrancyGuard`. | Manual analysis: ON is a vanilla ERC20 (no ERC777-style hooks). Documented assumption. |
 | Both DVNs (`LayerZero Labs`, `Google` — the DVN run by Google Cloud) act independently. | Compromise of either DVN halts the bridge but does not steal funds. Compromise of both ⇒ arbitrary message forgery. | Operational obligation (DVN diversity). Liveness probe: `yarn check:dvn`. |
-| The deployer EOA is fully handed off to a multisig before going live. | Until handoff, the EOA can rewire peers and mint unbounded wON. | Tracked by the post-deploy checklist; automated by `tasks/handoff.ts` (Fix #6). |
+| The deployer EOA is fully handed off to a multisig before going live. | Until handoff, the EOA can rewire peers and mint unbounded wON. | Tracked by the post-deploy checklist; automated by the `lz:oapp:handoff` task (Fix H2). |
 
 ## Audit findings
 
@@ -54,8 +54,9 @@ fix references the commit that lands it.
   deployer EOA as both `owner` and `delegate`. The post-deploy checklist
   required two manual `transferOwnership` and `setDelegate` calls per chain.
   A forgotten command leaves a hot key with full peer/DVN authority.
-- **Fix (this branch):** `tasks/handoff.ts` performs `setDelegate(multisig)`
-  and `transferOwnership(multisig)` on a single network, ordered correctly,
+- **Fix (this branch):** the `lz:oapp:handoff` Hardhat task (in
+  `tasks/handoff.ts`) performs `setDelegate(multisig)` and
+  `transferOwnership(multisig)` on a single network, ordered correctly,
   reading the multisig address from `OWNER_BSC` / `OWNER_ETH` env vars. The
   deploy/wire/handoff sequence should be performed in a single operator
   session.
@@ -77,7 +78,7 @@ fix references the commit that lands it.
   emitted `UnwrapFallbackToMint` on every composed message (false positive
   for any monitor watching that event), and was vulnerable to silent drift
   if upstream `OFTCore.lzReceive` ever changes.
-- **Fix (this branch):** transient `_isComposed` flag set in `_lzReceive`,
+- **Fix (this branch):** transient `_composedFlag` set in `_lzReceive`,
   then `super._lzReceive` is called and the composed path is implemented
   inside `_credit`. Single source of truth, no duplicated event emission.
 
@@ -217,6 +218,11 @@ fix references the commit that lands it.
 
 - Run `yarn check:dvn` against archive RPCs immediately before every
   mainnet deploy, in addition to the existing `yarn test:dryrun`.
+- After `lz:oapp:handoff`, the multisig must call `setRateLimits` on both
+  contracts to apply production caps for the BSC↔ETH pathway. Until this
+  runs, both EIDs are unconfigured and unlimited (the `(0, 0)` storage
+  default is fail-open by design — see Fix M5 above and the README
+  "Rate limiting" section).
 
 ## Acknowledged design trade-offs (not bugs)
 
@@ -239,13 +245,142 @@ The following are documented in `CLAUDE.md` and remain by design.
   wON is held by the handler contract. Recovery is the handler's
   responsibility.
 
+## Rate-limiter operations
+
+Both bridge contracts (`ONOFTAdapter` on BSC, `WrappedON` on Ethereum)
+inherit the LayerZero `RateLimiter` mixin and expose two owner-only
+mutators:
+
+- `setRateLimits(RateLimitConfig[] calldata)` — set per-EID `(limit, window)`.
+- `resetRateLimits(uint32[] calldata)` — zero `amountInFlight` for given EIDs.
+
+`RateLimitConfig` is `(uint32 dstEid, uint192 limit, uint64 window)`. The
+public mapping `rateLimits(dstEid)` returns the live state
+`(amountInFlight, lastUpdated, limit, window)`.
+
+### Capping outbound flow at 100,000 ON / hour
+
+After the post-deploy handoff (CLAUDE.md post-deploy checklist Step 5;
+README Step 12), the multisig calls `setRateLimits` on each contract.
+To cap BSC→ETH outbound at 100,000 ON per hour:
+
+```ts
+// On BSC, multisig calls ONOFTAdapter.setRateLimits:
+const cfg = [{
+  dstEid: 30101,                       // Ethereum mainnet EID
+  limit:  100_000n * 10n ** 18n,       // 100,000 ON, 18-decimal wei
+  window: 3600,                        // 1 hour, in seconds
+}]
+await adapter.connect(multisig).setRateLimits(cfg)
+```
+
+Mirror on Ethereum to cap ETH→BSC outbound:
+
+```ts
+// On Ethereum, multisig calls WrappedON.setRateLimits:
+const cfgEth = [{ dstEid: 30102, limit: 100_000n * 10n ** 18n, window: 3600 }]
+await wON.connect(multisig).setRateLimits(cfgEth)
+```
+
+Buckets are independent per direction; capping only one side leaves the
+other free to drain.
+
+### Adjusting an existing limit
+
+Calling `setRateLimits` with the same `dstEid` and a new `(limit, window)`
+**preserves the running window's `amountInFlight`** — upstream
+`_setRateLimits` checkpoints decay at the old rate before the new rate
+kicks in, so a tightening cannot retroactively wipe accounting.
+
+To explicitly clear `amountInFlight` (e.g. after a confirmed incident
+response) without changing the limit, use `resetRateLimits`:
+
+```ts
+await adapter.connect(multisig).resetRateLimits([30101])
+```
+
+This zeros only the in-flight counter; `(limit, window)` are untouched.
+
+### Emergency stop
+
+`(0, 0)` is **fail-open**, not pause. To halt outbound flow on an EID,
+write a deny-all config:
+
+```ts
+const denyAll = [{
+  dstEid: 30101,
+  limit:  1n,                                  // smallest legal value: validator
+                                                // rejects (limit>0, window=0), so
+                                                // limit must be ≥1 alongside max window
+  window: 18_446_744_073_709_551_615n,         // type(uint64).max
+}]
+await adapter.connect(multisig).setRateLimits(denyAll)
+```
+
+The decay rate is `1 / type(uint64).max ≈ 0`, so the bucket effectively
+never refills. Any non-zero outbound reverts with `RateLimitExceeded` on
+the source-chain `send()` **before** any LayerZero plumbing engages —
+users keep their funds. `setRateLimits` also preserves `amountInFlight`
+across the deny-all transition (upstream `_setRateLimits` does NOT reset
+`amountInFlight` / `lastUpdated` — see `RateLimiter.sol:183`), so the
+running window does not bleed during the pause and a subsequent un-pause
+inherits exactly the in-flight state at the moment the deny-all landed.
+
+To resume, the multisig has two paths:
+
+1. **Carry-over** — write the production config back via `setRateLimits`.
+   `amountInFlight` is preserved, so the bucket immediately reflects any
+   accounting accumulated up to the pause. Use this when the pause was
+   precautionary and you want continuity with the prior window.
+2. **Clean-bucket** — call `resetRateLimits([dstEid])` first to zero
+   `amountInFlight`, then `setRateLimits` to write the production config.
+   Use this after a confirmed incident response, when the pre-pause
+   window's accounting is no longer trusted.
+
+The `setRateLimits` validator additionally rejects the silent-disable
+shape `(limit>0, window=0)` with `InvalidRateLimitConfig` (upstream
+`_amountCanBeSent` substitutes `window = 1` to avoid div-by-zero, which
+would refill the bucket every block while reporting a healthy
+"configured" state).
+
+### Verifying state
+
+Before and after every change, signers should read the live state on
+both chains:
+
+```sh
+cast call $ADAPTER_BSC \
+  "rateLimits(uint32)(uint192,uint64,uint192,uint64)" 30101 \
+  --rpc-url $RPC_URL_BSC
+# Returns: (amountInFlight, lastUpdated, limit, window)
+```
+
+The upstream `RateLimiter` mixin emits two security-sensitive events
+that an off-chain audit trail must index together:
+
+- `RateLimitsChanged(RateLimitConfig[] rateLimitConfigs)` — every
+  successful `setRateLimits` call (initial config, tightening, loosening,
+  deny-all, and resume).
+- `RateLimitsReset(uint32[] eids)` — every successful `resetRateLimits`
+  call. This zeros `amountInFlight` and is the security-relevant signal
+  for "incident response cleared the running window's accounting".
+
+Indexing only `RateLimitsChanged` will miss the reset events; indexing
+both gives a complete record of every cap change and every accounting
+clear, with which signer proposed each, when it landed, and on which
+contract.
+
+Cross-references: full sizing guidance and the operator workflow live in
+[README.md "Rate limiting"](../README.md#rate-limiting); the high-level
+model is in [CLAUDE.md "Rate limiting"](../CLAUDE.md#rate-limiting).
+
 ## Operator obligations
 
 - Run `yarn test:dryrun` against archive RPCs before every mainnet
   deploy.
 - Run `yarn check:dvn` immediately before `lz:oapp:wire` to confirm
   both required DVNs are reachable on BSC and Ethereum mainnet.
-- Compress deploy → `lz:oapp:wire` → `tasks/handoff.ts` into a single
+- Compress deploy → `lz:oapp:wire` → `lz:oapp:handoff` into a single
   operator session. Do not leave the deployer EOA as owner overnight.
 - Monitor `WrappedON.reserve()` against a daily-flow threshold; refill via
   `wrap` (recoverable) or `seedReserve` (one-way subsidy) as needed.

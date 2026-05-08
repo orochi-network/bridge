@@ -7,7 +7,7 @@ LayerZero V2 OFT bridge for the **ON** token.
 | **BSC** mainnet | `ONOFTAdapter` | wraps existing [`ON`](https://bscscan.com/address/0x0e4F6209eD984b21EDEA43acE6e09559eD051D48) at `0x0e4F...1D48` | Locks ON on outbound; releases on inbound. |
 | **Ethereum** mainnet | `WrappedON` | mints/burns `wON` ("Wrapped ON"); holds `ON` reserve | Auto-unwraps to real ON when reserve covers, else mints wON. Manual `wrap` / `unwrap` / `seedReserve`. |
 
-Architecture rationale and the rejected alternatives are documented in [CLAUDE.md](./CLAUDE.md). Trust assumptions, audit findings, and operator obligations are in [docs/SECURITY.md](./docs/SECURITY.md) — read it before any production change. To report a vulnerability: chiro@orochi.network.
+Architecture rationale and the rejected alternatives are documented in [CLAUDE.md](./CLAUDE.md). Diagrams of the LayerZero message flow and the `_credit` decision tree are in [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md). Fee model and DVN/Executor sourcing decisions are in [docs/PROTOCOL.md](./docs/PROTOCOL.md). Trust assumptions, audit findings, and operator obligations are in [docs/SECURITY.md](./docs/SECURITY.md) — read it before any production change. To report a vulnerability: chiro@orochi.network.
 
 ---
 
@@ -27,7 +27,7 @@ Architecture rationale and the rejected alternatives are documented in [CLAUDE.m
 ```sh
 git clone <this-repo> bridge
 cd bridge
-yarn install           # yarn.lock is the canonical lockfile (yarn 4 via packageManager field)
+yarn install --immutable   # reproduces yarn.lock exactly; fails if it would drift (yarn 4 via packageManager field)
 ```
 
 ## Step 2 — Configure `.env`
@@ -103,7 +103,7 @@ Before deploying for real, run the full bridge flow end-to-end against forked co
 yarn test:dryrun           # picks up RPC_URL_BSC and RPC_URL_ETH from .env
 ```
 
-Expect 7 passing tests in ~20 seconds against archive-quality RPCs. The test skips cleanly if either RPC env var is unset, so `yarn test` stays green without RPC credentials.
+Expect every test in the dry-run suite to pass against archive-quality RPCs. The test skips cleanly if either RPC env var is unset, so `yarn test` stays green without RPC credentials.
 
 **If any test fails, do not deploy.** Most common failure modes:
 
@@ -292,7 +292,7 @@ cast call <WON_ADDR>     "owner()(address)" --rpc-url $RPC_URL_ETH   # → $OWNE
 
 ## Step 13 — Configure rate limits (multisig)
 
-Both contracts ship with no rate limits set, which is treated as "fail-open" (unconfigured) so the bridge is usable from block one. **Configure production limits before opening the bridge to users** — see [Rate limiting](#rate-limiting) below for sizing guidance, the multisig calldata, and the deny-all idiom for halting an EID. Note: `setRateLimits([(eid, 0, 0)])` returns an EID to fail-open; it is **not** a pause.
+Both contracts ship with no rate limits set, which is treated as "fail-open" (unconfigured) so the bridge is usable from block one. **Configure production limits before opening the bridge to users** — see [Rate limiting](#rate-limiting) below for sizing guidance, the multisig calldata, and the deny-all idiom for halting an EID. Note: `setRateLimits([(eid, 0, 0)])` returns an EID to fail-open; it is **not** a pause. The validator additionally rejects the silent-disable shape `(limit>0, window=0)` with `InvalidRateLimitConfig`.
 
 🎉 The bridge is live.
 
@@ -355,7 +355,7 @@ Both contracts inherit the LayerZero [`RateLimiter`](https://docs.layerzero.netw
 
 A freshly-deployed contract has **no rate limits set** for any EID. Both contracts treat the all-zero `(limit=0, window=0)` storage default as "unconfigured" and do not enforce a cap, so the bridge is usable from block one. The multisig is expected to dial in production limits via `setRateLimits` immediately after the post-deploy handoff.
 
-> ⚠️ **`(0, 0)` is fail-open, not pause.** `_outflowOrSkip` cannot distinguish "never configured" (zero-init storage) from "explicitly written back to zero by the multisig", so `setRateLimits([(eid, 0, 0)])` returns the EID to the unenforced state — it does **not** pause it. The validator added in `47e01cf` only blocks the silent-disable shape `(limit>0, window=0)`; the all-zero shape is allowed and means "fail-open." If you need to halt outbound flow on an EID, see "Pausing an EID" below — do not use `(0, 0)`.
+> ⚠️ **`(0, 0)` is fail-open, not pause.** `_outflowOrSkip` cannot distinguish "never configured" (zero-init storage) from "explicitly written back to zero by the multisig", so `setRateLimits([(eid, 0, 0)])` returns the EID to the unenforced state — it does **not** pause it. The `setRateLimits` validator only blocks the silent-disable shape `(limit>0, window=0)`; the all-zero shape is allowed and means "fail-open." If you need to halt outbound flow on an EID, see "Pausing an EID" below — do not use `(0, 0)`.
 
 ### Operator workflow
 
@@ -405,7 +405,7 @@ A send that would push `amountInFlight + amount > limit` reverts with `RateLimit
 ### Sizing guidance
 
 - **Window ≥ chain block time × N.** On BSC (~3s) a 60-second window is the practical floor; on Ethereum (~12s) use ≥ 60s as well.
-- **Limit ≥ window.** When `limit < window` the per-second decay rounds to zero for small in-flight amounts, making the bucket lossy. Pick a limit denominated in whole ON, not wei.
+- **Decay rate is `limit / window` (integer division).** Pick a `limit` (in token wei, e.g. `100_000n * 10n ** 18n`) large enough that `limit / window ≥ 1` — otherwise the bucket never refills. For ON's 18-decimal scale this is automatic for any non-trivial cap.
 - **Set both sides.** BSC and ETH contracts have independent buckets — limiting only one side leaves the other free to drain in the opposite direction.
 
 ### Known limitations

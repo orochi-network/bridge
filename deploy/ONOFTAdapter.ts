@@ -36,7 +36,7 @@ const deploy: DeployFunction = async (hre) => {
     // The token address must be defined in hardhat.config.ts
     // If the token address is not defined, the deployment will log a warning and skip the deployment
     if (hre.network.config.oftAdapter == null) {
-        console.warn(`oftAdapter not configured on network config, skipping OFTWrapper deployment`)
+        console.warn(`oftAdapter not configured on network config, skipping ONOFTAdapter deployment`)
 
         return
     }
