@@ -260,9 +260,9 @@ public mapping `rateLimits(dstEid)` returns the live state
 
 ### Capping outbound flow at 100,000 ON / hour
 
-After the post-deploy handoff (Step 5 of the checklist), the multisig
-calls `setRateLimits` on each contract. To cap BSC→ETH outbound at
-100,000 ON per hour:
+After the post-deploy handoff (CLAUDE.md post-deploy checklist Step 5;
+README Step 12), the multisig calls `setRateLimits` on each contract.
+To cap BSC→ETH outbound at 100,000 ON per hour:
 
 ```ts
 // On BSC, multisig calls ONOFTAdapter.setRateLimits:
@@ -309,7 +309,9 @@ write a deny-all config:
 ```ts
 const denyAll = [{
   dstEid: 30101,
-  limit:  1n,                                  // 1 wei
+  limit:  1n,                                  // smallest legal value: validator
+                                                // rejects (limit>0, window=0), so
+                                                // limit must be ≥1 alongside max window
   window: 18_446_744_073_709_551_615n,         // type(uint64).max
 }]
 await adapter.connect(multisig).setRateLimits(denyAll)
@@ -318,7 +320,22 @@ await adapter.connect(multisig).setRateLimits(denyAll)
 The decay rate is `1 / type(uint64).max ≈ 0`, so the bucket effectively
 never refills. Any non-zero outbound reverts with `RateLimitExceeded` on
 the source-chain `send()` **before** any LayerZero plumbing engages —
-users keep their funds. To resume, write the production config back.
+users keep their funds. `setRateLimits` also preserves `amountInFlight`
+across the deny-all transition (upstream `_setRateLimits` does NOT reset
+`amountInFlight` / `lastUpdated` — see `RateLimiter.sol:183`), so the
+running window does not bleed during the pause and a subsequent un-pause
+inherits exactly the in-flight state at the moment the deny-all landed.
+
+To resume, the multisig has two paths:
+
+1. **Carry-over** — write the production config back via `setRateLimits`.
+   `amountInFlight` is preserved, so the bucket immediately reflects any
+   accounting accumulated up to the pause. Use this when the pause was
+   precautionary and you want continuity with the prior window.
+2. **Clean-bucket** — call `resetRateLimits([dstEid])` first to zero
+   `amountInFlight`, then `setRateLimits` to write the production config.
+   Use this after a confirmed incident response, when the pre-pause
+   window's accounting is no longer trusted.
 
 The `setRateLimits` validator additionally rejects the silent-disable
 shape `(limit>0, window=0)` with `InvalidRateLimitConfig` (upstream
@@ -338,9 +355,20 @@ cast call $ADAPTER_BSC \
 # Returns: (amountInFlight, lastUpdated, limit, window)
 ```
 
-Every successful `setRateLimits` call emits
-`RateLimitsChanged(RateLimitConfig[])`. Index this event off-chain to
-keep an audit trail of every limit change.
+The upstream `RateLimiter` mixin emits two security-sensitive events
+that an off-chain audit trail must index together:
+
+- `RateLimitsChanged(RateLimitConfig[] rateLimitConfigs)` — every
+  successful `setRateLimits` call (initial config, tightening, loosening,
+  deny-all, and resume).
+- `RateLimitsReset(uint32[] eids)` — every successful `resetRateLimits`
+  call. This zeros `amountInFlight` and is the security-relevant signal
+  for "incident response cleared the running window's accounting".
+
+Indexing only `RateLimitsChanged` will miss the reset events; indexing
+both gives a complete record of every cap change and every accounting
+clear, with which signer proposed each, when it landed, and on which
+contract.
 
 Cross-references: full sizing guidance and the operator workflow live in
 [README.md "Rate limiting"](../README.md#rate-limiting); the high-level
