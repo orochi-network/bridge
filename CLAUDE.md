@@ -1,5 +1,9 @@
 # Project: ON Cross-Chain Bridge (BSC ↔ Ethereum)
 
+## Hard rules for AI assistants
+
+- **Never read, write, edit, `cat`, `grep`, `head`, `tail`, or otherwise inspect `.env`** (or any other dotenv file: `.env.local`, `.env.production`, etc.). It contains the deployer `PRIVATE_KEY` / `MNEMONIC`, archive RPC URLs with embedded API keys, and Etherscan/BSCScan API keys. Treat it as if it were not on the filesystem. If a task seems to require its contents, ask the user to paste only the specific value they want you to use — never request the file. `.env.example` (committed, placeholders only) is fine.
+
 ## What this project is
 
 LayerZero V2 OFT bridge for the **ON** token between **BSC** (canonical / locked) and **Ethereum** (wrapped / mintable).
@@ -143,7 +147,7 @@ bridge/
 ```sh
 # One-time setup
 cp .env.example .env         # fill in PRIVATE_KEY (or MNEMONIC) and RPC URLs
-yarn install                 # yarn.lock is the canonical lockfile (yarn 4 via packageManager field)
+yarn install --immutable     # reproduces yarn.lock exactly; fails if it would drift (yarn 4 via packageManager field)
 yarn compile                 # Hardhat + Foundry compile
 
 # Tests

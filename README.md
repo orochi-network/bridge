@@ -27,7 +27,7 @@ Architecture rationale and the rejected alternatives are documented in [CLAUDE.m
 ```sh
 git clone <this-repo> bridge
 cd bridge
-yarn install           # yarn.lock is the canonical lockfile (yarn 4 via packageManager field)
+yarn install --immutable   # reproduces yarn.lock exactly; fails if it would drift (yarn 4 via packageManager field)
 ```
 
 ## Step 2 — Configure `.env`
