@@ -128,6 +128,10 @@ bridge/
 ├── scripts/
 │   ├── check-bytecode.js    ← Hardhat vs Foundry runtime bytecode diff (strips CBOR metadata)
 │   └── check-dvn.js         ← pre-deploy DVN liveness probe (LZ metadata registry + RPC)
+├── docs/
+│   ├── ARCHITECTURE.md      ← LayerZero message-flow diagrams + _credit decision tree
+│   ├── PROTOCOL.md          ← fee model, DVN/Executor sourcing decisions
+│   └── SECURITY.md          ← audit findings, fixes, operator obligations
 ├── test/                    ← Foundry + Hardhat tests
 ├── .github/
 │   └── workflows/bytecode-diff.yml  ← CI: enforces cross-toolchain bytecode determinism
