@@ -71,7 +71,7 @@ Scaffolded by copying `examples/oft-adapter` from [`LayerZero-Labs/devtools`](ht
 
 ## Rate limiting
 
-Both contracts mix in `@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLimiter`. **Outbound only** (per-EID, sliding window with linear decay); inbound is intentionally NOT rate-limited because an arrived message is the tail of an already-debited outbound, so throttling can only brick LayerZero delivery. Owner-only: `setRateLimits(RateLimitConfig[])`, `resetRateLimits(uint32[])`. Unconfigured EIDs (`limit==0 && window==0`) are **fail-open**, so a fresh deploy is usable from block one; the multisig sets production limits via `setRateLimits` immediately after the multisig handoff (Step 5 of the post-deploy checklist below; README Step 13). Failure mode: `RateLimitExceeded()` reverts on the source-chain `send` call before any LayerZero plumbing engages, so users keep their funds. `setRateLimits` rejects the silent-disable shape `(limit>0, window=0)` with `InvalidRateLimitConfig` (upstream div-by-zero guard would refill the bucket every block), but allows the all-zero `(0, 0)` sentinel as the canonical "unconfigured / fail-open" marker — this is NOT a pause; to halt outbound flow on an EID write a deny-all `(limit=1, window=type(uint64).max)` config (see README "Pausing an EID"). See README "Rate limiting" for sizing guidance and the multisig workflow.
+Both contracts mix in `@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLimiter`. **Outbound only** (per-EID, sliding window with linear decay); inbound is intentionally NOT rate-limited because an arrived message is the tail of an already-debited outbound, so throttling can only brick LayerZero delivery. Owner-only: `setRateLimits(RateLimitConfig[])`, `resetRateLimits(uint32[])`. Unconfigured EIDs (`limit==0 && window==0`) are **fail-open**, so a fresh deploy is usable from block one; the multisig sets production limits via `setRateLimits` immediately after the multisig handoff (Step 7 of the post-deploy checklist below; README Step 13). Failure mode: `RateLimitExceeded()` reverts on the source-chain `send` call before any LayerZero plumbing engages, so users keep their funds. `setRateLimits` rejects the silent-disable shape `(limit>0, window=0)` with `InvalidRateLimitConfig` (upstream div-by-zero guard would refill the bucket every block), but allows the all-zero `(0, 0)` sentinel as the canonical "unconfigured / fail-open" marker — this is NOT a pause; to halt outbound flow on an EID write a deny-all `(limit=1, window=type(uint64).max)` config (see README "Pausing an EID"). See README "Rate limiting" for sizing guidance and the multisig workflow.
 
 ## Production configuration decisions (locked in)
 
@@ -121,7 +121,7 @@ bridge/
 │   ├── WrappedON.ts         ← deploys WrappedON (wON) on networks with `wrappedOft.reserveAddress` set
 │   └── MyERC20Mock.ts       ← test-only mock token deploy (unused on mainnet)
 ├── tasks/
-│   ├── sendOFT.ts           ← `hardhat send` task: quote + approve + send
+│   ├── sendOFT.ts           ← `lz:oft:send` task: quote + approve + send
 │   ├── sendEvm.ts
 │   ├── handoff.ts           ← `lz:oapp:handoff` — atomic, idempotent setDelegate + transferOwnership
 │   └── ...
@@ -207,7 +207,7 @@ Steps 1–5 should run in a single operator session — every minute the deploye
 
 Full audit findings, fixes, decisions, and operator obligations are in [docs/SECURITY.md](./docs/SECURITY.md). Read it before any production change. Vulnerability reports: chiro@orochi.network.
 
-Status snapshot of the audit findings on commit `04b16f6`:
+Status snapshot of the audit findings (current branch state, post-RateLimiter merge in `d61f5e1`):
 
 **Fixed in code (HIGH).**
 - **H1** Asymmetric fee-on-transfer protection — balance-delta guards in both `ONOFTAdapter._debit` and `WrappedON._credit` (auto-unwrap branch falls back to mint on mismatch).

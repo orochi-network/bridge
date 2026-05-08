@@ -1,4 +1,4 @@
-# 0001 — Protocol fees, OApp fees, and DVN/Executor sourcing
+# Protocol fees, OApp fees, and DVN/Executor sourcing
 
 **Status:** Accepted — production deploy goes out with no OApp fee, two required DVNs (`LayerZero Labs` + `Google` — the DVN run by Google Cloud), default LZ Executor.
 
@@ -39,7 +39,7 @@ abstract contract Fee is IFee, Ownable {
 
 ### Wiring
 
-To collect a fee, the OApp inherits `Fee` alongside `OFT` / `OFTAdapter` and overrides `_debitView` (the default at `OFTCore.sol:380` just returns `amountReceivedLD = amountSentLD`):
+To collect a fee, the OApp inherits `Fee` alongside `OFT` / `OFTAdapter` and overrides `_debitView` (the default at `OFTCore._debitView` just returns `amountReceivedLD = amountSentLD`):
 
 ```solidity
 function _debitView(uint256 _amountLD, uint256 _minAmountLD, uint32 _dstEid)
@@ -62,8 +62,8 @@ function _debitView(uint256 _amountLD, uint256 _minAmountLD, uint32 _dstEid)
 
 | Contract type | Where the fee accumulates |
 |---|---|
-| `OFTAdapter` (lock/unlock — our BSC side) | The user's full `amountSentLD` is `transferFrom`'d into the adapter (see `OFTAdapter.sol:74-83`); only `amountReceivedLD` is encoded into the LZ message. The fee sits in the adapter as excess locked ON, which the owner sweeps via a `withdrawFees` helper the implementer adds. |
-| `OFT` (mint/burn — our ETH side) | The implementer chooses: mint the fee to a `feeOwner`, accumulate, or simply not debit it from the user. |
+| `OFTAdapter` (lock/unlock — our BSC side) | The user's full `amountSentLD` is `transferFrom`'d into the adapter (see `OFTAdapter._debit`); only `amountReceivedLD` is encoded into the LZ message. The fee sits in the adapter as excess locked ON; the upstream `Fee` mixin ships no withdrawal surface, so the implementer adds their own (e.g. `withdrawFees`) to sweep it. |
+| `OFT` (mint/burn — our ETH side) | The implementer chooses: mint the fee to a treasury address of their choice, accumulate, or simply not debit it from the user. Neither `feeOwner` nor `withdrawFees` exists in the upstream `Fee` mixin — both names are conventions the implementer picks. |
 
 ---
 
@@ -75,7 +75,7 @@ We inherit plain `OFT` / `OFTAdapter`, no `Fee` mixin. Default `_debitView` retu
 - BSC adapter locks gross == net; ETH `WrappedON` credits the same amount it received in the message.
 - Auto-unwrap / manual `wrap` / `unwrap` / `seedReserve` math is unchanged.
 - Conservation invariant (`circulating wON == locked ON on BSC`, at rest) holds tightly.
-- All Foundry unit tests pass (5 `ONOFTAdapter`, 26 `WrappedON`, 17 `RateLimit`, 7 `DryRun`) plus the Hardhat send test.
+- All Foundry unit tests pass across the four test contracts (`ONOFTAdapter`, `WrappedON`, `RateLimit`, `DryRun`) plus the Hardhat send test.
 
 The only thing forgone is operator revenue from bridging. No flow is degraded, no UX is worse, no invariant is loosened.
 
@@ -95,7 +95,7 @@ A `WithFee` extension is ~50 lines + tests. Defer until there's a concrete fee p
 
 ### What we use
 
-`layerzero.config.ts:59`:
+`layerzero.config.ts:98`:
 
 ```ts
 const REQUIRED_DVNS = ['LayerZero Labs', 'Google']

@@ -178,11 +178,10 @@ contract WrappedON is OFT, RateLimiter {
     }
 
     /// @dev Override of OFT's default `_debit`. Only addition vs. base is the
-    ///      pre-burn rate-limit check via `_outflowOrSkip`; the burn itself is
-    ///      issued inline via `_burn` (the base `_debit` is not called — the
-    ///      OZ ERC20 `_burn` and the upstream `OFT._debit` body are the same
-    ///      operation, so reproducing it inline keeps the override readable
-    ///      without a redundant `super._debit` round trip).
+    ///      pre-burn rate-limit check via `_outflowOrSkip`. We call
+    ///      `_debitView` and `_burn` inline rather than `super._debit`,
+    ///      because `super._debit` would re-invoke `_debitView` and we
+    ///      already used its result for the rate-limit check.
     function _debit(
         address _from,
         uint256 _amountLD,
@@ -218,7 +217,9 @@ contract WrappedON is OFT, RateLimiter {
     ///        a permanent burn (`0xdead`) or a free `seedReserve` paid by the
     ///        BSC sender (`address(this)`); minting wON instead keeps the
     ///        stranded amount visible in `totalSupply` and avoids leaking
-    ///        reserve. Emits `UnwrapFallbackToMint` when not composed.
+    ///        reserve. Emits `UnwrapFallbackToMint` when not composed; in
+    ///        the rare combined `0/this`+composed case the mint is silent
+    ///        (no event) — the composed branch's contract holds the wON.
     ///      - Composed message (`_composedFlag` set): always mint wON. The compose
     ///        handler downstream operates on `amountReceivedLD` assuming it was
     ///        credited as wON; auto-unwrapping would deliver real ON instead.

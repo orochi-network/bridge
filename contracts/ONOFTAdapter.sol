@@ -123,9 +123,10 @@ contract ONOFTAdapter is OFTAdapter, RateLimiter {
     ///      does not guard against bad recipient addresses:
     ///      - `address(0)`: `safeTransfer` to the zero address reverts on
     ///        standard ERC20s, making the inbound LayerZero message undeliverable.
-    ///      - `address(this)`: `safeTransfer` to the adapter itself is a no-op
-    ///        self-transfer on standard ERC20s; the message is marked delivered
-    ///        but the recipient receives nothing (silent fund loss).
+    ///      - `address(this)`: `safeTransfer` sends the unlocked ON back into
+    ///        the adapter's own balance; the inbound LayerZero message is
+    ///        marked delivered but the intended recipient receives nothing
+    ///        (silent fund loss).
     ///
     ///      Both are redirected to `address(0xdead)` so the message always
     ///      delivers. The locked ON is effectively burned, which is visible

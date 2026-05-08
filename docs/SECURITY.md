@@ -21,12 +21,12 @@ the conservation invariant.
 
 | Assumption | Why it matters | Verified |
 |------------|----------------|----------|
-| BSC ON token (`0x0e4F...1D48`) is lossless: `transferFrom(amount)` moves exactly `amount`. | `ONOFTAdapter` reports `amountSentLD` to LayerZero; ETH side credits the full amount. A silent FoT/rebase ⇒ unbacked wON. | Per-call delta guard in `_debit` (see Fix #1). Forked-mainnet dry-run also asserts losslessness today. |
+| BSC ON token (`0x0e4F...1D48`) is lossless: `transferFrom(amount)` moves exactly `amount`. | `ONOFTAdapter` reports `amountSentLD` to LayerZero; ETH side credits the full amount. A silent FoT/rebase ⇒ unbacked wON. | Per-call delta guard in `_debit` (see Fix H1). Forked-mainnet dry-run also asserts losslessness today. |
 | BSC ON has 18 decimals. | OFT shared-decimals math expects 18 LD. | Forked dry-run (`DryRun.t.sol`) and `WrappedON.constructor` both check 18. |
 | ETH ON token (`0x33f6...B59d`) has 18 decimals. | wON is 18-decimal; 1:1 swap requires the reserve token to match. | Constructor `DecimalsMismatch` revert. |
 | ETH ON token does not silently re-enter `WrappedON` from inside `safeTransfer`. | `_credit` and `unwrap` use checks-effects-interactions but do not gate with `ReentrancyGuard`. | Manual analysis: ON is a vanilla ERC20 (no ERC777-style hooks). Documented assumption. |
 | Both DVNs (`LayerZero Labs`, `Google` — the DVN run by Google Cloud) act independently. | Compromise of either DVN halts the bridge but does not steal funds. Compromise of both ⇒ arbitrary message forgery. | Operational obligation (DVN diversity). Liveness probe: `yarn check:dvn`. |
-| The deployer EOA is fully handed off to a multisig before going live. | Until handoff, the EOA can rewire peers and mint unbounded wON. | Tracked by the post-deploy checklist; automated by `tasks/handoff.ts` (Fix #6). |
+| The deployer EOA is fully handed off to a multisig before going live. | Until handoff, the EOA can rewire peers and mint unbounded wON. | Tracked by the post-deploy checklist; automated by the `lz:oapp:handoff` task (Fix H2). |
 
 ## Audit findings
 
@@ -54,8 +54,9 @@ fix references the commit that lands it.
   deployer EOA as both `owner` and `delegate`. The post-deploy checklist
   required two manual `transferOwnership` and `setDelegate` calls per chain.
   A forgotten command leaves a hot key with full peer/DVN authority.
-- **Fix (this branch):** `tasks/handoff.ts` performs `setDelegate(multisig)`
-  and `transferOwnership(multisig)` on a single network, ordered correctly,
+- **Fix (this branch):** the `lz:oapp:handoff` Hardhat task (in
+  `tasks/handoff.ts`) performs `setDelegate(multisig)` and
+  `transferOwnership(multisig)` on a single network, ordered correctly,
   reading the multisig address from `OWNER_BSC` / `OWNER_ETH` env vars. The
   deploy/wire/handoff sequence should be performed in a single operator
   session.
@@ -77,7 +78,7 @@ fix references the commit that lands it.
   emitted `UnwrapFallbackToMint` on every composed message (false positive
   for any monitor watching that event), and was vulnerable to silent drift
   if upstream `OFTCore.lzReceive` ever changes.
-- **Fix (this branch):** transient `_isComposed` flag set in `_lzReceive`,
+- **Fix (this branch):** transient `_composedFlag` set in `_lzReceive`,
   then `super._lzReceive` is called and the composed path is implemented
   inside `_credit`. Single source of truth, no duplicated event emission.
 
@@ -217,6 +218,11 @@ fix references the commit that lands it.
 
 - Run `yarn check:dvn` against archive RPCs immediately before every
   mainnet deploy, in addition to the existing `yarn test:dryrun`.
+- After `lz:oapp:handoff`, the multisig must call `setRateLimits` on both
+  contracts to apply production caps for the BSC↔ETH pathway. Until this
+  runs, both EIDs are unconfigured and unlimited (the `(0, 0)` storage
+  default is fail-open by design — see Fix M5 above and the README
+  "Rate limiting" section).
 
 ## Acknowledged design trade-offs (not bugs)
 
@@ -245,7 +251,7 @@ The following are documented in `CLAUDE.md` and remain by design.
   deploy.
 - Run `yarn check:dvn` immediately before `lz:oapp:wire` to confirm
   both required DVNs are reachable on BSC and Ethereum mainnet.
-- Compress deploy → `lz:oapp:wire` → `tasks/handoff.ts` into a single
+- Compress deploy → `lz:oapp:wire` → `lz:oapp:handoff` into a single
   operator session. Do not leave the deployer EOA as owner overnight.
 - Monitor `WrappedON.reserve()` against a daily-flow threshold; refill via
   `wrap` (recoverable) or `seedReserve` (one-way subsidy) as needed.

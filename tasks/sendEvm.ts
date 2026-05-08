@@ -75,7 +75,7 @@ export async function sendEvm(
             : wrapper.contract.address || ''
     }
 
-    // 2️⃣ load IOFT ABI, extend it with token()
+    // 2️⃣ load IOFT ABI (already includes token(), quoteSend(), send(), approvalRequired())
     const ioftArtifact = await srcEidHre.artifacts.readArtifact('IOFT')
 
     // now attach
