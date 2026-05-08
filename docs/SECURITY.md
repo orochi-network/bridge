@@ -245,6 +245,107 @@ The following are documented in `CLAUDE.md` and remain by design.
   wON is held by the handler contract. Recovery is the handler's
   responsibility.
 
+## Rate-limiter operations
+
+Both bridge contracts (`ONOFTAdapter` on BSC, `WrappedON` on Ethereum)
+inherit the LayerZero `RateLimiter` mixin and expose two owner-only
+mutators:
+
+- `setRateLimits(RateLimitConfig[] calldata)` — set per-EID `(limit, window)`.
+- `resetRateLimits(uint32[] calldata)` — zero `amountInFlight` for given EIDs.
+
+`RateLimitConfig` is `(uint32 dstEid, uint192 limit, uint64 window)`. The
+public mapping `rateLimits(dstEid)` returns the live state
+`(amountInFlight, lastUpdated, limit, window)`.
+
+### Capping outbound flow at 100,000 ON / hour
+
+After the post-deploy handoff (Step 5 of the checklist), the multisig
+calls `setRateLimits` on each contract. To cap BSC→ETH outbound at
+100,000 ON per hour:
+
+```ts
+// On BSC, multisig calls ONOFTAdapter.setRateLimits:
+const cfg = [{
+  dstEid: 30101,                       // Ethereum mainnet EID
+  limit:  100_000n * 10n ** 18n,       // 100,000 ON, 18-decimal wei
+  window: 3600,                        // 1 hour, in seconds
+}]
+await adapter.connect(multisig).setRateLimits(cfg)
+```
+
+Mirror on Ethereum to cap ETH→BSC outbound:
+
+```ts
+// On Ethereum, multisig calls WrappedON.setRateLimits:
+const cfgEth = [{ dstEid: 30102, limit: 100_000n * 10n ** 18n, window: 3600 }]
+await wON.connect(multisig).setRateLimits(cfgEth)
+```
+
+Buckets are independent per direction; capping only one side leaves the
+other free to drain.
+
+### Adjusting an existing limit
+
+Calling `setRateLimits` with the same `dstEid` and a new `(limit, window)`
+**preserves the running window's `amountInFlight`** — upstream
+`_setRateLimits` checkpoints decay at the old rate before the new rate
+kicks in, so a tightening cannot retroactively wipe accounting.
+
+To explicitly clear `amountInFlight` (e.g. after a confirmed incident
+response) without changing the limit, use `resetRateLimits`:
+
+```ts
+await adapter.connect(multisig).resetRateLimits([30101])
+```
+
+This zeros only the in-flight counter; `(limit, window)` are untouched.
+
+### Emergency stop
+
+`(0, 0)` is **fail-open**, not pause. To halt outbound flow on an EID,
+write a deny-all config:
+
+```ts
+const denyAll = [{
+  dstEid: 30101,
+  limit:  1n,                                  // 1 wei
+  window: 18_446_744_073_709_551_615n,         // type(uint64).max
+}]
+await adapter.connect(multisig).setRateLimits(denyAll)
+```
+
+The decay rate is `1 / type(uint64).max ≈ 0`, so the bucket effectively
+never refills. Any non-zero outbound reverts with `RateLimitExceeded` on
+the source-chain `send()` **before** any LayerZero plumbing engages —
+users keep their funds. To resume, write the production config back.
+
+The `setRateLimits` validator additionally rejects the silent-disable
+shape `(limit>0, window=0)` with `InvalidRateLimitConfig` (upstream
+`_amountCanBeSent` substitutes `window = 1` to avoid div-by-zero, which
+would refill the bucket every block while reporting a healthy
+"configured" state).
+
+### Verifying state
+
+Before and after every change, signers should read the live state on
+both chains:
+
+```sh
+cast call $ADAPTER_BSC \
+  "rateLimits(uint32)(uint192,uint64,uint192,uint64)" 30101 \
+  --rpc-url $RPC_URL_BSC
+# Returns: (amountInFlight, lastUpdated, limit, window)
+```
+
+Every successful `setRateLimits` call emits
+`RateLimitsChanged(RateLimitConfig[])`. Index this event off-chain to
+keep an audit trail of every limit change.
+
+Cross-references: full sizing guidance and the operator workflow live in
+[README.md "Rate limiting"](../README.md#rate-limiting); the high-level
+model is in [CLAUDE.md "Rate limiting"](../CLAUDE.md#rate-limiting).
+
 ## Operator obligations
 
 - Run `yarn test:dryrun` against archive RPCs before every mainnet
