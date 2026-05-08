@@ -15,14 +15,18 @@ import { RateLimiter } from "@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLi
  * @notice Ethereum-side mintable representation of ON, with optional 1:1 swap to a
  *         pre-existing non-mintable ON contract held in this contract's reserve.
  *
- * @dev Inbound (BSC -> ETH) credit semantics:
- *      - Plain message + reserve >= amount: transfer real ON to the recipient. wON
- *        is NOT minted.
- *      - Plain message + reserve insufficient: mint wON (default OFT behaviour).
+ * @dev Inbound (BSC -> ETH) credit semantics, evaluated in order:
+ *      - Recipient is `address(0)` or `address(this)`: redirect to `0xdead` and
+ *        force the mint path. Sending the real reserve to either is a permanent
+ *        burn or a free `seedReserve` paid by the BSC sender; minting wON
+ *        instead keeps the stranded amount visible in `totalSupply`.
  *      - Composed message: ALWAYS mint wON, regardless of reserve. Compose handlers
  *        receive `amountReceivedLD` and assume it refers to the OFT (wON); auto-
  *        unwrapping would deliver real ON instead, leaving the compose handler
  *        manipulating a wON balance the recipient doesn't have.
+ *      - Plain message + reserve >= amount: transfer real ON to the recipient. wON
+ *        is NOT minted.
+ *      - Plain message + reserve insufficient: mint wON (default OFT behaviour).
  *
  *      The reserve is non-mintable. Sustained net BSC -> ETH flow drains it; refilling
  *      requires either bridging wON back to BSC or a treasury commitment via
@@ -140,9 +144,11 @@ contract WrappedON is OFT, RateLimiter {
 
     /// @notice Deposit `_amount` real ON, receive an equal amount of wON. Caller
     ///         must approve(this, _amount) on the ON token first.
-    /// @dev    The amount minted is the actual delta in this contract's ON balance
-    ///         across the transfer, not the requested amount, to defend against
-    ///         fee-on-transfer behaviour in the reserve token.
+    /// @dev    Defends against fee-on-transfer or rebasing reserve tokens by
+    ///         comparing the actual balance delta to `_amount` and reverting
+    ///         with `UnexpectedTransferAmount` on mismatch. On success the
+    ///         minted amount equals `_amount` exactly; the 1:1 wrap invariant
+    ///         is preserved or the transaction reverts.
     function wrap(uint256 _amount) external {
         if (_amount == 0) revert ZeroAmount();
         uint256 balanceBefore = ON.balanceOf(address(this));
@@ -157,9 +163,11 @@ contract WrappedON is OFT, RateLimiter {
     /// @dev    One-way subsidy. The donor receives no wON in return and has no
     ///         on-chain claim on the seeded liquidity — once seeded, the funds
     ///         can be paid out via auto-unwrap or `unwrap` to any wON holder.
-    ///         Functionally equivalent to a direct ERC20 transfer to this
-    ///         contract; this wrapper just emits an event for off-chain
-    ///         accounting.
+    ///         Carries the same fee-on-transfer balance-delta guard as `wrap`
+    ///         and reverts with `UnexpectedTransferAmount` on mismatch, so it
+    ///         is stricter than a raw ERC20 transfer (which would silently
+    ///         accept a smaller amount). No wON is minted; the side effects
+    ///         are the reserve top-up and the `ReserveSeeded` event.
     function seedReserve(uint256 _amount) external {
         if (_amount == 0) revert ZeroAmount();
         uint256 balanceBefore = ON.balanceOf(address(this));
@@ -203,22 +211,27 @@ contract WrappedON is OFT, RateLimiter {
         super._lzReceive(_origin, _guid, _message, _executor, _extraData);
     }
 
-    /// @dev Override of OFT's default `_credit` (which always mints). Branches:
+    /// @dev Override of OFT's default `_credit` (which always mints). Branches,
+    ///      evaluated in order:
     ///      - Recipient is `address(0)` or `address(this)`: redirect to `0xdead`
     ///        and force the mint path. Sending real reserve to either is either
     ///        a permanent burn (`0xdead`) or a free `seedReserve` paid by the
     ///        BSC sender (`address(this)`); minting wON instead keeps the
     ///        stranded amount visible in `totalSupply` and avoids leaking
-    ///        reserve.
+    ///        reserve. Emits `UnwrapFallbackToMint` when not composed.
     ///      - Composed message (`_composedFlag` set): always mint wON. The compose
     ///        handler downstream operates on `amountReceivedLD` assuming it was
     ///        credited as wON; auto-unwrapping would deliver real ON instead.
     ///      - Plain message + reserve covers the request: transfer real ON, no
     ///        wON minted. Pre/post balance-delta-checks on both sides defend
     ///        against fee-on-transfer or rebasing on the reserve token; on
-    ///        mismatch the call reverts and the LZ message becomes retryable.
+    ///        mismatch the call reverts with `UnexpectedTransferAmount`. The
+    ///        LayerZero message stays retryable, but a retry will hit the same
+    ///        revert until the upstream cause (FoT activation, ON-token pause,
+    ///        recipient blacklist) clears or the reserve is drawn down below
+    ///        `_amountLD` so the fallback-mint branch fires. Emits `AutoUnwrap`.
     ///      - Plain message + reserve insufficient: mint wON (recipient can later
-    ///        `unwrap` once the reserve is refilled).
+    ///        `unwrap` once the reserve is refilled). Emits `UnwrapFallbackToMint`.
     ///      Single payout per message — never split.
     function _credit(
         address _to,
