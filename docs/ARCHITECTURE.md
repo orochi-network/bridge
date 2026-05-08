@@ -121,12 +121,14 @@ redirect, no auto-unwrap branching).
 ```mermaid
 flowchart TD
     A["_credit(recipient, amt)"] --> B{"recipient is<br/>address(0) or this?"}
-    B -->|yes| C["redirect → 0xdead<br/>force mint path"]
-    B -->|no| D{"composed flag set?<br/>(transient storage)"}
-    C --> E["_mint(0xdead, amt)"]
+    B -->|yes| C["redirect → 0xdead<br/>(rerouted = true)"]
+    B -->|no| D{"_composedFlag set?<br/>(transient storage)"}
+    C --> CC{"_composedFlag set?"}
+    CC -->|yes| CY["_mint(0xdead, amt)<br/><i>no event</i>"]
+    CC -->|no| CN["_mint(0xdead, amt)<br/>emit UnwrapFallbackToMint"]
     D -->|yes| F["_mint(recipient, amt)<br/><i>compose handler expects wON</i>"]
     D -->|no| G{"reserve ≥ amt?"}
-    G -->|yes| H["safeTransfer real ON<br/><b>no wON minted</b>"]
+    G -->|yes| H["safeTransfer real ON<br/>emit AutoUnwrap<br/><b>no wON minted</b>"]
     G -->|no| I["_mint(recipient, amt)<br/>emit UnwrapFallbackToMint"]
 ```
 
@@ -138,10 +140,11 @@ flowchart TD
 ## Invariants the diagrams reflect
 
 - **Conservation.** At rest (no in-flight messages), every wON in circulation
-  is a claim on real ON locked in `ONOFTAdapter` on BSC. The ETH-side reserve
-  is independent: it consists of `wrap` deposits (recoverable by the depositor
-  via `unwrap` while liquidity holds) plus `seedReserve` donations (one-way
-  treasury subsidy).
+  is backed 1:1 by real ON held either in `ONOFTAdapter` on BSC (for wON that
+  arrived across the bridge) or in the ETH-side reserve (for wON minted via
+  `wrap`). `seedReserve` donations add reserve without minting wON, so they
+  appear as excess on the ETH side — a one-way treasury subsidy redeemable
+  via auto-unwrap or `unwrap` to any wON holder, not just the donor.
 - **Outbound-only throttle.** `RateLimiter` is checked in `_debit`, never in
   `_credit`. Throttling inbound would brick already-debited deliveries; the
   source-side limit is the only safe enforcement point. `RateLimitExceeded`
