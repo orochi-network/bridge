@@ -22,10 +22,12 @@ import { RateLimiter } from "@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLi
  *      - Reserve < amount: mint wON (recipient can later `unwrap`).
  *
  *      `_credit` keeps upstream `OFT._credit:83`'s `address(0) -> 0xdead`
- *      redirect; nothing else is guarded. `_to = address(this)` follows
- *      upstream silently (mints to self / balance-delta revert on auto-
- *      unwrap). Bad recipients are an operator obligation — see SECURITY.md
- *      M4.
+ *      redirect; nothing else is guarded. `_to = address(this)` is NOT
+ *      guarded: the composed and fallback-mint branches mint wON into the
+ *      contract's own balance (silent bloat); the auto-unwrap branch
+ *      reverts via the existing balance-delta guard
+ *      (`UnexpectedTransferAmount`). Bad recipients are an operator
+ *      obligation — see SECURITY.md M4.
  *
  *      Reserve is non-mintable; sustained net BSC -> ETH flow drains it.
  *      Refill via `wrap` (recoverable) or `seedReserve` (one-way subsidy).
@@ -41,6 +43,9 @@ contract WrappedON is OFT, RateLimiter {
 
     /// @dev Set in `_lzReceive`, read by `_credit` to force-mint composed
     ///      messages. EIP-1153 transient storage — auto-clears at end of tx.
+    ///      `internal` visibility is intentional, for mock subclasses to
+    ///      drive the composed path in unit tests; no production descendant
+    ///      exists.
     bool internal transient _composedFlag;
 
     event AutoUnwrap(address indexed to, uint256 amount);

@@ -43,11 +43,14 @@ fix references the commit that lands it.
   rebasing semantics, the bridge silently leaks the fee while accounting for
   the full pre-fee amount on the other side, breaking conservation.
 - **Fix (this branch):**
-  - `ONOFTAdapter._debit` overridden with a balance-delta guard
-    (`UnexpectedTransferAmount`).
-  - `WrappedON._credit` auto-unwrap branch falls back to mint when the actual
-    delivered amount differs from the requested amount, preserving message
-    liveness while alerting via `UnwrapFallbackToMint`.
+  - `ONOFTAdapter._debit` overridden with a balance-delta guard that reverts
+    with `UnexpectedTransferAmount` on mismatch.
+  - `WrappedON._credit` auto-unwrap branch wraps `safeTransfer` in a pre/post
+    balance-delta check on both sides and reverts with
+    `UnexpectedTransferAmount` on mismatch (the LayerZero message stays
+    retryable). The fallback-to-mint path fires only when
+    `reserveBefore < _amountLD`, not on a delta mismatch — `UnwrapFallbackToMint`
+    therefore signals a depleted reserve, not a FoT activation.
 
 #### H2 — Manual ownership / delegate handoff
 - **Where:** `deploy/ONOFTAdapter.ts` and `deploy/WrappedON.ts` leave the
@@ -383,8 +386,9 @@ model is in [CLAUDE.md "Rate limiting"](../CLAUDE.md#rate-limiting).
 - Monitor `WrappedON.reserve()` against a daily-flow threshold; refill via
   `wrap` (recoverable) or `seedReserve` (one-way subsidy) as needed.
 - Subscribe to alerts on `UnwrapFallbackToMint` events: the false-positive
-  case from M1 is gone, so every emission now indicates either a depleted
-  reserve or a fee-on-transfer mismatch in the auto-unwrap path.
+  case from M1 is gone, so every emission indicates a depleted reserve.
+  A fee-on-transfer mismatch in the auto-unwrap branch reverts with
+  `UnexpectedTransferAmount` instead of emitting the event.
 - Configure outbound rate limits on both contracts via `setRateLimits`
   immediately after the multisig handoff (README Step 13 / CLAUDE.md
   post-deploy checklist Step 7). Unconfigured EIDs are fail-open — the

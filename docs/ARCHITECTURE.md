@@ -114,7 +114,7 @@ unchanged) unlocks real ON via `safeTransfer`.
 
 ```mermaid
 flowchart TD
-    A["_credit(recipient, amt)"] --> Z{"recipient ==<br/>address(0)?"}
+    A["WrappedON._credit(recipient, amt)"] --> Z{"recipient ==<br/>address(0)?"}
     Z -->|yes| ZR["recipient ← 0xdead"]
     Z -->|no| D
     ZR --> D{"_composedFlag set?"}

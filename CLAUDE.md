@@ -113,7 +113,7 @@ Apache-2.0. See `LICENSE` at the repo root and the `SPDX-License-Identifier` hea
 ```
 bridge/
 ├── contracts/
-│   ├── ONOFTAdapter.sol     ← BSC: OFTAdapter + FoT _debit guard + bad-recipient _credit redirect
+│   ├── ONOFTAdapter.sol     ← BSC: OFTAdapter + FoT _debit guard + RateLimiter (outbound); _credit inherited unchanged
 │   ├── WrappedON.sol        ← ETH: OFT + reserve-backed auto-unwrap, wrap/unwrap/seedReserve
 │   └── mocks/
 ├── deploy/
@@ -210,7 +210,7 @@ Full audit findings, fixes, decisions, and operator obligations are in [docs/SEC
 Status snapshot of the audit findings (current branch state, post-RateLimiter merge in `d61f5e1`):
 
 **Fixed in code (HIGH).**
-- **H1** Asymmetric fee-on-transfer protection — balance-delta guards in both `ONOFTAdapter._debit` and `WrappedON._credit` (auto-unwrap branch falls back to mint on mismatch).
+- **H1** Asymmetric fee-on-transfer protection — balance-delta guards in both `ONOFTAdapter._debit` and `WrappedON._credit` (auto-unwrap branch reverts with `UnexpectedTransferAmount` on mismatch; fallback-to-mint applies only when the reserve is insufficient, not on a delta mismatch).
 - **H2** Manual ownership / delegate handoff — automated and made idempotent by `tasks/handoff.ts` (`lz:oapp:handoff`), with pre-flight checks that the OApp is wired before transferring.
 - **H3** BSC→ETH confirmations 20 → 30 to clear historical reorg depths.
 
@@ -234,7 +234,7 @@ Status snapshot of the audit findings (current branch state, post-RateLimiter me
 - Post-handoff: multisig calls `setRateLimits` on both contracts (Step 7 in the post-deploy checklist). Until then, both EIDs are unconfigured → unlimited.
 - Monitor `WrappedON.reserve()` against an agreed daily-flow threshold; refill via `wrap` (recoverable) or `seedReserve` (one-way subsidy).
 - Monitor cumulative outbound flow per EID off-chain — the on-chain RateLimiter only bounds a single window, not a multi-window sustained drain.
-- Subscribe to `UnwrapFallbackToMint` event alerts; after the M1 fix, every emission indicates either a depleted reserve or a fee-on-transfer mismatch in the auto-unwrap path.
+- Subscribe to `UnwrapFallbackToMint` event alerts; after the M1 fix, every emission indicates a depleted reserve (the FoT-delta path reverts, it does not emit).
 - Coordinate with the ON token issuer on both chains before any pause / upgrade / blacklist change.
 
 ## What we deliberately did NOT do
