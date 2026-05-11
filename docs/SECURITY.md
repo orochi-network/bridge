@@ -43,11 +43,14 @@ fix references the commit that lands it.
   rebasing semantics, the bridge silently leaks the fee while accounting for
   the full pre-fee amount on the other side, breaking conservation.
 - **Fix (this branch):**
-  - `ONOFTAdapter._debit` overridden with a balance-delta guard
-    (`UnexpectedTransferAmount`).
-  - `WrappedON._credit` auto-unwrap branch falls back to mint when the actual
-    delivered amount differs from the requested amount, preserving message
-    liveness while alerting via `UnwrapFallbackToMint`.
+  - `ONOFTAdapter._debit` overridden with a balance-delta guard that reverts
+    with `UnexpectedTransferAmount` on mismatch.
+  - `WrappedON._credit` auto-unwrap branch wraps `safeTransfer` in a pre/post
+    balance-delta check on both sides and reverts with
+    `UnexpectedTransferAmount` on mismatch (the LayerZero message stays
+    retryable). The fallback-to-mint path fires only when
+    `reserveBefore < _amountLD`, not on a delta mismatch — `UnwrapFallbackToMint`
+    therefore signals a depleted reserve, not a FoT activation.
 
 #### H2 — Manual ownership / delegate handoff
 - **Where:** `deploy/ONOFTAdapter.ts` and `deploy/WrappedON.ts` leave the
@@ -105,24 +108,22 @@ fix references the commit that lands it.
   DVN fee per message — which is not the case at the bridge's current
   message profile. Liveness is verified pre-deploy by `yarn check:dvn`.
 
-#### M4 — `_credit` self-recipient and zero-recipient handling on both sides
-- **Where:** Asymmetric on both contracts. `WrappedON._credit` only
-  redirected `address(0)` to `0xdead`; a recipient of `address(this)` was
-  reachable as a free `seedReserve` paid by the BSC sender, and the
-  redirected zero-address case in the auto-unwrap branch burned real
-  reserve to `0xdead` permanently. `ONOFTAdapter._credit` (inherited)
-  guarded neither: a `_to == address(0)` recipient made the LZ message
-  permanently undeliverable (OZ ERC20 rejects zero-address `safeTransfer`),
-  and a `_to == address(adapter)` recipient was a self-transfer no-op that
-  silently burned the user's funds while the LZ message was marked
-  delivered (wON burned on ETH, ON still locked on BSC — conservation
-  break).
-- **Fix (this branch):** both contracts now redirect `address(0)` and
-  `address(this)` to `address(0xdead)`. On `WrappedON._credit` the
-  redirected path forces the mint branch so real reserve is never sent to
-  a dead recipient. On `ONOFTAdapter._credit` the inner ON is transferred
-  to `0xdead`, which is visible on-chain as a burn rather than a stuck or
-  silently-lost message.
+#### M4 — `_credit` recipient handling
+- **Decision:** match upstream LayerZero `_credit` exactly. Neither
+  contract guards bad recipients on-chain.
+  - `ONOFTAdapter`: no `_credit` override; inherits
+    `OFTAdapter._credit` verbatim. `address(0)` reverts via OZ ERC20;
+    `address(this)` is a silent self-transfer no-op.
+  - `WrappedON._credit`: keeps the upstream `OFT._credit:83`
+    `address(0) -> 0xdead` redirect and adds no other recipient guard.
+    Auto-unwrap to `0xdead` drains real reserve; mint branches mint at
+    `0xdead`. `address(this)` follows upstream — mints inflate wON's
+    own balance, auto-unwrap reverts via the existing balance-delta
+    guard (`UnexpectedTransferAmount`).
+- **Operator obligation:** monitor off-chain for inbound sends
+  addressed to `address(0)` or to the bridge contracts themselves. No
+  on-chain event distinguishes a misaddressed send from a legitimate
+  delivery in the silent cases.
 
 #### M5 — No throttle on outbound flow per EID
 
@@ -385,8 +386,9 @@ model is in [CLAUDE.md "Rate limiting"](../CLAUDE.md#rate-limiting).
 - Monitor `WrappedON.reserve()` against a daily-flow threshold; refill via
   `wrap` (recoverable) or `seedReserve` (one-way subsidy) as needed.
 - Subscribe to alerts on `UnwrapFallbackToMint` events: the false-positive
-  case from M1 is gone, so every emission now indicates either a depleted
-  reserve or a fee-on-transfer mismatch in the auto-unwrap path.
+  case from M1 is gone, so every emission indicates a depleted reserve.
+  A fee-on-transfer mismatch in the auto-unwrap branch reverts with
+  `UnexpectedTransferAmount` instead of emitting the event.
 - Configure outbound rate limits on both contracts via `setRateLimits`
   immediately after the multisig handoff (README Step 13 / CLAUDE.md
   post-deploy checklist Step 7). Unconfigured EIDs are fail-open — the
@@ -401,3 +403,5 @@ model is in [CLAUDE.md "Rate limiting"](../CLAUDE.md#rate-limiting).
   cumulative flow looks anomalous.
 - Coordinate with the ON token issuer on both chains before any pause /
   upgrade / blacklist change.
+- Monitor for inbound sends addressed to `address(0)` or to the bridge
+  contracts themselves — see M4.

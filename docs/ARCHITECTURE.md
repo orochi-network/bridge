@@ -14,7 +14,7 @@ flowchart LR
     subgraph BSC["BSC — canonical, locked"]
         direction TB
         ONBSC["ON token<br/>0x0e4F…1D48<br/><i>immutable, lossless</i>"]
-        ADAPTER["ONOFTAdapter<br/>OFT · owner = multisig<br/>· FoT balance-delta guard<br/>· 0/this → 0xdead redirect<br/>· RateLimiter (outbound)"]
+        ADAPTER["ONOFTAdapter<br/>OFT · owner = multisig<br/>· FoT balance-delta guard<br/>· _credit inherited from OFTAdapter<br/>· RateLimiter (outbound)"]
         EPBSC["Endpoint V2<br/>0x1a44…728c<br/>EID 30102"]
         ONBSC <-->|"transferFrom (lock)<br/>transfer (unlock)"| ADAPTER
         ADAPTER <-->|"send / lzReceive"| EPBSC
@@ -35,7 +35,7 @@ flowchart LR
     subgraph ETH["Ethereum — wrapped, mintable"]
         direction TB
         EPETH["Endpoint V2<br/>0x1a44…728c<br/>EID 30101"]
-        WON["WrappedON (wON)<br/>OFT · owner = multisig<br/>· auto-unwrap _credit<br/>· 0/this → 0xdead redirect<br/>· RateLimiter (outbound)"]
+        WON["WrappedON (wON)<br/>OFT · owner = multisig<br/>· auto-unwrap _credit<br/>· upstream 0 → 0xdead redirect<br/>· RateLimiter (outbound)"]
         ONETH["ON token (legacy)<br/>0x33f6…B59d"]
         RESERVE[("RESERVE<br/>real ON held<br/>inside WrappedON")]
         EPETH <-->|"send / lzReceive"| WON
@@ -94,25 +94,19 @@ sequenceDiagram
     Note over Exec: detects DVN quorum
     Exec->>EPETH: lzReceive(origin, guid, message)<br/>(300k gas, enforced)
     EPETH->>WON: _lzReceive → _credit(to, amt)
-    alt to ∈ {address(0), address(this)}
-        Note over WON: redirect → 0xdead, force mint
-        WON->>WON: _mint(0xdead, amt)
-    else composed (transient flag set)
-        Note over WON: preserve compose semantics
+    Note over WON: if to == address(0): to ← 0xdead (upstream OFT redirect)
+    alt composed (transient flag set)
         WON->>WON: _mint(to, amt)
     else reserve ≥ amt
         WON->>ONETH: safeTransfer(to, amt)
-        Note over WON: no wON minted
     else reserve < amt
         WON->>WON: _mint(to, amt)
-        Note over WON: emit UnwrapFallbackToMint
     end
 ```
 
-The reverse direction (ETH → BSC) is the mirror: `WrappedON.send()` burns wON
-(rate-limited outbound), 15 ETH confirmations, then `ONOFTAdapter._credit`
-unlocks real ON to the recipient (subject to the same `0/this → 0xdead`
-redirect, no auto-unwrap branching).
+ETH → BSC is the mirror: `WrappedON.send()` burns wON (rate-limited outbound),
+15 ETH confirmations, then `ONOFTAdapter._credit` (inherited from `OFTAdapter`
+unchanged) unlocks real ON via `safeTransfer`.
 
 ---
 
@@ -120,20 +114,19 @@ redirect, no auto-unwrap branching).
 
 ```mermaid
 flowchart TD
-    A["_credit(recipient, amt)"] --> B{"recipient is<br/>address(0) or this?"}
-    B -->|yes| C["redirect → 0xdead<br/>(rerouted = true)"]
-    B -->|no| D{"_composedFlag set?<br/>(transient storage)"}
-    C --> CC{"_composedFlag set?"}
-    CC -->|yes| CY["_mint(0xdead, amt)<br/><i>no event</i>"]
-    CC -->|no| CN["_mint(0xdead, amt)<br/>emit UnwrapFallbackToMint"]
-    D -->|yes| F["_mint(recipient, amt)<br/><i>compose handler expects wON</i>"]
+    A["WrappedON._credit(recipient, amt)"] --> Z{"recipient ==<br/>address(0)?"}
+    Z -->|yes| ZR["recipient ← 0xdead"]
+    Z -->|no| D
+    ZR --> D{"_composedFlag set?"}
+    D -->|yes| F["_mint(recipient, amt)"]
     D -->|no| G{"reserve ≥ amt?"}
-    G -->|yes| H["safeTransfer real ON<br/>emit AutoUnwrap<br/><b>no wON minted</b>"]
+    G -->|yes| H["safeTransfer real ON<br/>balance-delta guard<br/>emit AutoUnwrap"]
     G -->|no| I["_mint(recipient, amt)<br/>emit UnwrapFallbackToMint"]
 ```
 
-`ONOFTAdapter._credit` is simpler: only the `0/this → 0xdead` redirect, then
-`safeTransfer` of the locked ON to the recipient.
+`ONOFTAdapter._credit` is not overridden; inbound credit is upstream
+`OFTAdapter._credit` (`safeTransfer`). Bad-recipient handling is an operator
+obligation on both sides — see SECURITY.md M4.
 
 ---
 
@@ -154,10 +147,9 @@ flowchart TD
   `reserve ≥ amt`, fall back to wON otherwise. Composed messages always mint
   wON to keep `amountReceivedLD` consistent with what the compose handler
   expects to manipulate.
-- **Bad-recipient hardening is symmetric.** Both adapters redirect
-  `address(0)` and `address(this)` to `0xdead`; on `WrappedON` the redirect
-  also forces the mint branch so the reserve is never paid out to a dead
-  recipient.
+- **Bad-recipient handling matches upstream.** Neither contract guards
+  bad recipients on-chain. Operators monitor for misaddressed inbound
+  off-chain. See SECURITY.md M4.
 
 See [SECURITY.md](./SECURITY.md) for the audit findings each of these
 behaviours traces back to.

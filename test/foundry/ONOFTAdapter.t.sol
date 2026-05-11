@@ -11,6 +11,7 @@ import { ONOFTAdapter } from "../../contracts/ONOFTAdapter.sol";
 
 // OZ imports
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import { IERC20Errors } from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
 // OApp imports
 import { IOAppOptionsType3, EnforcedOptionParam } from "@layerzerolabs/oapp-evm/contracts/oapp/libs/OAppOptionsType3.sol";
@@ -226,48 +227,70 @@ contract ONOFTAdapterTest is TestHelperOz5 {
     }
 
     // -------------------------------------------------------------------------
-    // _credit recipient hardening: address(0) and address(this) reroute to 0xdead
+    // _credit pinned to upstream OFTAdapter behaviour (no override)
     // -------------------------------------------------------------------------
 
-    /// @dev Confirms that `ONOFTAdapter._credit` redirects `address(0)` and
-    ///      `address(this)` to `address(0xdead)`.
-    ///
-    ///      - `address(0)` would cause `safeTransfer` to revert on a standard
-    ///        ERC20 (OpenZeppelin rejects zero-address receivers), making the
-    ///        inbound LayerZero message permanently undeliverable.
-    ///      - `address(this)` is a self-transfer no-op on standard ERC20; the
-    ///        message is marked delivered but the recipient receives nothing
-    ///        (silent fund loss).
-    ///
-    ///      Both are redirected to 0xdead so the message always delivers.
-    function test_credit_redirectsBadRecipientToDeadAddress() public {
+    /// @dev `address(0)` recipient → OZ ERC20 reverts with
+    ///      `ERC20InvalidReceiver(0)`. Pinned to catch any future upstream
+    ///      change.
+    function test_credit_zeroRecipient_revertsViaERC20() public {
         ERC20Mock token = new ERC20Mock("Token", "TOKEN");
-        ONOFTAdapterMock fotAdapter = ONOFTAdapterMock(
+        ONOFTAdapterMock testAdapter = ONOFTAdapterMock(
             _deployOApp(
                 type(ONOFTAdapterMock).creationCode,
                 abi.encode(address(token), address(endpoints[aEid]), address(this))
             )
         );
-
-        // Seed the adapter with locked tokens (simulating prior BSC-side inflows).
         uint256 locked = 200 ether;
-        token.mint(address(fotAdapter), locked);
+        token.mint(address(testAdapter), locked);
 
-        uint256 amount = 10 ether;
+        // OZ ERC20 _transfer reverts with ERC20InvalidReceiver(0) when to == 0.
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InvalidReceiver.selector, address(0)));
+        testAdapter.credit(address(0), 10 ether, bEid);
 
-        // Case 1: address(0) recipient → redirected to 0xdead.
-        fotAdapter.credit(address(0), amount, bEid);
-        assertEq(token.balanceOf(address(0xdead)), amount, "address(0) must redirect to 0xdead");
-        assertEq(token.balanceOf(address(fotAdapter)), locked - amount, "adapter balance reduced");
+        assertEq(token.balanceOf(address(testAdapter)), locked, "adapter balance unchanged on revert");
+    }
 
-        // Case 2: address(this) (the adapter itself) → redirected to 0xdead.
-        fotAdapter.credit(address(fotAdapter), amount, bEid);
-        assertEq(
-            token.balanceOf(address(0xdead)),
-            2 * amount,
-            "address(this) must redirect to 0xdead"
+    /// @dev `address(this)` recipient → silent self-transfer no-op (matches
+    ///      upstream). Operator obligation; see SECURITY.md M4.
+    function test_credit_selfRecipient_silentNoOp() public {
+        ERC20Mock token = new ERC20Mock("Token", "TOKEN");
+        ONOFTAdapterMock testAdapter = ONOFTAdapterMock(
+            _deployOApp(
+                type(ONOFTAdapterMock).creationCode,
+                abi.encode(address(token), address(endpoints[aEid]), address(this))
+            )
         );
-        assertEq(token.balanceOf(address(fotAdapter)), locked - 2 * amount, "adapter balance reduced again");
+        uint256 locked = 200 ether;
+        token.mint(address(testAdapter), locked);
+
+        // No revert; the call succeeds and the adapter's balance is unchanged.
+        testAdapter.credit(address(testAdapter), 10 ether, bEid);
+
+        assertEq(
+            token.balanceOf(address(testAdapter)),
+            locked,
+            "self-transfer is a no-op; adapter balance unchanged"
+        );
+    }
+
+    /// @dev Happy path: valid recipient receives the unlocked ON.
+    function test_credit_goodRecipient_unlocks() public {
+        ERC20Mock token = new ERC20Mock("Token", "TOKEN");
+        ONOFTAdapterMock testAdapter = ONOFTAdapterMock(
+            _deployOApp(
+                type(ONOFTAdapterMock).creationCode,
+                abi.encode(address(token), address(endpoints[aEid]), address(this))
+            )
+        );
+        uint256 locked = 200 ether;
+        token.mint(address(testAdapter), locked);
+
+        address bob = address(0xB0B);
+        testAdapter.credit(bob, 10 ether, bEid);
+
+        assertEq(token.balanceOf(bob), 10 ether, "good recipient receives unlock");
+        assertEq(token.balanceOf(address(testAdapter)), locked - 10 ether, "adapter balance reduced");
     }
 }
 

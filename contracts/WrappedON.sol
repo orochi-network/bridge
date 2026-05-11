@@ -12,43 +12,27 @@ import { RateLimiter } from "@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLi
 
 /**
  * @title WrappedON (wON)
- * @notice Ethereum-side mintable representation of ON, with optional 1:1 swap to a
- *         pre-existing non-mintable ON contract held in this contract's reserve.
+ * @notice Ethereum-side mintable representation of ON, with optional 1:1 swap
+ *         to a pre-existing non-mintable ON contract held as reserve.
  *
- * @dev Inbound (BSC -> ETH) credit semantics, evaluated in order:
- *      - Recipient is `address(0)` or `address(this)`: redirect to `0xdead` and
- *        force the mint path. Sending the real reserve to either is a permanent
- *        burn or a free `seedReserve` paid by the BSC sender; minting wON
- *        instead keeps the stranded amount visible in `totalSupply`.
- *      - Composed message: ALWAYS mint wON, regardless of reserve. Compose handlers
- *        receive `amountReceivedLD` and assume it refers to the OFT (wON); auto-
- *        unwrapping would deliver real ON instead, leaving the compose handler
- *        manipulating a wON balance the recipient doesn't have.
- *      - Plain message + reserve >= amount: transfer real ON to the recipient. wON
- *        is NOT minted.
- *      - Plain message + reserve insufficient: mint wON (default OFT behaviour).
+ * @dev Inbound (BSC -> ETH) credit branches, evaluated in order:
+ *      - Composed message: mint wON regardless of reserve (compose handlers
+ *        assume `amountReceivedLD` is wON).
+ *      - Reserve >= amount: transfer real ON to recipient, no wON minted.
+ *      - Reserve < amount: mint wON (recipient can later `unwrap`).
  *
- *      The reserve is non-mintable. Sustained net BSC -> ETH flow drains it; refilling
- *      requires either bridging wON back to BSC or a treasury commitment via
- *      `seedReserve`. There is no autonomous refill mechanism.
+ *      `_credit` keeps upstream `OFT._credit:83`'s `address(0) -> 0xdead`
+ *      redirect; nothing else is guarded. `_to = address(this)` is NOT
+ *      guarded: the composed and fallback-mint branches mint wON into the
+ *      contract's own balance (silent bloat); the auto-unwrap branch
+ *      reverts via the existing balance-delta guard
+ *      (`UnexpectedTransferAmount`). Bad recipients are an operator
+ *      obligation — see SECURITY.md M4.
  *
- *      Operator awareness:
- *      - `seedReserve` is a one-way subsidy. Donors do not receive wON, so they
- *        have no on-chain claim on the reserve they seeded.
- *      - A wON holder can front-run a pending inbound bridge via `unwrap` to drain
- *        the reserve, forcing the inbound recipient onto the wON fallback.
- *      - If the ON token is paused or blacklists the recipient, the auto-unwrap
- *        branch reverts inside `_credit`, making the LayerZero message
- *        undeliverable until the lock lifts.
- *
- *      Outbound rate limiting (LayerZero `RateLimiter` extension) is applied
- *      per destination EID in `_debit`. Inbound is intentionally NOT rate
- *      limited: an inbound message is the tail of an already-sent outbound, so
- *      throttling it cannot prevent the source-chain debit and only adds a way
- *      to brick LayerZero delivery. Operators dial limits via `setRateLimits`
- *      (owner-only). Unconfigured EIDs (`limit==0 && window==0`) are
- *      fail-open — see the WARNING on `_outflowOrSkip`. To pause an EID use
- *      a deny-all config, NOT `(0, 0)`.
+ *      Reserve is non-mintable; sustained net BSC -> ETH flow drains it.
+ *      Refill via `wrap` (recoverable) or `seedReserve` (one-way subsidy).
+ *      No autonomous refill. Outbound rate limiting via the LayerZero
+ *      `RateLimiter` extension; inbound is intentionally not rate-limited.
  */
 contract WrappedON is OFT, RateLimiter {
     using SafeERC20 for IERC20;
@@ -57,12 +41,12 @@ contract WrappedON is OFT, RateLimiter {
     /// @notice Pre-existing, non-mintable ON ERC20 used as the reserve asset.
     IERC20 public immutable ON;
 
-    /// @dev Set in `_lzReceive` so that `_credit` (called by `super._lzReceive`)
-    ///      can route composed messages to the mint path without re-implementing
-    ///      the upstream lzReceive logic. EIP-1153 transient storage: the slot
-    ///      is auto-cleared at end-of-transaction, so no manual reset is needed
-    ///      and the value cannot leak across messages. Not exposed externally.
-    bool private transient _composedFlag;
+    /// @dev Set in `_lzReceive`, read by `_credit` to force-mint composed
+    ///      messages. EIP-1153 transient storage — auto-clears at end of tx.
+    ///      `internal` visibility is intentional, for mock subclasses to
+    ///      drive the composed path in unit tests; no production descendant
+    ///      exists.
+    bool internal transient _composedFlag;
 
     event AutoUnwrap(address indexed to, uint256 amount);
     event UnwrapFallbackToMint(address indexed to, uint256 amount);
@@ -193,12 +177,9 @@ contract WrappedON is OFT, RateLimiter {
         _burn(_from, amountSentLD);
     }
 
-    /// @dev Override of OFTCore._lzReceive. Sets a per-message transient flag
-    ///      the `_credit` override consults to force the mint path on composed
-    ///      messages, then delegates to super so the upstream compose dispatch
-    ///      and `OFTReceived` emission remain a single source of truth.
-    ///      Transient storage auto-clears at end-of-transaction, so no manual
-    ///      reset is needed.
+    /// @dev Sets the transient `_composedFlag` then delegates to super so the
+    ///      upstream compose dispatch and `OFTReceived` emission stay a single
+    ///      source of truth.
     function _lzReceive(
         Origin calldata _origin,
         bytes32 _guid,
@@ -210,44 +191,20 @@ contract WrappedON is OFT, RateLimiter {
         super._lzReceive(_origin, _guid, _message, _executor, _extraData);
     }
 
-    /// @dev Override of OFT's default `_credit` (which always mints). Branches,
-    ///      evaluated in order:
-    ///      - Recipient is `address(0)` or `address(this)`: redirect to `0xdead`
-    ///        and force the mint path. Sending real reserve to either is either
-    ///        a permanent burn (`0xdead`) or a free `seedReserve` paid by the
-    ///        BSC sender (`address(this)`); minting wON instead keeps the
-    ///        stranded amount visible in `totalSupply` and avoids leaking
-    ///        reserve. Emits `UnwrapFallbackToMint` when not composed; in
-    ///        the rare combined `0/this`+composed case the mint is silent
-    ///        (no event) — the composed branch's contract holds the wON.
-    ///      - Composed message (`_composedFlag` set): always mint wON. The compose
-    ///        handler downstream operates on `amountReceivedLD` assuming it was
-    ///        credited as wON; auto-unwrapping would deliver real ON instead.
-    ///      - Plain message + reserve covers the request: transfer real ON, no
-    ///        wON minted. Pre/post balance-delta-checks on both sides defend
-    ///        against fee-on-transfer or rebasing on the reserve token; on
-    ///        mismatch the call reverts with `UnexpectedTransferAmount`. The
-    ///        LayerZero message stays retryable, but a retry will hit the same
-    ///        revert until the upstream cause (FoT activation, ON-token pause,
-    ///        recipient blacklist) clears or the reserve is drawn down below
-    ///        `_amountLD` so the fallback-mint branch fires. Emits `AutoUnwrap`.
-    ///      - Plain message + reserve insufficient: mint wON (recipient can later
-    ///        `unwrap` once the reserve is refilled). Emits `UnwrapFallbackToMint`.
-    ///      Single payout per message — never split.
+    /// @dev Override of `OFT._credit`. Adds the auto-unwrap and compose-
+    ///      forces-mint branches; bad-recipient handling matches upstream
+    ///      (see contract-level NatSpec). Plain auto-unwrap uses balance-
+    ///      delta checks on both sides to catch fee-on-transfer / rebasing
+    ///      reserve tokens and the self-recipient no-op.
     function _credit(
         address _to,
         uint256 _amountLD,
         uint32 /*_srcEid*/
     ) internal virtual override returns (uint256 amountReceivedLD) {
-        bool rerouted = false;
-        if (_to == address(0x0) || _to == address(this)) {
-            _to = address(0xdead);
-            rerouted = true;
-        }
+        if (_to == address(0x0)) _to = address(0xdead); // OFT._credit:83 verbatim — _mint rejects address(0)
 
-        if (_composedFlag || rerouted) {
+        if (_composedFlag) {
             _mint(_to, _amountLD);
-            if (rerouted && !_composedFlag) emit UnwrapFallbackToMint(_to, _amountLD);
             return _amountLD;
         }
 

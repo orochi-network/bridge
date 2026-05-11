@@ -342,43 +342,80 @@ contract WrappedONTest is TestHelperOz5 {
     }
 
     // -------------------------------------------------------------------------
-    // recipient hardening: address(0) and address(this) reroute to mint
+    // recipient handling pinned to upstream OFT (address(0) → 0xdead; no
+    // guard on address(this) — operator obligation, see SECURITY.md M4)
     // -------------------------------------------------------------------------
 
-    function _bridgeRawTo(bytes32 _toBytes32, uint256 _amount) internal {
-        bytes memory options = OptionsBuilder.newOptions().addExecutorLzReceiveOption(200_000, 0);
-        SendParam memory p = SendParam(ETH_EID, _toBytes32, _amount, _amount, options, "", "");
-        MessagingFee memory fee = adapter.quoteSend(p, false);
-
-        vm.startPrank(alice);
-        bscON.approve(address(adapter), _amount);
-        adapter.send{ value: fee.nativeFee }(p, fee, payable(alice));
-        vm.stopPrank();
-
-        verifyPackets(ETH_EID, addressToBytes32(address(wON)));
-    }
-
-    function test_inbound_zeroRecipient_redirectsToDeadAndMints() public {
-        _seed(500 ether); // reserve is full so the auto-unwrap path would otherwise fire
-
-        _bridgeRawTo(bytes32(0), 100 ether);
-
-        // Reserve must NOT be drained — sending real ON to 0xdead would burn it.
-        assertEq(wON.reserve(), 500 ether, "reserve untouched");
-        assertEq(wON.balanceOf(address(0xdead)), 100 ether, "wON minted to 0xdead");
-        assertEq(ethON.balanceOf(address(0xdead)), 0, "no real ON paid to 0xdead");
-    }
-
-    function test_inbound_selfRecipient_redirectsToDeadAndMints() public {
+    /// @dev `address(0)` + auto-unwrap → real reserve drained to `0xdead`.
+    function test_inbound_zeroRecipient_autoUnwrap_drainsReserveToDead() public {
         _seed(500 ether);
 
-        _bridgeRawTo(addressToBytes32(address(wON)), 100 ether);
+        wON.credit(address(0), 100 ether, BSC_EID);
 
-        // Self-recipient was a free `seedReserve` paid by the BSC sender; the
-        // reroute now mints to 0xdead instead of inflating the reserve.
-        assertEq(wON.reserve(), 500 ether, "reserve untouched (no free seed)");
+        assertEq(wON.reserve(), 400 ether, "reserve drained to 0xdead");
+        assertEq(ethON.balanceOf(address(0xdead)), 100 ether, "real ON sent to 0xdead");
+        assertEq(wON.balanceOf(address(0xdead)), 0, "no wON minted (auto-unwrap path)");
+    }
+
+    /// @dev `address(0)` + empty reserve → fallback-mint at `0xdead`.
+    function test_inbound_zeroRecipient_emptyReserve_mintsToDead() public {
+        wON.credit(address(0), 100 ether, BSC_EID);
+
         assertEq(wON.balanceOf(address(0xdead)), 100 ether, "wON minted to 0xdead");
-        assertEq(wON.balanceOf(address(wON)), 0, "no wON minted to self");
+        assertEq(wON.reserve(), 0, "reserve untouched (was empty)");
+    }
+
+    /// @dev `address(0)` + composed → mint at `0xdead`.
+    function test_inbound_zeroRecipient_composed_mintsToDead() public {
+        _seed(500 ether);
+
+        wON.creditComposed(address(0), 100 ether, BSC_EID);
+
+        assertEq(wON.balanceOf(address(0xdead)), 100 ether, "wON minted to 0xdead under composed branch");
+        assertEq(wON.reserve(), 500 ether, "reserve untouched (compose forces mint)");
+    }
+
+    /// @dev `address(this)` + auto-unwrap → balance-delta guard catches the
+    ///      self-transfer no-op and reverts with `UnexpectedTransferAmount`.
+    function test_inbound_selfRecipient_autoUnwrap_revertsOnSelfTransferNoOp() public {
+        _seed(500 ether);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(WrappedON.UnexpectedTransferAmount.selector, uint256(100 ether), uint256(0))
+        );
+        wON.credit(address(wON), 100 ether, BSC_EID);
+
+        assertEq(wON.reserve(), 500 ether, "reserve untouched on revert");
+        assertEq(wON.balanceOf(address(wON)), 0, "no wON minted on revert");
+    }
+
+    /// @dev `address(this)` + empty reserve → fallback-mint inflates wON's
+    ///      own balance (silent contract bloat; matches upstream).
+    function test_inbound_selfRecipient_emptyReserve_mintsToSelf() public {
+        wON.credit(address(wON), 100 ether, BSC_EID);
+
+        assertEq(wON.balanceOf(address(wON)), 100 ether, "wON minted into its own balance");
+        assertEq(wON.totalSupply(), 100 ether, "totalSupply reflects the orphaned mint");
+        assertEq(wON.reserve(), 0, "reserve untouched");
+    }
+
+    /// @dev `address(this)` + composed → mint into wON's own balance.
+    function test_inbound_selfRecipient_composed_mintsToSelf() public {
+        _seed(500 ether);
+
+        wON.creditComposed(address(wON), 100 ether, BSC_EID);
+
+        assertEq(wON.balanceOf(address(wON)), 100 ether, "wON minted into its own balance");
+        assertEq(wON.reserve(), 500 ether, "reserve untouched (compose forces mint)");
+    }
+
+    /// @dev Happy path: composed + valid recipient → mint to recipient.
+    function test_inbound_composed_goodRecipient_mints() public {
+        _seed(500 ether);
+        wON.creditComposed(bob, 100 ether, BSC_EID);
+
+        assertEq(wON.balanceOf(bob), 100 ether, "composed credit mints to good recipient");
+        assertEq(wON.reserve(), 500 ether, "reserve untouched (compose forces mint)");
     }
 
     // -------------------------------------------------------------------------

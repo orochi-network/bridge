@@ -67,7 +67,7 @@ At rest (no in-flight messages): every wON in circulation is a claim on real ON 
 
 ## Origin
 
-Scaffolded by copying `examples/oft-adapter` from [`LayerZero-Labs/devtools`](https://github.com/LayerZero-Labs/devtools/tree/main/examples/oft-adapter) (the same template `npx create-lz-oapp -e oft-adapter` produces). `ONOFTAdapter.sol` **diverges** from the upstream template in three places: `_debit` adds a balance-delta guard for fee-on-transfer tokens AND consults the LayerZero `RateLimiter` extension (outbound-only, per-EID); `_credit` redirects `address(0)` / `address(this)` recipients to `address(0xdead)` (matching the same hardening in WrappedON). `WrappedON.sol` **diverges** from the template: it adds the auto-unwrap `_credit` override, the `wrap`/`unwrap`/`seedReserve` surface described above, and the same outbound `RateLimiter` integration.
+Scaffolded by copying `examples/oft-adapter` from [`LayerZero-Labs/devtools`](https://github.com/LayerZero-Labs/devtools/tree/main/examples/oft-adapter) (the same template `npx create-lz-oapp -e oft-adapter` produces). `ONOFTAdapter.sol` **diverges** from the upstream template only in `_debit` (FoT balance-delta guard + `RateLimiter` integration); `_credit` is inherited from `OFTAdapter` unchanged. `WrappedON.sol` **diverges** by adding the auto-unwrap `_credit` override (with the upstream `OFT._credit:83` `address(0) → 0xdead` redirect kept verbatim), the `wrap`/`unwrap`/`seedReserve` surface, and the same `RateLimiter` integration.
 
 ## Rate limiting
 
@@ -113,7 +113,7 @@ Apache-2.0. See `LICENSE` at the repo root and the `SPDX-License-Identifier` hea
 ```
 bridge/
 ├── contracts/
-│   ├── ONOFTAdapter.sol     ← BSC: OFTAdapter + FoT _debit guard + bad-recipient _credit redirect
+│   ├── ONOFTAdapter.sol     ← BSC: OFTAdapter + FoT _debit guard + RateLimiter (outbound); _credit inherited unchanged
 │   ├── WrappedON.sol        ← ETH: OFT + reserve-backed auto-unwrap, wrap/unwrap/seedReserve
 │   └── mocks/
 ├── deploy/
@@ -210,14 +210,14 @@ Full audit findings, fixes, decisions, and operator obligations are in [docs/SEC
 Status snapshot of the audit findings (current branch state, post-RateLimiter merge in `d61f5e1`):
 
 **Fixed in code (HIGH).**
-- **H1** Asymmetric fee-on-transfer protection — balance-delta guards in both `ONOFTAdapter._debit` and `WrappedON._credit` (auto-unwrap branch falls back to mint on mismatch).
+- **H1** Asymmetric fee-on-transfer protection — balance-delta guards in both `ONOFTAdapter._debit` and `WrappedON._credit` (auto-unwrap branch reverts with `UnexpectedTransferAmount` on mismatch; fallback-to-mint applies only when the reserve is insufficient, not on a delta mismatch).
 - **H2** Manual ownership / delegate handoff — automated and made idempotent by `tasks/handoff.ts` (`lz:oapp:handoff`), with pre-flight checks that the OApp is wired before transferring.
 - **H3** BSC→ETH confirmations 20 → 30 to clear historical reorg depths.
 
 **Fixed in code (MEDIUM).**
 - **M1** `_lzReceive` composed branch duplicated upstream logic — refactored to a transient flag + `super._lzReceive`, so `UnwrapFallbackToMint` no longer false-positives on every composed message.
 - **M2** Enforced executor gas symmetric and missing for composed sends — split per-leg AND per-msgType (BSC inbound 250k; ETH inbound 300k for `msgType 1` and `msgType 2`).
-- **M4** `_credit` recipient hardening — both contracts redirect `address(0)` and `address(this)` to `address(0xdead)`; on `WrappedON` the redirect forces the mint branch so reserve is never sent to a dead recipient.
+- **M4** `_credit` recipient handling — matches upstream LayerZero exactly. `ONOFTAdapter` does not override `_credit`; `WrappedON._credit` keeps only the upstream `OFT._credit:83` `address(0) → 0xdead` redirect. Bad recipients are an operator obligation; see SECURITY.md M4.
 - **M5** No throttle on outbound flow per EID — LayerZero `RateLimiter` mixed in on both contracts (outbound only, per-EID, owner-only setters; unconfigured EIDs are fail-open so a fresh deploy is usable until the multisig dials in caps; `(0, 0)` is the unconfigured sentinel and is NOT a pause — see README "Pausing an EID" for the deny-all idiom).
 
 **Fixed in code (LOW / cleanup).** Exact `0.8.34` pragma pin in mocks; `MyERC20Mock` deploy gated to non-live networks; DVN canonical name `'Google Cloud'` → `'Google'` (the metadata registry uses an exact canonicalName match); pre-deploy `yarn check:dvn` script; bytecode-diff CI (`yarn check:bytecode`) asserting Hardhat/Foundry runtime parity.
@@ -234,7 +234,7 @@ Status snapshot of the audit findings (current branch state, post-RateLimiter me
 - Post-handoff: multisig calls `setRateLimits` on both contracts (Step 7 in the post-deploy checklist). Until then, both EIDs are unconfigured → unlimited.
 - Monitor `WrappedON.reserve()` against an agreed daily-flow threshold; refill via `wrap` (recoverable) or `seedReserve` (one-way subsidy).
 - Monitor cumulative outbound flow per EID off-chain — the on-chain RateLimiter only bounds a single window, not a multi-window sustained drain.
-- Subscribe to `UnwrapFallbackToMint` event alerts; after the M1 fix, every emission indicates either a depleted reserve or a fee-on-transfer mismatch in the auto-unwrap path.
+- Subscribe to `UnwrapFallbackToMint` event alerts; after the M1 fix, every emission indicates a depleted reserve (the FoT-delta path reverts, it does not emit).
 - Coordinate with the ON token issuer on both chains before any pause / upgrade / blacklist change.
 
 ## What we deliberately did NOT do

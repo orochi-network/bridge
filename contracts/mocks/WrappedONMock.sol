@@ -20,4 +20,12 @@ contract WrappedONMock is WrappedON {
     function credit(address _to, uint256 _amountLD, uint32 _srcEid) public returns (uint256) {
         return _credit(_to, _amountLD, _srcEid);
     }
+
+    /// @dev Sets the transient composed flag, then routes to `_credit`. Mirrors
+    ///      what `_lzReceive` does for a composed packet without needing to
+    ///      stand up the LayerZero packet plumbing.
+    function creditComposed(address _to, uint256 _amountLD, uint32 _srcEid) public returns (uint256) {
+        _composedFlag = true;
+        return _credit(_to, _amountLD, _srcEid);
+    }
 }
