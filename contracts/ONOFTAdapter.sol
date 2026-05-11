@@ -10,50 +10,17 @@ import { RateLimiter } from "@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLi
 /**
  * @title ONOFTAdapter
  * @notice BSC-side adapter that locks/unlocks the canonical ON token for the
- *         LayerZero V2 OFT mesh. Diverges from the upstream `OFTAdapter`
- *         template in two places:
+ *         LayerZero V2 OFT mesh.
  *
- *         1. `_debit` is overridden with a balance-delta check so the adapter
- *            cannot silently misreport `amountSentLD` to LayerZero if the
- *            inner ON token ever ships fee-on-transfer or rebasing semantics.
+ * @dev    Diverges from upstream `OFTAdapter` in two places:
+ *         1. `_debit` adds a balance-delta check to refuse fee-on-transfer /
+ *            rebasing inner tokens (would otherwise under-collateralise the
+ *            bridge — see `_debit` NatSpec).
+ *         2. Mixes in the LayerZero `RateLimiter` extension, outbound-only.
+ *            Inbound is intentionally not rate-limited — see `_outflowOrSkip`.
  *
- *         2. The LayerZero `RateLimiter` extension is mixed in and `_debit`
- *            consults it on every outbound send. See `_outflowOrSkip` for the
- *            "unconfigured == fail-open" semantics that keep the contract
- *            usable before the multisig has dialled in production limits,
- *            and the WARNING there explaining why `(0, 0)` is fail-open
- *            rather than pause.
- *
- *         `_credit` is intentionally NOT overridden — inbound credit uses
- *         the upstream `OFTAdapter._credit` behaviour verbatim
- *         (`innerToken.safeTransfer(_to, _amountLD)`). The base behaviour:
- *         - `_to = address(0)`: `safeTransfer` reverts (OZ ERC20 rejects
- *           zero-address receivers). The LZ message stays retryable-pending.
- *         - `_to = address(this)`: `safeTransfer` is a self-transfer no-op;
- *           the LZ message is marked delivered but the recipient receives
- *           nothing. **Silent fund loss** — the locked ON stays in the
- *           adapter without an accounting entry on the destination chain.
- *           This is an upstream limitation, NOT a bug introduced here, and
- *           is accepted as an operator obligation (monitor for bridges
- *           addressed to the adapter itself). See SECURITY.md M4.
- *
- * @dev    The default `OFTAdapter` implementation assumes lossless transfers
- *         on the inner token. ON on BSC is lossless today (verified by the
- *         forked-mainnet dry-run), but a future migration or upgrade of the
- *         ON contract could change that. Without the delta check, a single
- *         FoT activation would credit the full pre-fee amount on Ethereum
- *         while the adapter held less, breaking the bridge's conservation
- *         invariant. The override reverts the send instead of letting it
- *         under-collateralise the bridge.
- *
- * @dev    Rate limiting is applied to OUTBOUND sends only, per destination
- *         EID. Inbound (`_credit`) is intentionally NOT rate-limited: an
- *         inbound message is the tail of an already-sent outbound, so
- *         throttling it cannot prevent the source-chain debit and only adds
- *         a way to brick LayerZero delivery (the message becomes permanently
- *         stuck when the cap is hit). Outflow-only matches the LayerZero
- *         OFT quickstart pattern and is sufficient to bound drain risk per
- *         direction.
+ *         `_credit` is NOT overridden; inbound credit uses upstream
+ *         `OFTAdapter._credit` verbatim (`innerToken.safeTransfer(_to, amt)`).
  *
  * @dev    WARNING: ONLY 1 OFTAdapter should exist for a given global mesh.
  */

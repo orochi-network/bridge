@@ -94,25 +94,19 @@ sequenceDiagram
     Note over Exec: detects DVN quorum
     Exec->>EPETH: lzReceive(origin, guid, message)<br/>(300k gas, enforced)
     EPETH->>WON: _lzReceive → _credit(to, amt)
-    Note over WON: if to == address(0): to ← 0xdead<br/>(upstream OFT redirect; matches OFT._credit:83)
+    Note over WON: if to == address(0): to ← 0xdead (upstream OFT redirect)
     alt composed (transient flag set)
-        Note over WON: preserve compose semantics
         WON->>WON: _mint(to, amt)
     else reserve ≥ amt
         WON->>ONETH: safeTransfer(to, amt)
-        Note over WON: no wON minted<br/>(self-transfer no-op reverts via balance-delta guard)
     else reserve < amt
         WON->>WON: _mint(to, amt)
-        Note over WON: emit UnwrapFallbackToMint
     end
 ```
 
-The reverse direction (ETH → BSC) is the mirror: `WrappedON.send()` burns wON
-(rate-limited outbound), 15 ETH confirmations, then `ONOFTAdapter._credit`
-unlocks real ON to the recipient. `ONOFTAdapter` does NOT override `_credit`
-— inbound credit is `OFTAdapter._credit` verbatim (`innerToken.safeTransfer`).
-`address(0)` reverts via OZ ERC20; `address(this)` is a silent self-transfer
-no-op (operator obligation; see SECURITY.md M4).
+ETH → BSC is the mirror: `WrappedON.send()` burns wON (rate-limited outbound),
+15 ETH confirmations, then `ONOFTAdapter._credit` (inherited from `OFTAdapter`
+unchanged) unlocks real ON via `safeTransfer`.
 
 ---
 
@@ -121,20 +115,18 @@ no-op (operator obligation; see SECURITY.md M4).
 ```mermaid
 flowchart TD
     A["_credit(recipient, amt)"] --> Z{"recipient ==<br/>address(0)?"}
-    Z -->|yes| ZR["recipient ← 0xdead<br/><i>(OFT._credit:83 verbatim)</i>"]
+    Z -->|yes| ZR["recipient ← 0xdead"]
     Z -->|no| D
-    ZR --> D{"_composedFlag set?<br/>(transient storage)"}
-    D -->|yes| F["_mint(recipient, amt)<br/><i>compose handler expects wON</i>"]
+    ZR --> D{"_composedFlag set?"}
+    D -->|yes| F["_mint(recipient, amt)"]
     D -->|no| G{"reserve ≥ amt?"}
-    G -->|yes| H["safeTransfer real ON<br/>balance-delta guard<br/>emit AutoUnwrap<br/><b>no wON minted</b>"]
+    G -->|yes| H["safeTransfer real ON<br/>balance-delta guard<br/>emit AutoUnwrap"]
     G -->|no| I["_mint(recipient, amt)<br/>emit UnwrapFallbackToMint"]
 ```
 
-`ONOFTAdapter._credit` is **not overridden** — inbound credit is
-`OFTAdapter._credit` verbatim (`innerToken.safeTransfer(_to, _amountLD)`).
-`address(0)` reverts via OZ ERC20; `address(this)` is a silent self-transfer
-no-op (operator obligation; see SECURITY.md M4 for the rationale on matching
-upstream rather than guarding on-chain).
+`ONOFTAdapter._credit` is not overridden; inbound credit is upstream
+`OFTAdapter._credit` (`safeTransfer`). Bad-recipient handling is an operator
+obligation on both sides — see SECURITY.md M4.
 
 ---
 
@@ -156,15 +148,8 @@ upstream rather than guarding on-chain).
   wON to keep `amountReceivedLD` consistent with what the compose handler
   expects to manipulate.
 - **Bad-recipient handling matches upstream.** Neither contract guards
-  bad recipients on-chain — both inherit the upstream LayerZero behaviour.
-  `WrappedON` applies upstream `OFT._credit:83`'s `address(0) → 0xdead`
-  redirect verbatim, then runs the normal branches (auto-unwrap drains
-  reserve to `0xdead`; mints land at `0xdead`). `ONOFTAdapter` has no
-  `_credit` override at all — `address(0)` reverts via OZ ERC20,
-  `address(this)` is a silent self-transfer no-op. Both `address(0)` and
-  `address(this)` are operator obligations: monitor for misaddressed
-  inbound sends off-chain. See SECURITY.md M4 for the iteration history
-  (redirect → revert → match-upstream) and the rationale.
+  bad recipients on-chain. Operators monitor for misaddressed inbound
+  off-chain. See SECURITY.md M4.
 
 See [SECURITY.md](./SECURITY.md) for the audit findings each of these
 behaviours traces back to.

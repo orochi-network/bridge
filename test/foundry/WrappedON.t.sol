@@ -342,17 +342,11 @@ contract WrappedONTest is TestHelperOz5 {
     }
 
     // -------------------------------------------------------------------------
-    // recipient handling: matches upstream OFT exactly (address(0) → 0xdead;
-    // no guard on address(this))
+    // recipient handling pinned to upstream OFT (address(0) → 0xdead; no
+    // guard on address(this) — operator obligation, see SECURITY.md M4)
     // -------------------------------------------------------------------------
 
-    /// @dev `_credit` performs the upstream `OFT._credit:83` redirect
-    ///      verbatim — `address(0)` is rewritten to `address(0xdead)` and
-    ///      the call then proceeds through the normal branches. Auto-unwrap
-    ///      reaches the `safeTransfer(0xdead, amt)` happy path, draining
-    ///      real reserve to `0xdead`. This is the upstream-matching
-    ///      behaviour; operators must monitor for inbound sends addressed
-    ///      to the zero address (see SECURITY.md M4).
+    /// @dev `address(0)` + auto-unwrap → real reserve drained to `0xdead`.
     function test_inbound_zeroRecipient_autoUnwrap_drainsReserveToDead() public {
         _seed(500 ether);
 
@@ -363,20 +357,15 @@ contract WrappedONTest is TestHelperOz5 {
         assertEq(wON.balanceOf(address(0xdead)), 0, "no wON minted (auto-unwrap path)");
     }
 
-    /// @dev With an empty reserve the fallback-mint branch fires and the
-    ///      redirected `_to = 0xdead` is the `_mint` recipient. Matches
-    ///      upstream OFT base behaviour exactly.
+    /// @dev `address(0)` + empty reserve → fallback-mint at `0xdead`.
     function test_inbound_zeroRecipient_emptyReserve_mintsToDead() public {
-        // reserve is empty by default; no _seed call
-
         wON.credit(address(0), 100 ether, BSC_EID);
 
         assertEq(wON.balanceOf(address(0xdead)), 100 ether, "wON minted to 0xdead");
         assertEq(wON.reserve(), 0, "reserve untouched (was empty)");
     }
 
-    /// @dev Composed branch always mints, and the `address(0) → 0xdead`
-    ///      redirect applies before the mint — wON ends up at `0xdead`.
+    /// @dev `address(0)` + composed → mint at `0xdead`.
     function test_inbound_zeroRecipient_composed_mintsToDead() public {
         _seed(500 ether);
 
@@ -386,13 +375,8 @@ contract WrappedONTest is TestHelperOz5 {
         assertEq(wON.reserve(), 500 ether, "reserve untouched (compose forces mint)");
     }
 
-    /// @dev `_credit` does NOT guard against `_to = address(this)` —
-    ///      matches upstream OFT behaviour. On the auto-unwrap branch
-    ///      `safeTransfer(this, amt)` is a self-transfer no-op, which the
-    ///      balance-delta guard catches and reverts with
-    ///      `UnexpectedTransferAmount`. The LZ message stays retryable-
-    ///      pending until the reserve drops below the amount and the
-    ///      fallback-mint branch fires.
+    /// @dev `address(this)` + auto-unwrap → balance-delta guard catches the
+    ///      self-transfer no-op and reverts with `UnexpectedTransferAmount`.
     function test_inbound_selfRecipient_autoUnwrap_revertsOnSelfTransferNoOp() public {
         _seed(500 ether);
 
@@ -405,14 +389,9 @@ contract WrappedONTest is TestHelperOz5 {
         assertEq(wON.balanceOf(address(wON)), 0, "no wON minted on revert");
     }
 
-    /// @dev With an empty reserve the fallback-mint branch fires and
-    ///      `_mint(address(this), amt)` succeeds — wON inflates its own
-    ///      balance. Silent contract bloat; matches upstream OFT base
-    ///      behaviour exactly. Operators must monitor for inbound sends
-    ///      addressed to the wON contract (see SECURITY.md M4).
+    /// @dev `address(this)` + empty reserve → fallback-mint inflates wON's
+    ///      own balance (silent contract bloat; matches upstream).
     function test_inbound_selfRecipient_emptyReserve_mintsToSelf() public {
-        // reserve is empty by default
-
         wON.credit(address(wON), 100 ether, BSC_EID);
 
         assertEq(wON.balanceOf(address(wON)), 100 ether, "wON minted into its own balance");
@@ -420,8 +399,7 @@ contract WrappedONTest is TestHelperOz5 {
         assertEq(wON.reserve(), 0, "reserve untouched");
     }
 
-    /// @dev Composed branch + self-recipient: mint happens at `address(this)`.
-    ///      Same silent contract bloat as the empty-reserve case.
+    /// @dev `address(this)` + composed → mint into wON's own balance.
     function test_inbound_selfRecipient_composed_mintsToSelf() public {
         _seed(500 ether);
 
@@ -431,7 +409,7 @@ contract WrappedONTest is TestHelperOz5 {
         assertEq(wON.reserve(), 500 ether, "reserve untouched (compose forces mint)");
     }
 
-    /// @dev Sanity check: composed + good recipient mints to the recipient.
+    /// @dev Happy path: composed + valid recipient → mint to recipient.
     function test_inbound_composed_goodRecipient_mints() public {
         _seed(500 ether);
         wON.creditComposed(bob, 100 ether, BSC_EID);

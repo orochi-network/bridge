@@ -227,22 +227,12 @@ contract ONOFTAdapterTest is TestHelperOz5 {
     }
 
     // -------------------------------------------------------------------------
-    // _credit matches upstream OFTAdapter exactly (no override)
+    // _credit pinned to upstream OFTAdapter behaviour (no override)
     // -------------------------------------------------------------------------
 
-    /// @dev `ONOFTAdapter` inherits `OFTAdapter._credit` verbatim:
-    ///      `innerToken.safeTransfer(_to, _amountLD)`. These tests pin the
-    ///      upstream behaviour so a future override is a conscious decision
-    ///      and any change to the upstream contract is caught by CI.
-    ///
-    ///      - `address(0)`: reverts via OZ ERC20 (`ERC20InvalidReceiver(0)`).
-    ///        LZ message stays retryable-pending.
-    ///      - `address(this)`: self-transfer no-op succeeds. LZ message is
-    ///        marked delivered but the recipient receives nothing; the
-    ///        locked ON sits in the adapter without an accounting entry on
-    ///        the destination chain. This is a SILENT LOSS — accepted as an
-    ///        operator obligation (monitor for sends addressed to the
-    ///        adapter). See SECURITY.md M4.
+    /// @dev `address(0)` recipient → OZ ERC20 reverts with
+    ///      `ERC20InvalidReceiver(0)`. Pinned to catch any future upstream
+    ///      change.
     function test_credit_zeroRecipient_revertsViaERC20() public {
         ERC20Mock token = new ERC20Mock("Token", "TOKEN");
         ONOFTAdapterMock testAdapter = ONOFTAdapterMock(
@@ -261,13 +251,8 @@ contract ONOFTAdapterTest is TestHelperOz5 {
         assertEq(token.balanceOf(address(testAdapter)), locked, "adapter balance unchanged on revert");
     }
 
-    /// @dev Upstream `_credit` does NOT guard against `_to = address(this)`.
-    ///      `innerToken.safeTransfer(this, amt)` is a self-transfer no-op:
-    ///      the call succeeds, no balance moves, the LZ message is marked
-    ///      delivered. Documented and pinned here as an operator obligation
-    ///      (operators must monitor for sends addressed to the adapter
-    ///      itself — there is no on-chain signal that the recipient got
-    ///      nothing). Matches upstream `OFTAdapter._credit:96-105` exactly.
+    /// @dev `address(this)` recipient → silent self-transfer no-op (matches
+    ///      upstream). Operator obligation; see SECURITY.md M4.
     function test_credit_selfRecipient_silentNoOp() public {
         ERC20Mock token = new ERC20Mock("Token", "TOKEN");
         ONOFTAdapterMock testAdapter = ONOFTAdapterMock(
@@ -289,8 +274,7 @@ contract ONOFTAdapterTest is TestHelperOz5 {
         );
     }
 
-    /// @dev Sanity check: a valid recipient receives the unlocked ON
-    ///      (upstream `safeTransfer` happy path).
+    /// @dev Happy path: valid recipient receives the unlocked ON.
     function test_credit_goodRecipient_unlocks() public {
         ERC20Mock token = new ERC20Mock("Token", "TOKEN");
         ONOFTAdapterMock testAdapter = ONOFTAdapterMock(

@@ -105,74 +105,22 @@ fix references the commit that lands it.
   DVN fee per message — which is not the case at the bridge's current
   message profile. Liveness is verified pre-deploy by `yarn check:dvn`.
 
-#### M4 — `_credit` recipient handling: matched to upstream, with operator obligations
-- **Original finding:** Asymmetric on both contracts. `WrappedON._credit`
-  only redirected `address(0)` to `0xdead`; a recipient of
-  `address(this)` was reachable as a free `seedReserve` paid by the BSC
-  sender, and the redirected zero-address case in the auto-unwrap branch
-  burned real reserve to `0xdead` permanently. `ONOFTAdapter._credit`
-  (inherited) guarded neither: `_to == address(0)` made the LZ message
-  permanently undeliverable (OZ ERC20 rejects zero-address
-  `safeTransfer`), and `_to == address(adapter)` was a self-transfer
-  no-op that silently burned the user's funds while the LZ message was
-  marked delivered.
-- **Iterations:** This finding cycled through three designs before
-  landing on the current one.
-  1. **Redirect (original M4 fix):** Both contracts redirected
-     `address(0)` and `address(this)` to `0xdead` and forced the mint
-     path on the wON side. Issue #15 (post-RateLimiter review) flagged
-     that for composed messages this minted wON at `0xdead` while
-     `OFTCore._lzReceive` dispatched `sendCompose` to the ORIGINAL bad
-     address (it captures `toAddress` BEFORE calling `_credit`),
-     leaving the compose call stuck pending forever.
-  2. **Explicit revert (`BadRecipient`):** Both contracts reverted on
-     bad recipients with a custom error. Uniform and loud, but
-     diverged further from upstream and required `_composedFlag`
-     plumbing on the BSC adapter that did not exist before.
-  3. **Match upstream exactly (current state):**
-     - `ONOFTAdapter`: `_credit` override **removed**. The contract
-       inherits `OFTAdapter._credit` verbatim. `address(0)` reverts via
-       OZ ERC20 (`ERC20InvalidReceiver(0)`); `address(this)` is a
-       silent self-transfer no-op.
-     - `WrappedON`: `_credit` retains its auto-unwrap logic but the
-       bad-recipient handling is reduced to the single upstream line
-       `if (_to == address(0)) _to = address(0xdead);` (matches
-       `OFT._credit:83` exactly — `_mint(...)` rejects the zero
-       address). No `address(this)` guard; the auto-unwrap branch's
-       balance-delta guard incidentally reverts on the self-transfer
-       no-op via `UnexpectedTransferAmount`, but the mint branches do
-       not (they happily inflate the wON contract's own balance).
-- **Resulting behaviour matrix.** Pinned by tests in `WrappedON.t.sol`
-  and `ONOFTAdapter.t.sol`:
-
-  | Branch | `_to = address(0)` | `_to = address(this)` |
-  |---|---|---|
-  | `ONOFTAdapter._credit` | reverts via OZ `ERC20InvalidReceiver(0)` | self-transfer no-op — **silent loss** |
-  | `WrappedON` auto-unwrap | redirected to `0xdead`, real reserve drained to `0xdead` (**permanent burn**) | reverts via `UnexpectedTransferAmount` (balance-delta guard) |
-  | `WrappedON` fallback mint | redirected to `0xdead`, wON minted at `0xdead` | wON minted into the wON contract's own balance (**silent bloat**) |
-  | `WrappedON` composed | redirected to `0xdead`, wON minted at `0xdead` | wON minted into the wON contract's own balance (**silent bloat**) |
-- **Operator obligations (replacing the earlier on-chain guard):**
-  - Monitor for inbound sends addressed to `address(0)`. Plain auto-
-    unwrap drains real reserve to `0xdead`; mint branches mint wON to
-    `0xdead`. Both are irreversible. Alert thresholds proportional to
-    expected daily flow.
-  - Monitor for inbound sends addressed to the adapter / wON contract
-    itself (`address(this)`). On BSC this is a silent fund loss; on
-    ETH it either reverts (auto-unwrap branch) or inflates the wON
-    contract's own balance with no on-chain signal of failure.
-  - Off-chain detection is the only signal — there is no on-chain
-    event that distinguishes a misaddressed send from a legitimate
-    delivery. The bridge does not attempt to recover.
-- **Why match upstream rather than guard:** Both the redirect and the
-  revert created divergences that bridge integrators had to reason
-  about and that obscured the upstream contract's behaviour. Matching
-  upstream exactly keeps the code surface minimal and pushes the
-  operational footgun into a documented monitoring obligation rather
-  than on-chain code that masks the failure mode (the redirect burnt
-  reserve at `0xdead` silently; the explicit revert created an
-  asymmetric error surface and complicated the composed-message path).
-  `WrappedON` still uses `_composedFlag` to force-mint composed
-  messages regardless of reserve — that is M1's concern, not M4's.
+#### M4 — `_credit` recipient handling
+- **Decision:** match upstream LayerZero `_credit` exactly. Neither
+  contract guards bad recipients on-chain.
+  - `ONOFTAdapter`: no `_credit` override; inherits
+    `OFTAdapter._credit` verbatim. `address(0)` reverts via OZ ERC20;
+    `address(this)` is a silent self-transfer no-op.
+  - `WrappedON._credit`: keeps the upstream `OFT._credit:83`
+    `address(0) -> 0xdead` redirect and adds no other recipient guard.
+    Auto-unwrap to `0xdead` drains real reserve; mint branches mint at
+    `0xdead`. `address(this)` follows upstream — mints inflate wON's
+    own balance, auto-unwrap reverts via the existing balance-delta
+    guard (`UnexpectedTransferAmount`).
+- **Operator obligation:** monitor off-chain for inbound sends
+  addressed to `address(0)` or to the bridge contracts themselves. No
+  on-chain event distinguishes a misaddressed send from a legitimate
+  delivery in the silent cases.
 
 #### M5 — No throttle on outbound flow per EID
 
@@ -451,15 +399,5 @@ model is in [CLAUDE.md "Rate limiting"](../CLAUDE.md#rate-limiting).
   cumulative flow looks anomalous.
 - Coordinate with the ON token issuer on both chains before any pause /
   upgrade / blacklist change.
-- Monitor for inbound sends addressed to `address(0)` on either side.
-  On ETH this either drains real reserve to `0xdead` (auto-unwrap
-  branch) or mints wON at `0xdead` (mint branches). On BSC it reverts
-  via OZ ERC20 (LZ message stuck retryable-pending). All three are
-  unrecoverable. See SECURITY.md M4 for the rationale on matching
-  upstream rather than guarding on-chain.
-- Monitor for inbound sends addressed to the bridge contracts themselves
-  (`address(adapter)` on BSC, `address(wON)` on ETH). On BSC this is a
-  silent self-transfer no-op — the user's funds stay locked in the
-  adapter with no on-chain signal that the recipient got nothing. On
-  ETH it either reverts (auto-unwrap branch) or silently inflates wON's
-  own balance (mint branches). Off-chain detection is the only signal.
+- Monitor for inbound sends addressed to `address(0)` or to the bridge
+  contracts themselves — see M4.
