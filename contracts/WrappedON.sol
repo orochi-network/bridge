@@ -16,14 +16,19 @@ import { RateLimiter } from "@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLi
  *         pre-existing non-mintable ON contract held in this contract's reserve.
  *
  * @dev Inbound (BSC -> ETH) credit semantics, evaluated in order:
- *      - Recipient is `address(0)` or `address(this)`: revert with `BadRecipient`.
- *        Both are unrecoverable misaddresses; the bridge does NOT silently
- *        re-route to `0xdead` because that approach would burn real reserve
- *        on the auto-unwrap branch, mint orphan wON on the mint branch, or
- *        strand a composed message at a non-functional recipient while the
- *        compose dispatch ran against the original bad address. Reverting
- *        leaves the LayerZero message in retryable-pending state with no
- *        wON minted and no reserve consumed.
+ *      - Recipient is `address(0)`: redirect to `0xdead` (matches upstream
+ *        OFT exactly; `_mint(...)` rejects the zero address). Then proceed
+ *        through the normal branches — including the auto-unwrap branch,
+ *        which would safeTransfer real reserve to `0xdead` (permanent burn).
+ *        Operator obligation: monitor for inbound bridges addressed to the
+ *        zero address. See SECURITY.md M4.
+ *      - Recipient is `address(this)` (the wON contract itself): NOT guarded
+ *        — matches upstream OFT exactly. The mint branches will mint wON
+ *        into the wON contract's own balance (silent contract bloat). The
+ *        auto-unwrap branch's balance-delta guard catches the self-transfer
+ *        no-op and reverts with `UnexpectedTransferAmount`. Operator
+ *        obligation: monitor for inbound bridges addressed to the wON
+ *        contract. See SECURITY.md M4.
  *      - Composed message (valid recipient): ALWAYS mint wON, regardless of
  *        reserve. Compose handlers receive `amountReceivedLD` and assume it
  *        refers to the OFT (wON); auto-unwrapping would deliver real ON
@@ -84,21 +89,6 @@ contract WrappedON is OFT, RateLimiter {
     error ReserveInsufficient(uint256 requested, uint256 available);
     error UnexpectedTransferAmount(uint256 expected, uint256 received);
     error InvalidRateLimitConfig(uint32 dstEid);
-    /// @notice Inbound message addressed to `address(0)` or `address(this)`.
-    ///         The bridge no longer attempts to recover such messages by
-    ///         redirecting to `0xdead`. The previous redirect created two
-    ///         hazards: (1) for composed messages the OFTCore caller
-    ///         dispatches `sendCompose` to the ORIGINAL `_to` regardless of
-    ///         the local redirect, stranding wON at `0xdead` while the
-    ///         compose call ended up stuck pending forever, and (2) for
-    ///         `address(this)` recipients on the auto-unwrap branch the
-    ///         redirect would have sent real reserve to `0xdead` — a
-    ///         permanent burn. Reverting keeps the LayerZero message in
-    ///         retryable-pending state with NO wON minted and NO reserve
-    ///         consumed; the BSC-side debit cannot be undone (the LZ
-    ///         payload is immutable, so a retry hits the same revert), but
-    ///         conservation accounting is not made worse.
-    error BadRecipient(address recipient);
 
     constructor(
         string memory _name,
@@ -234,26 +224,35 @@ contract WrappedON is OFT, RateLimiter {
 
     /// @dev Override of OFT's default `_credit` (which always mints). Branches,
     ///      evaluated in order:
-    ///      - Recipient is `address(0)` or `address(this)`: revert with
-    ///        `BadRecipient`. Both are unrecoverable misaddresses — there is
-    ///        no on-chain way to "fix" the recipient after the BSC-side
-    ///        debit, and any attempt to silently route them somewhere else
-    ///        (e.g. `0xdead`) either burns real reserve, mints orphan wON,
-    ///        or strands a composed message. Reverting keeps the LayerZero
-    ///        message in retryable-pending state with NO wON minted and NO
-    ///        reserve consumed; conservation accounting is not made worse.
+    ///      - Recipient is `address(0)`: redirect to `address(0xdead)` and
+    ///        proceed through the normal branches. Matches `OFT._credit` line
+    ///        83 exactly — `_mint(...)` rejects the zero address, so without
+    ///        the redirect the mint branches would revert and the auto-unwrap
+    ///        branch's `safeTransfer(0, amt)` would revert via OZ. The
+    ///        upstream redirect serves both purposes and we adopt it verbatim.
+    ///        Auto-unwrap to `0xdead` is a permanent burn of real reserve —
+    ///        operators must monitor for inbound sends addressed to
+    ///        `address(0)` (see SECURITY.md M4 for the trade-off rationale).
+    ///      - Recipient is `address(this)`: NOT guarded — matches upstream
+    ///        OFT behaviour. The mint branches will mint wON to the wON
+    ///        contract itself (silent contract bloat); the auto-unwrap
+    ///        branch's balance-delta guard catches the self-transfer no-op
+    ///        and reverts with `UnexpectedTransferAmount`. Again an operator
+    ///        obligation; see SECURITY.md M4.
     ///      - Composed message (`_composedFlag` set): always mint wON. The
     ///        compose handler downstream operates on `amountReceivedLD`
     ///        assuming it was credited as wON; auto-unwrapping would deliver
     ///        real ON instead.
     ///      - Plain message + reserve covers the request: transfer real ON, no
     ///        wON minted. Pre/post balance-delta-checks on both sides defend
-    ///        against fee-on-transfer or rebasing on the reserve token; on
+    ///        against fee-on-transfer or rebasing on the reserve token AND
+    ///        catch the `_to = address(this)` self-transfer no-op; on
     ///        mismatch the call reverts with `UnexpectedTransferAmount`. The
     ///        LayerZero message stays retryable, but a retry will hit the same
     ///        revert until the upstream cause (FoT activation, ON-token pause,
-    ///        recipient blacklist) clears or the reserve is drawn down below
-    ///        `_amountLD` so the fallback-mint branch fires. Emits `AutoUnwrap`.
+    ///        recipient blacklist, self-recipient) clears or the reserve is
+    ///        drawn down below `_amountLD` so the fallback-mint branch fires.
+    ///        Emits `AutoUnwrap`.
     ///      - Plain message + reserve insufficient: mint wON (recipient can later
     ///        `unwrap` once the reserve is refilled). Emits `UnwrapFallbackToMint`.
     ///      Single payout per message — never split.
@@ -262,7 +261,7 @@ contract WrappedON is OFT, RateLimiter {
         uint256 _amountLD,
         uint32 /*_srcEid*/
     ) internal virtual override returns (uint256 amountReceivedLD) {
-        if (_to == address(0x0) || _to == address(this)) revert BadRecipient(_to);
+        if (_to == address(0x0)) _to = address(0xdead); // matches OFT._credit:83 — _mint(...) rejects address(0)
 
         if (_composedFlag) {
             _mint(_to, _amountLD);

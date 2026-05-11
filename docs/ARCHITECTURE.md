@@ -14,7 +14,7 @@ flowchart LR
     subgraph BSC["BSC — canonical, locked"]
         direction TB
         ONBSC["ON token<br/>0x0e4F…1D48<br/><i>immutable, lossless</i>"]
-        ADAPTER["ONOFTAdapter<br/>OFT · owner = multisig<br/>· FoT balance-delta guard<br/>· 0/this → BadRecipient revert<br/>· RateLimiter (outbound)"]
+        ADAPTER["ONOFTAdapter<br/>OFT · owner = multisig<br/>· FoT balance-delta guard<br/>· _credit inherited from OFTAdapter<br/>· RateLimiter (outbound)"]
         EPBSC["Endpoint V2<br/>0x1a44…728c<br/>EID 30102"]
         ONBSC <-->|"transferFrom (lock)<br/>transfer (unlock)"| ADAPTER
         ADAPTER <-->|"send / lzReceive"| EPBSC
@@ -35,7 +35,7 @@ flowchart LR
     subgraph ETH["Ethereum — wrapped, mintable"]
         direction TB
         EPETH["Endpoint V2<br/>0x1a44…728c<br/>EID 30101"]
-        WON["WrappedON (wON)<br/>OFT · owner = multisig<br/>· auto-unwrap _credit<br/>· 0/this → BadRecipient revert<br/>· RateLimiter (outbound)"]
+        WON["WrappedON (wON)<br/>OFT · owner = multisig<br/>· auto-unwrap _credit<br/>· upstream 0 → 0xdead redirect<br/>· RateLimiter (outbound)"]
         ONETH["ON token (legacy)<br/>0x33f6…B59d"]
         RESERVE[("RESERVE<br/>real ON held<br/>inside WrappedON")]
         EPETH <-->|"send / lzReceive"| WON
@@ -94,14 +94,13 @@ sequenceDiagram
     Note over Exec: detects DVN quorum
     Exec->>EPETH: lzReceive(origin, guid, message)<br/>(300k gas, enforced)
     EPETH->>WON: _lzReceive → _credit(to, amt)
-    alt to ∈ {address(0), address(this)}
-        Note over WON: revert BadRecipient<br/>(LZ message stays retryable-pending;<br/>no wON minted, no reserve consumed)
-    else composed (transient flag set)
+    Note over WON: if to == address(0): to ← 0xdead<br/>(upstream OFT redirect; matches OFT._credit:83)
+    alt composed (transient flag set)
         Note over WON: preserve compose semantics
         WON->>WON: _mint(to, amt)
     else reserve ≥ amt
         WON->>ONETH: safeTransfer(to, amt)
-        Note over WON: no wON minted
+        Note over WON: no wON minted<br/>(self-transfer no-op reverts via balance-delta guard)
     else reserve < amt
         WON->>WON: _mint(to, amt)
         Note over WON: emit UnwrapFallbackToMint
@@ -110,8 +109,10 @@ sequenceDiagram
 
 The reverse direction (ETH → BSC) is the mirror: `WrappedON.send()` burns wON
 (rate-limited outbound), 15 ETH confirmations, then `ONOFTAdapter._credit`
-unlocks real ON to the recipient (subject to the same `BadRecipient` revert
-for `address(0)` / `address(this)`, no auto-unwrap branching).
+unlocks real ON to the recipient. `ONOFTAdapter` does NOT override `_credit`
+— inbound credit is `OFTAdapter._credit` verbatim (`innerToken.safeTransfer`).
+`address(0)` reverts via OZ ERC20; `address(this)` is a silent self-transfer
+no-op (operator obligation; see SECURITY.md M4).
 
 ---
 
@@ -119,20 +120,21 @@ for `address(0)` / `address(this)`, no auto-unwrap branching).
 
 ```mermaid
 flowchart TD
-    A["_credit(recipient, amt)"] --> B{"recipient is<br/>address(0) or this?"}
-    B -->|yes| BR["revert BadRecipient<br/><i>(LZ message retryable-pending;<br/>no wON minted, no reserve consumed)</i>"]
-    B -->|no| D{"_composedFlag set?<br/>(transient storage)"}
+    A["_credit(recipient, amt)"] --> Z{"recipient ==<br/>address(0)?"}
+    Z -->|yes| ZR["recipient ← 0xdead<br/><i>(OFT._credit:83 verbatim)</i>"]
+    Z -->|no| D
+    ZR --> D{"_composedFlag set?<br/>(transient storage)"}
     D -->|yes| F["_mint(recipient, amt)<br/><i>compose handler expects wON</i>"]
     D -->|no| G{"reserve ≥ amt?"}
-    G -->|yes| H["safeTransfer real ON<br/>emit AutoUnwrap<br/><b>no wON minted</b>"]
+    G -->|yes| H["safeTransfer real ON<br/>balance-delta guard<br/>emit AutoUnwrap<br/><b>no wON minted</b>"]
     G -->|no| I["_mint(recipient, amt)<br/>emit UnwrapFallbackToMint"]
 ```
 
-`ONOFTAdapter._credit` mirrors the bad-recipient handling: `BadRecipient`
-revert for `_to ∈ {address(0), address(this)}`, otherwise `safeTransfer` the
-locked ON to the recipient. No auto-unwrap branching, no `_composedFlag`
-plumbing — composed messages with a bad recipient fall under the same
-`BadRecipient` revert without needing a separate code path.
+`ONOFTAdapter._credit` is **not overridden** — inbound credit is
+`OFTAdapter._credit` verbatim (`innerToken.safeTransfer(_to, _amountLD)`).
+`address(0)` reverts via OZ ERC20; `address(this)` is a silent self-transfer
+no-op (operator obligation; see SECURITY.md M4 for the rationale on matching
+upstream rather than guarding on-chain).
 
 ---
 
@@ -153,14 +155,16 @@ plumbing — composed messages with a bad recipient fall under the same
   `reserve ≥ amt`, fall back to wON otherwise. Composed messages always mint
   wON to keep `amountReceivedLD` consistent with what the compose handler
   expects to manipulate.
-- **Bad-recipient hardening is symmetric.** Both adapters reject
-  `address(0)` and `address(this)` with `BadRecipient`; no silent redirect
-  to `0xdead`. The LZ message stays in retryable-pending state with no
-  wON minted and no reserve consumed (see SECURITY.md M4 for the
-  rationale — the redirect approach had a follow-on hazard with composed
-  messages, since `OFTCore` captures the recipient before `_credit` runs
-  and dispatches `sendCompose` to the original bad address regardless of
-  any local rewrite).
+- **Bad-recipient handling matches upstream.** Neither contract guards
+  bad recipients on-chain — both inherit the upstream LayerZero behaviour.
+  `WrappedON` applies upstream `OFT._credit:83`'s `address(0) → 0xdead`
+  redirect verbatim, then runs the normal branches (auto-unwrap drains
+  reserve to `0xdead`; mints land at `0xdead`). `ONOFTAdapter` has no
+  `_credit` override at all — `address(0)` reverts via OZ ERC20,
+  `address(this)` is a silent self-transfer no-op. Both `address(0)` and
+  `address(this)` are operator obligations: monitor for misaddressed
+  inbound sends off-chain. See SECURITY.md M4 for the iteration history
+  (redirect → revert → match-upstream) and the rationale.
 
 See [SECURITY.md](./SECURITY.md) for the audit findings each of these
 behaviours traces back to.

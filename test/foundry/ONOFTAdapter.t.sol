@@ -11,6 +11,7 @@ import { ONOFTAdapter } from "../../contracts/ONOFTAdapter.sol";
 
 // OZ imports
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import { IERC20Errors } from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
 // OApp imports
 import { IOAppOptionsType3, EnforcedOptionParam } from "@layerzerolabs/oapp-evm/contracts/oapp/libs/OAppOptionsType3.sol";
@@ -226,25 +227,23 @@ contract ONOFTAdapterTest is TestHelperOz5 {
     }
 
     // -------------------------------------------------------------------------
-    // _credit recipient hardening: address(0) and address(this) revert
+    // _credit matches upstream OFTAdapter exactly (no override)
     // -------------------------------------------------------------------------
 
-    /// @dev `ONOFTAdapter._credit` rejects bad recipient addresses with
-    ///      `BadRecipient` instead of silently rerouting to `0xdead`. The
-    ///      previous redirect approach had two hazards: (1) for composed
-    ///      messages, OFTCore's `_lzReceive` captures `toAddress` before
-    ///      `_credit` runs and dispatches `sendCompose` to the original
-    ///      value, so the redirect would have unlocked real ON to `0xdead`
-    ///      while the compose call stayed stuck pending; (2) the redirect
-    ///      was a behaviour divergence from upstream that added an
-    ///      operational footgun (locked ON visibly burned at `0xdead`
-    ///      rather than a loud failure operators could detect).
+    /// @dev `ONOFTAdapter` inherits `OFTAdapter._credit` verbatim:
+    ///      `innerToken.safeTransfer(_to, _amountLD)`. These tests pin the
+    ///      upstream behaviour so a future override is a conscious decision
+    ///      and any change to the upstream contract is caught by CI.
     ///
-    ///      The unguarded base behaviour both reverted (`address(0)`,
-    ///      `safeTransfer` to zero) AND silently lost funds
-    ///      (`address(this)`, self-transfer no-op while the LZ message was
-    ///      marked delivered). The explicit revert here is loud for both.
-    function test_credit_zeroRecipient_reverts() public {
+    ///      - `address(0)`: reverts via OZ ERC20 (`ERC20InvalidReceiver(0)`).
+    ///        LZ message stays retryable-pending.
+    ///      - `address(this)`: self-transfer no-op succeeds. LZ message is
+    ///        marked delivered but the recipient receives nothing; the
+    ///        locked ON sits in the adapter without an accounting entry on
+    ///        the destination chain. This is a SILENT LOSS — accepted as an
+    ///        operator obligation (monitor for sends addressed to the
+    ///        adapter). See SECURITY.md M4.
+    function test_credit_zeroRecipient_revertsViaERC20() public {
         ERC20Mock token = new ERC20Mock("Token", "TOKEN");
         ONOFTAdapterMock testAdapter = ONOFTAdapterMock(
             _deployOApp(
@@ -255,14 +254,21 @@ contract ONOFTAdapterTest is TestHelperOz5 {
         uint256 locked = 200 ether;
         token.mint(address(testAdapter), locked);
 
-        vm.expectRevert(abi.encodeWithSelector(ONOFTAdapter.BadRecipient.selector, address(0)));
+        // OZ ERC20 _transfer reverts with ERC20InvalidReceiver(0) when to == 0.
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InvalidReceiver.selector, address(0)));
         testAdapter.credit(address(0), 10 ether, bEid);
 
-        assertEq(token.balanceOf(address(testAdapter)), locked, "adapter balance unchanged");
-        assertEq(token.balanceOf(address(0xdead)), 0, "no token leaked to 0xdead");
+        assertEq(token.balanceOf(address(testAdapter)), locked, "adapter balance unchanged on revert");
     }
 
-    function test_credit_selfRecipient_reverts() public {
+    /// @dev Upstream `_credit` does NOT guard against `_to = address(this)`.
+    ///      `innerToken.safeTransfer(this, amt)` is a self-transfer no-op:
+    ///      the call succeeds, no balance moves, the LZ message is marked
+    ///      delivered. Documented and pinned here as an operator obligation
+    ///      (operators must monitor for sends addressed to the adapter
+    ///      itself — there is no on-chain signal that the recipient got
+    ///      nothing). Matches upstream `OFTAdapter._credit:96-105` exactly.
+    function test_credit_selfRecipient_silentNoOp() public {
         ERC20Mock token = new ERC20Mock("Token", "TOKEN");
         ONOFTAdapterMock testAdapter = ONOFTAdapterMock(
             _deployOApp(
@@ -273,14 +279,18 @@ contract ONOFTAdapterTest is TestHelperOz5 {
         uint256 locked = 200 ether;
         token.mint(address(testAdapter), locked);
 
-        vm.expectRevert(abi.encodeWithSelector(ONOFTAdapter.BadRecipient.selector, address(testAdapter)));
+        // No revert; the call succeeds and the adapter's balance is unchanged.
         testAdapter.credit(address(testAdapter), 10 ether, bEid);
 
-        assertEq(token.balanceOf(address(testAdapter)), locked, "adapter balance unchanged");
-        assertEq(token.balanceOf(address(0xdead)), 0, "no token leaked to 0xdead");
+        assertEq(
+            token.balanceOf(address(testAdapter)),
+            locked,
+            "self-transfer is a no-op; adapter balance unchanged"
+        );
     }
 
-    /// @dev Sanity check: a valid recipient is unaffected by the guard.
+    /// @dev Sanity check: a valid recipient receives the unlocked ON
+    ///      (upstream `safeTransfer` happy path).
     function test_credit_goodRecipient_unlocks() public {
         ERC20Mock token = new ERC20Mock("Token", "TOKEN");
         ONOFTAdapterMock testAdapter = ONOFTAdapterMock(

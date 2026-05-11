@@ -342,76 +342,102 @@ contract WrappedONTest is TestHelperOz5 {
     }
 
     // -------------------------------------------------------------------------
-    // recipient hardening: address(0) and address(this) revert with BadRecipient
+    // recipient handling: matches upstream OFT exactly (address(0) → 0xdead;
+    // no guard on address(this))
     // -------------------------------------------------------------------------
 
-    /// @dev `_credit` rejects `address(0)` and `address(this)` with
-    ///      `BadRecipient` rather than silently rerouting to `0xdead`. The
-    ///      previous redirect approach had two hazards: (1) on the auto-
-    ///      unwrap branch a self-recipient would have been a free
-    ///      `seedReserve` paid by the BSC sender or (after the redirect)
-    ///      a permanent burn of real reserve at `0xdead`; (2) for composed
-    ///      messages OFTCore dispatches `sendCompose` to the original
-    ///      (unredirected) `_to`, so the redirect would have minted wON to
-    ///      `0xdead` while the compose call stayed stuck pending forever.
-    ///      Reverting leaves the LZ message in retryable-pending state with
-    ///      no wON minted and no reserve consumed.
-    function test_inbound_zeroRecipient_reverts() public {
+    /// @dev `_credit` performs the upstream `OFT._credit:83` redirect
+    ///      verbatim — `address(0)` is rewritten to `address(0xdead)` and
+    ///      the call then proceeds through the normal branches. Auto-unwrap
+    ///      reaches the `safeTransfer(0xdead, amt)` happy path, draining
+    ///      real reserve to `0xdead`. This is the upstream-matching
+    ///      behaviour; operators must monitor for inbound sends addressed
+    ///      to the zero address (see SECURITY.md M4).
+    function test_inbound_zeroRecipient_autoUnwrap_drainsReserveToDead() public {
         _seed(500 ether);
 
-        vm.expectRevert(abi.encodeWithSelector(WrappedON.BadRecipient.selector, address(0)));
         wON.credit(address(0), 100 ether, BSC_EID);
 
-        assertEq(wON.reserve(), 500 ether, "reserve untouched");
-        assertEq(wON.balanceOf(address(0xdead)), 0, "no wON minted to 0xdead");
-        assertEq(wON.totalSupply(), 0, "no wON minted by the failed credit");
+        assertEq(wON.reserve(), 400 ether, "reserve drained to 0xdead");
+        assertEq(ethON.balanceOf(address(0xdead)), 100 ether, "real ON sent to 0xdead");
+        assertEq(wON.balanceOf(address(0xdead)), 0, "no wON minted (auto-unwrap path)");
     }
 
-    function test_inbound_selfRecipient_reverts() public {
-        _seed(500 ether);
+    /// @dev With an empty reserve the fallback-mint branch fires and the
+    ///      redirected `_to = 0xdead` is the `_mint` recipient. Matches
+    ///      upstream OFT base behaviour exactly.
+    function test_inbound_zeroRecipient_emptyReserve_mintsToDead() public {
+        // reserve is empty by default; no _seed call
 
-        vm.expectRevert(abi.encodeWithSelector(WrappedON.BadRecipient.selector, address(wON)));
-        wON.credit(address(wON), 100 ether, BSC_EID);
+        wON.credit(address(0), 100 ether, BSC_EID);
 
-        assertEq(wON.reserve(), 500 ether, "reserve untouched (no free seed)");
-        assertEq(wON.balanceOf(address(wON)), 0, "no wON minted to self");
-        assertEq(wON.totalSupply(), 0, "no wON minted by the failed credit");
+        assertEq(wON.balanceOf(address(0xdead)), 100 ether, "wON minted to 0xdead");
+        assertEq(wON.reserve(), 0, "reserve untouched (was empty)");
     }
 
-    /// @dev The guard applies equally to composed messages: a composed send
-    ///      with a bad recipient must NOT mint wON anywhere. `creditComposed`
-    ///      on the mock sets the same transient flag `_lzReceive` sets in
-    ///      production, then calls `_credit` directly — isolating the guard
-    ///      from the rest of LZ plumbing.
-    function test_credit_composedBadRecipient_zero_reverts() public {
+    /// @dev Composed branch always mints, and the `address(0) → 0xdead`
+    ///      redirect applies before the mint — wON ends up at `0xdead`.
+    function test_inbound_zeroRecipient_composed_mintsToDead() public {
         _seed(500 ether);
 
-        vm.expectRevert(abi.encodeWithSelector(WrappedON.BadRecipient.selector, address(0)));
         wON.creditComposed(address(0), 100 ether, BSC_EID);
 
-        assertEq(wON.totalSupply(), 0, "no wON minted by the failed credit");
-        assertEq(wON.reserve(), 500 ether, "reserve untouched");
+        assertEq(wON.balanceOf(address(0xdead)), 100 ether, "wON minted to 0xdead under composed branch");
+        assertEq(wON.reserve(), 500 ether, "reserve untouched (compose forces mint)");
     }
 
-    function test_credit_composedBadRecipient_self_reverts() public {
+    /// @dev `_credit` does NOT guard against `_to = address(this)` —
+    ///      matches upstream OFT behaviour. On the auto-unwrap branch
+    ///      `safeTransfer(this, amt)` is a self-transfer no-op, which the
+    ///      balance-delta guard catches and reverts with
+    ///      `UnexpectedTransferAmount`. The LZ message stays retryable-
+    ///      pending until the reserve drops below the amount and the
+    ///      fallback-mint branch fires.
+    function test_inbound_selfRecipient_autoUnwrap_revertsOnSelfTransferNoOp() public {
         _seed(500 ether);
 
-        vm.expectRevert(abi.encodeWithSelector(WrappedON.BadRecipient.selector, address(wON)));
-        wON.creditComposed(address(wON), 100 ether, BSC_EID);
+        vm.expectRevert(
+            abi.encodeWithSelector(WrappedON.UnexpectedTransferAmount.selector, uint256(100 ether), uint256(0))
+        );
+        wON.credit(address(wON), 100 ether, BSC_EID);
 
-        assertEq(wON.totalSupply(), 0, "no wON minted by the failed credit");
-        assertEq(wON.reserve(), 500 ether, "reserve untouched");
+        assertEq(wON.reserve(), 500 ether, "reserve untouched on revert");
+        assertEq(wON.balanceOf(address(wON)), 0, "no wON minted on revert");
     }
 
-    /// @dev Sanity check: composed + GOOD recipient keeps the existing
-    ///      "force mint" behaviour — the new revert only fires for the
-    ///      bad-recipient subcase, not for every composed message.
-    function test_credit_composedGoodRecipient_stillMints() public {
+    /// @dev With an empty reserve the fallback-mint branch fires and
+    ///      `_mint(address(this), amt)` succeeds — wON inflates its own
+    ///      balance. Silent contract bloat; matches upstream OFT base
+    ///      behaviour exactly. Operators must monitor for inbound sends
+    ///      addressed to the wON contract (see SECURITY.md M4).
+    function test_inbound_selfRecipient_emptyReserve_mintsToSelf() public {
+        // reserve is empty by default
+
+        wON.credit(address(wON), 100 ether, BSC_EID);
+
+        assertEq(wON.balanceOf(address(wON)), 100 ether, "wON minted into its own balance");
+        assertEq(wON.totalSupply(), 100 ether, "totalSupply reflects the orphaned mint");
+        assertEq(wON.reserve(), 0, "reserve untouched");
+    }
+
+    /// @dev Composed branch + self-recipient: mint happens at `address(this)`.
+    ///      Same silent contract bloat as the empty-reserve case.
+    function test_inbound_selfRecipient_composed_mintsToSelf() public {
+        _seed(500 ether);
+
+        wON.creditComposed(address(wON), 100 ether, BSC_EID);
+
+        assertEq(wON.balanceOf(address(wON)), 100 ether, "wON minted into its own balance");
+        assertEq(wON.reserve(), 500 ether, "reserve untouched (compose forces mint)");
+    }
+
+    /// @dev Sanity check: composed + good recipient mints to the recipient.
+    function test_inbound_composed_goodRecipient_mints() public {
         _seed(500 ether);
         wON.creditComposed(bob, 100 ether, BSC_EID);
 
         assertEq(wON.balanceOf(bob), 100 ether, "composed credit mints to good recipient");
-        assertEq(wON.reserve(), 500 ether, "reserve untouched (compose forced mint)");
+        assertEq(wON.reserve(), 500 ether, "reserve untouched (compose forces mint)");
     }
 
     // -------------------------------------------------------------------------

@@ -11,22 +11,31 @@ import { RateLimiter } from "@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLi
  * @title ONOFTAdapter
  * @notice BSC-side adapter that locks/unlocks the canonical ON token for the
  *         LayerZero V2 OFT mesh. Diverges from the upstream `OFTAdapter`
- *         template in three places:
+ *         template in two places:
  *
  *         1. `_debit` is overridden with a balance-delta check so the adapter
  *            cannot silently misreport `amountSentLD` to LayerZero if the
  *            inner ON token ever ships fee-on-transfer or rebasing semantics.
  *
- *         2. `_credit` is overridden to reject bad recipient addresses
- *            (`address(0)` and `address(this)`) with `BadRecipient`, matching
- *            the same hardening present in WrappedON on the Ethereum side.
- *
- *         3. The LayerZero `RateLimiter` extension is mixed in and `_debit`
+ *         2. The LayerZero `RateLimiter` extension is mixed in and `_debit`
  *            consults it on every outbound send. See `_outflowOrSkip` for the
  *            "unconfigured == fail-open" semantics that keep the contract
  *            usable before the multisig has dialled in production limits,
  *            and the WARNING there explaining why `(0, 0)` is fail-open
  *            rather than pause.
+ *
+ *         `_credit` is intentionally NOT overridden — inbound credit uses
+ *         the upstream `OFTAdapter._credit` behaviour verbatim
+ *         (`innerToken.safeTransfer(_to, _amountLD)`). The base behaviour:
+ *         - `_to = address(0)`: `safeTransfer` reverts (OZ ERC20 rejects
+ *           zero-address receivers). The LZ message stays retryable-pending.
+ *         - `_to = address(this)`: `safeTransfer` is a self-transfer no-op;
+ *           the LZ message is marked delivered but the recipient receives
+ *           nothing. **Silent fund loss** — the locked ON stays in the
+ *           adapter without an accounting entry on the destination chain.
+ *           This is an upstream limitation, NOT a bug introduced here, and
+ *           is accepted as an operator obligation (monitor for bridges
+ *           addressed to the adapter itself). See SECURITY.md M4.
  *
  * @dev    The default `OFTAdapter` implementation assumes lossless transfers
  *         on the inner token. ON on BSC is lossless today (verified by the
@@ -36,18 +45,6 @@ import { RateLimiter } from "@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLi
  *         while the adapter held less, breaking the bridge's conservation
  *         invariant. The override reverts the send instead of letting it
  *         under-collateralise the bridge.
- *
- * @dev    The base `OFTAdapter._credit` does not guard against bad
- *         recipients. Bridging ETH→BSC with `_to = address(0)` would revert
- *         inside `safeTransfer` (standard ERC20 rejects zero-address
- *         receivers), making the LayerZero message undeliverable. Bridging
- *         with `_to = address(this)` results in a self-transfer no-op,
- *         silently burning the recipient's funds while marking the message
- *         delivered. The override rejects both with an explicit
- *         `BadRecipient` revert so the failure is loud and visible (the
- *         self-recipient silent-loss case in particular would otherwise be
- *         indistinguishable from a successful delivery); the message stays
- *         in retryable-pending state with no ON unlocked.
  *
  * @dev    Rate limiting is applied to OUTBOUND sends only, per destination
  *         EID. Inbound (`_credit`) is intentionally NOT rate-limited: an
@@ -65,16 +62,6 @@ contract ONOFTAdapter is OFTAdapter, RateLimiter {
 
     error UnexpectedTransferAmount(uint256 expected, uint256 received);
     error InvalidRateLimitConfig(uint32 dstEid);
-    /// @notice Inbound message addressed to `address(0)` or `address(this)`.
-    ///         The bridge no longer attempts to recover such messages by
-    ///         redirecting to `0xdead`: a silent redirect would either
-    ///         deliver real ON to `0xdead` (permanent burn) or strand a
-    ///         composed message at a recipient that cannot execute it
-    ///         while OFTCore dispatches `sendCompose` to the original bad
-    ///         address. Reverting keeps the LayerZero message in retryable-
-    ///         pending state with no ON unlocked from the adapter;
-    ///         conservation accounting is not made worse.
-    error BadRecipient(address recipient);
 
     constructor(
         address _token,
@@ -129,37 +116,6 @@ contract ONOFTAdapter is OFTAdapter, RateLimiter {
         innerToken.safeTransferFrom(_from, address(this), amountSentLD);
         uint256 received = innerToken.balanceOf(address(this)) - balanceBefore;
         if (received != amountSentLD) revert UnexpectedTransferAmount(amountSentLD, received);
-    }
-
-    /// @dev Override of OFTAdapter's default `_credit`. The base implementation
-    ///      does not guard against bad recipient addresses:
-    ///      - `address(0)`: `safeTransfer` to the zero address reverts on
-    ///        standard ERC20s, making the inbound LayerZero message
-    ///        undeliverable.
-    ///      - `address(this)`: `safeTransfer` sends the unlocked ON back into
-    ///        the adapter's own balance; the inbound LayerZero message is
-    ///        marked delivered but the intended recipient receives nothing
-    ///        (silent fund loss).
-    ///
-    ///      We reject both with an explicit `BadRecipient` revert rather than
-    ///      silently rerouting to `0xdead`. The redirect approach had two
-    ///      hazards: (1) for composed messages, OFTCore's `_lzReceive`
-    ///      captures `toAddress` before invoking `_credit` and dispatches
-    ///      `sendCompose` to the ORIGINAL value, so a `_credit`-level
-    ///      redirect would unlock real ON to `0xdead` while the compose call
-    ///      ended up stuck pending forever; (2) the redirect divergence from
-    ///      upstream added behaviour that operators had to understand and
-    ///      monitor. Reverting makes the LayerZero message stay in
-    ///      retryable-pending state with no ON unlocked. The bad recipient
-    ///      is in the immutable LZ payload, so a retry will hit the same
-    ///      revert — operators must detect the stuck message off-chain.
-    function _credit(
-        address _to,
-        uint256 _amountLD,
-        uint32 _srcEid
-    ) internal virtual override returns (uint256 amountReceivedLD) {
-        if (_to == address(0) || _to == address(this)) revert BadRecipient(_to);
-        return super._credit(_to, _amountLD, _srcEid);
     }
 
     /// @dev RateLimiter._outflow rejects every send for any EID where both
