@@ -61,6 +61,14 @@ import { RateLimiter } from "@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLi
 contract ONOFTAdapter is OFTAdapter, RateLimiter {
     using SafeERC20 for IERC20;
 
+    /// @notice Minimum permitted `window` (seconds) when configuring a non-zero
+    ///         `limit`. Sub-block-time windows cause upstream `_amountCanBeSent`
+    ///         to refill the bucket every block, silently bypassing
+    ///         enforcement (see `setRateLimits` NatSpec). 60s covers BSC's
+    ///         ~3s blocks and Ethereum's ~12s blocks with ample margin while
+    ///         still permitting tight production windows.
+    uint64 internal constant MIN_RATE_LIMIT_WINDOW = 60;
+
     error UnexpectedTransferAmount(uint256 expected, uint256 received);
     error InvalidRateLimitConfig(uint32 dstEid);
 
@@ -88,10 +96,21 @@ contract ONOFTAdapter is OFTAdapter, RateLimiter {
     ///         indistinguishable, by design — this is NOT a pause; see
     ///         `_outflowOrSkip` and the README "Pausing an EID" for the
     ///         deny-all idiom that halts flow on an EID).
+    /// @dev    Also rejects `(limit > 0, 0 < window < MIN_RATE_LIMIT_WINDOW)`.
+    ///         The upstream NatSpec on `RateLimiter` warns that any window
+    ///         shorter than the destination chain's block time causes the
+    ///         decay term to dominate `limit * blockTime` every block, so
+    ///         enforcement effectively resets each block — the same failure
+    ///         mode as the `window = 0` silent-disable shape, just reached by
+    ///         a different fat-finger (e.g. `3600` typed as `1`, `0xE10` as
+    ///         `0x10`). The deny-all pause idiom (`limit=1`,
+    ///         `window=type(uint64).max`) is unaffected.
     function setRateLimits(RateLimitConfig[] calldata _rateLimitConfigs) external onlyOwner {
         for (uint256 i = 0; i < _rateLimitConfigs.length; i++) {
             RateLimitConfig calldata cfg = _rateLimitConfigs[i];
-            if (cfg.window == 0 && cfg.limit != 0) revert InvalidRateLimitConfig(cfg.dstEid);
+            if (cfg.limit != 0 && cfg.window < MIN_RATE_LIMIT_WINDOW) {
+                revert InvalidRateLimitConfig(cfg.dstEid);
+            }
         }
         _setRateLimits(_rateLimitConfigs);
     }

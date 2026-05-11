@@ -141,12 +141,18 @@ fix references the commit that lands it.
   delegates to upstream `_outflow` when the EID is configured and skips
   it for the all-zero `(limit=0, window=0)` sentinel — fail-open — so a
   freshly-deployed contract is usable before the multisig dials in
-  production limits. `setRateLimits` rejects the silent-disable shape
-  `(limit>0, window=0)` with `InvalidRateLimitConfig` to prevent a
-  fat-finger from silently disabling enforcement (upstream's div-by-zero
-  guard substitutes `window=1`, which would refill the bucket every
-  block). Owner-only setters (`setRateLimits` / `resetRateLimits`) are
-  exposed for the multisig.
+  production limits. `setRateLimits` rejects every `(limit>0, window<60)`
+  shape with `InvalidRateLimitConfig` to prevent a fat-finger from
+  silently disabling enforcement. This covers both the upstream
+  silent-disable `(limit>0, window=0)` case (where upstream's div-by-zero
+  guard substitutes `window=1` and refills the bucket every second) and
+  any sub-block-time window (e.g. `3600` typed as `1`, `0xE10` as `0x10`)
+  where the linear-decay term `limit * blockTime` dwarfs `limit` every
+  block. 60s covers BSC's ~3s blocks and ETH's ~12s blocks with margin
+  while still permitting tight production windows; the deny-all pause
+  idiom (`limit=1`, `window=type(uint64).max`) is unaffected. Owner-only
+  setters (`setRateLimits` / `resetRateLimits`) are exposed for the
+  multisig.
 - **Known limitation (acknowledged trade-off):** `(0, 0)` is the
   canonical "unconfigured / fail-open" sentinel and is
   indistinguishable from "operator wrote back to zero." Writing
@@ -310,8 +316,9 @@ write a deny-all config:
 const denyAll = [{
   dstEid: 30101,
   limit:  1n,                                  // smallest legal value: validator
-                                                // rejects (limit>0, window=0), so
-                                                // limit must be ≥1 alongside max window
+                                                // rejects (limit>0, window<60), so
+                                                // limit must be ≥1 alongside a window
+                                                // ≥ 60 — type(uint64).max satisfies both.
   window: 18_446_744_073_709_551_615n,         // type(uint64).max
 }]
 await adapter.connect(multisig).setRateLimits(denyAll)
@@ -337,11 +344,15 @@ To resume, the multisig has two paths:
    Use this after a confirmed incident response, when the pre-pause
    window's accounting is no longer trusted.
 
-The `setRateLimits` validator additionally rejects the silent-disable
-shape `(limit>0, window=0)` with `InvalidRateLimitConfig` (upstream
-`_amountCanBeSent` substitutes `window = 1` to avoid div-by-zero, which
-would refill the bucket every block while reporting a healthy
-"configured" state).
+The `setRateLimits` validator additionally rejects every
+`(limit>0, window<60)` shape with `InvalidRateLimitConfig`. This covers
+both the upstream silent-disable `(limit>0, window=0)` case (where
+`_amountCanBeSent` substitutes `window = 1` to avoid div-by-zero and the
+bucket refills every second) and any sub-block-time window (e.g. `3600`
+typed as `1`, `0xE10` as `0x10`) where the linear-decay term `limit *
+blockTime` dwarfs `limit` every block. The 60s floor covers BSC's ~3s
+blocks and ETH's ~12s blocks with margin; the all-zero `(0, 0)`
+sentinel and the deny-all pause idiom remain accepted.
 
 ### Verifying state
 

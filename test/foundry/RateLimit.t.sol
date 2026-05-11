@@ -312,7 +312,9 @@ contract RateLimitTest is TestHelperOz5 {
     ///      that makes the decay rate `limit` units per second, refilling
     ///      the bucket every block while the contract still reports as
     ///      "configured". `setRateLimits` rejects the shape so a fat-finger
-    ///      cannot silently disable enforcement.
+    ///      cannot silently disable enforcement. (After the
+    ///      MIN_RATE_LIMIT_WINDOW guard, `window = 0` is rejected as a
+    ///      strict subcase of `window < 60` — same selector, same EID.)
     function test_setRateLimits_rejectsWindowZeroWithNonZeroLimit_bsc() public {
         RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
         cfg[0] = RateLimiter.RateLimitConfig({ dstEid: ETH_EID, limit: 100 ether, window: 0 });
@@ -414,5 +416,81 @@ contract RateLimitTest is TestHelperOz5 {
         (uint256 inFlight, uint256 canSend) = adapter.getAmountCanBeSent(ETH_EID);
         assertApproxEqAbs(inFlight, 60 ether, 1, "in-flight preserved across reconfigure");
         assertApproxEqAbs(canSend, 20 ether, 1, "remaining headroom = newLimit - inFlight");
+    }
+
+    // -------------------------------------------------------------------------
+    // setRateLimits enforces a minimum window when `limit > 0`
+    // -------------------------------------------------------------------------
+
+    /// @dev Sub-block-time windows make the upstream linear-decay term
+    ///      `limit * blockTime` dwarf `limit` each block, so the bucket
+    ///      effectively refills every block while `getAmountCanBeSent`
+    ///      reports a healthy "configured" view — the same silent-disable
+    ///      failure the (`limit > 0`, `window = 0`) guard was added for,
+    ///      reached by a different fat-finger. The validator rejects any
+    ///      `window` below `MIN_RATE_LIMIT_WINDOW` (60s) when `limit > 0`.
+    function test_setRateLimits_rejectsSubMinWindow_window1_bsc() public {
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
+        cfg[0] = RateLimiter.RateLimitConfig({ dstEid: ETH_EID, limit: 100 ether, window: 1 });
+
+        vm.expectRevert(abi.encodeWithSelector(ONOFTAdapter.InvalidRateLimitConfig.selector, ETH_EID));
+        adapter.setRateLimits(cfg);
+    }
+
+    function test_setRateLimits_rejectsSubMinWindow_window30_bsc() public {
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
+        cfg[0] = RateLimiter.RateLimitConfig({ dstEid: ETH_EID, limit: 100 ether, window: 30 });
+
+        vm.expectRevert(abi.encodeWithSelector(ONOFTAdapter.InvalidRateLimitConfig.selector, ETH_EID));
+        adapter.setRateLimits(cfg);
+    }
+
+    function test_setRateLimits_rejectsSubMinWindow_window59_bsc() public {
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
+        cfg[0] = RateLimiter.RateLimitConfig({ dstEid: ETH_EID, limit: 100 ether, window: 59 });
+
+        vm.expectRevert(abi.encodeWithSelector(ONOFTAdapter.InvalidRateLimitConfig.selector, ETH_EID));
+        adapter.setRateLimits(cfg);
+    }
+
+    function test_setRateLimits_rejectsSubMinWindow_window1_eth() public {
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
+        cfg[0] = RateLimiter.RateLimitConfig({ dstEid: BSC_EID, limit: 100 ether, window: 1 });
+
+        vm.expectRevert(abi.encodeWithSelector(WrappedON.InvalidRateLimitConfig.selector, BSC_EID));
+        wON.setRateLimits(cfg);
+    }
+
+    function test_setRateLimits_rejectsSubMinWindow_window59_eth() public {
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
+        cfg[0] = RateLimiter.RateLimitConfig({ dstEid: BSC_EID, limit: 100 ether, window: 59 });
+
+        vm.expectRevert(abi.encodeWithSelector(WrappedON.InvalidRateLimitConfig.selector, BSC_EID));
+        wON.setRateLimits(cfg);
+    }
+
+    /// @dev The minimum is inclusive: exactly `MIN_RATE_LIMIT_WINDOW` (60s)
+    ///      must be accepted. Existing happy-path tests already use 60s, so
+    ///      this is an explicit boundary check.
+    function test_setRateLimits_acceptsExactlyMinWindow_bsc() public {
+        _setLimit(address(adapter), ETH_EID, 100 ether, 60);
+        (, uint256 canSend) = adapter.getAmountCanBeSent(ETH_EID);
+        assertEq(canSend, 100 ether, "60s window must be accepted and enforced");
+    }
+
+    function test_setRateLimits_acceptsExactlyMinWindow_eth() public {
+        _setLimit(address(wON), BSC_EID, 100 ether, 60);
+        (, uint256 canSend) = wON.getAmountCanBeSent(BSC_EID);
+        assertEq(canSend, 100 ether, "60s window must be accepted and enforced");
+    }
+
+    /// @dev Sub-min windows are only rejected when `limit > 0`. A zero-limit
+    ///      entry with any window — including 0 — is the unconfigured /
+    ///      fail-open sentinel and must remain accepted regardless of the
+    ///      window field.
+    function test_setRateLimits_acceptsZeroLimitWithSubMinWindow() public {
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
+        cfg[0] = RateLimiter.RateLimitConfig({ dstEid: ETH_EID, limit: 0, window: 1 });
+        adapter.setRateLimits(cfg); // must not revert
     }
 }

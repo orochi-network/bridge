@@ -292,7 +292,7 @@ cast call <WON_ADDR>     "owner()(address)" --rpc-url $RPC_URL_ETH   # → $OWNE
 
 ## Step 13 — Configure rate limits (multisig)
 
-Both contracts ship with no rate limits set, which is treated as "fail-open" (unconfigured) so the bridge is usable from block one. **Configure production limits before opening the bridge to users** — see [Rate limiting](#rate-limiting) below for sizing guidance, the multisig calldata, and the deny-all idiom for halting an EID. Note: `setRateLimits([(eid, 0, 0)])` returns an EID to fail-open; it is **not** a pause. The validator additionally rejects the silent-disable shape `(limit>0, window=0)` with `InvalidRateLimitConfig`.
+Both contracts ship with no rate limits set, which is treated as "fail-open" (unconfigured) so the bridge is usable from block one. **Configure production limits before opening the bridge to users** — see [Rate limiting](#rate-limiting) below for sizing guidance, the multisig calldata, and the deny-all idiom for halting an EID. Note: `setRateLimits([(eid, 0, 0)])` returns an EID to fail-open; it is **not** a pause. The validator rejects any `(limit>0, window<60)` shape with `InvalidRateLimitConfig` — this covers both the upstream silent-disable `(limit>0, window=0)` case and any sub-block-time window that would refill the bucket every block.
 
 🎉 The bridge is live.
 
@@ -355,7 +355,7 @@ Both contracts inherit the LayerZero [`RateLimiter`](https://docs.layerzero.netw
 
 A freshly-deployed contract has **no rate limits set** for any EID. Both contracts treat the all-zero `(limit=0, window=0)` storage default as "unconfigured" and do not enforce a cap, so the bridge is usable from block one. The multisig is expected to dial in production limits via `setRateLimits` immediately after the post-deploy handoff.
 
-> ⚠️ **`(0, 0)` is fail-open, not pause.** `_outflowOrSkip` cannot distinguish "never configured" (zero-init storage) from "explicitly written back to zero by the multisig", so `setRateLimits([(eid, 0, 0)])` returns the EID to the unenforced state — it does **not** pause it. The `setRateLimits` validator only blocks the silent-disable shape `(limit>0, window=0)`; the all-zero shape is allowed and means "fail-open." If you need to halt outbound flow on an EID, see "Pausing an EID" below — do not use `(0, 0)`.
+> ⚠️ **`(0, 0)` is fail-open, not pause.** `_outflowOrSkip` cannot distinguish "never configured" (zero-init storage) from "explicitly written back to zero by the multisig", so `setRateLimits([(eid, 0, 0)])` returns the EID to the unenforced state — it does **not** pause it. The `setRateLimits` validator blocks every `(limit>0, window<60)` shape — both the upstream silent-disable `(limit>0, window=0)` and any sub-block-time window where upstream's linear decay would refill the bucket every block. The all-zero shape is allowed and means "fail-open." If you need to halt outbound flow on an EID, see "Pausing an EID" below — do not use `(0, 0)`.
 
 ### Operator workflow
 
@@ -384,7 +384,7 @@ The contracts expose no dedicated pause function for an EID — by design, since
 
 ```ts
 // "deny-all" — 1 wei per ~584 billion years.
-// limit=1 keeps the validator (limit>0 -> window must be >0) happy AND the
+// limit=1 keeps the validator (limit>0 -> window must be >=60) happy AND the
 // per-second decay so small that the bucket never refills meaningfully:
 //   decay/sec = 1 / type(uint64).max ≈ 0
 // Any non-zero `send` reverts with `RateLimitExceeded()`.
@@ -404,7 +404,7 @@ A send that would push `amountInFlight + amount > limit` reverts with `RateLimit
 
 ### Sizing guidance
 
-- **Window ≥ chain block time × N.** On BSC (~3s) a 60-second window is the practical floor; on Ethereum (~12s) use ≥ 60s as well.
+- **Window ≥ 60 seconds.** Enforced on-chain: `setRateLimits` rejects any `(limit>0, window<60)` shape. 60s covers BSC's ~3s blocks and ETH's ~12s blocks with comfortable margin; below that, the upstream linear-decay term `limit * blockTime` would dwarf `limit` each block and the bucket would refill every block (see RateLimiter NatSpec).
 - **Decay rate is `limit / window` (integer division).** Pick a `limit` (in token wei, e.g. `100_000n * 10n ** 18n`) large enough that `limit / window ≥ 1` — otherwise the bucket never refills. For ON's 18-decimal scale this is automatic for any non-trivial cap.
 - **Set both sides.** BSC and ETH contracts have independent buckets — limiting only one side leaves the other free to drain in the opposite direction.
 
