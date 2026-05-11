@@ -14,7 +14,7 @@ flowchart LR
     subgraph BSC["BSC — canonical, locked"]
         direction TB
         ONBSC["ON token<br/>0x0e4F…1D48<br/><i>immutable, lossless</i>"]
-        ADAPTER["ONOFTAdapter<br/>OFT · owner = multisig<br/>· FoT balance-delta guard<br/>· 0/this → 0xdead redirect<br/>· RateLimiter (outbound)"]
+        ADAPTER["ONOFTAdapter<br/>OFT · owner = multisig<br/>· FoT balance-delta guard<br/>· 0/this → BadRecipient revert<br/>· RateLimiter (outbound)"]
         EPBSC["Endpoint V2<br/>0x1a44…728c<br/>EID 30102"]
         ONBSC <-->|"transferFrom (lock)<br/>transfer (unlock)"| ADAPTER
         ADAPTER <-->|"send / lzReceive"| EPBSC
@@ -35,7 +35,7 @@ flowchart LR
     subgraph ETH["Ethereum — wrapped, mintable"]
         direction TB
         EPETH["Endpoint V2<br/>0x1a44…728c<br/>EID 30101"]
-        WON["WrappedON (wON)<br/>OFT · owner = multisig<br/>· auto-unwrap _credit<br/>· 0/this → 0xdead redirect<br/>· RateLimiter (outbound)"]
+        WON["WrappedON (wON)<br/>OFT · owner = multisig<br/>· auto-unwrap _credit<br/>· 0/this → BadRecipient revert<br/>· RateLimiter (outbound)"]
         ONETH["ON token (legacy)<br/>0x33f6…B59d"]
         RESERVE[("RESERVE<br/>real ON held<br/>inside WrappedON")]
         EPETH <-->|"send / lzReceive"| WON
@@ -94,11 +94,8 @@ sequenceDiagram
     Note over Exec: detects DVN quorum
     Exec->>EPETH: lzReceive(origin, guid, message)<br/>(300k gas, enforced)
     EPETH->>WON: _lzReceive → _credit(to, amt)
-    alt to ∈ {address(0), address(this)} AND composed
-        Note over WON: revert BadRecipientWithCompose<br/>(LZ message stays retryable;<br/>no orphan wON minted)
-    else to ∈ {address(0), address(this)}
-        Note over WON: redirect → 0xdead, force mint
-        WON->>WON: _mint(0xdead, amt)<br/>emit UnwrapFallbackToMint
+    alt to ∈ {address(0), address(this)}
+        Note over WON: revert BadRecipient<br/>(LZ message stays retryable-pending;<br/>no wON minted, no reserve consumed)
     else composed (transient flag set)
         Note over WON: preserve compose semantics
         WON->>WON: _mint(to, amt)
@@ -113,9 +110,8 @@ sequenceDiagram
 
 The reverse direction (ETH → BSC) is the mirror: `WrappedON.send()` burns wON
 (rate-limited outbound), 15 ETH confirmations, then `ONOFTAdapter._credit`
-unlocks real ON to the recipient (subject to the same `0/this → 0xdead`
-redirect for plain messages, the same `BadRecipientWithCompose` revert for
-composed messages, no auto-unwrap branching).
+unlocks real ON to the recipient (subject to the same `BadRecipient` revert
+for `address(0)` / `address(this)`, no auto-unwrap branching).
 
 ---
 
@@ -124,19 +120,19 @@ composed messages, no auto-unwrap branching).
 ```mermaid
 flowchart TD
     A["_credit(recipient, amt)"] --> B{"recipient is<br/>address(0) or this?"}
-    B -->|yes| BC{"_composedFlag set?"}
+    B -->|yes| BR["revert BadRecipient<br/><i>(LZ message retryable-pending;<br/>no wON minted, no reserve consumed)</i>"]
     B -->|no| D{"_composedFlag set?<br/>(transient storage)"}
-    BC -->|yes| BR["revert<br/>BadRecipientWithCompose<br/><i>(LZ message retryable;<br/>no orphan wON)</i>"]
-    BC -->|no| C["redirect → 0xdead<br/>_mint(0xdead, amt)<br/>emit UnwrapFallbackToMint"]
     D -->|yes| F["_mint(recipient, amt)<br/><i>compose handler expects wON</i>"]
     D -->|no| G{"reserve ≥ amt?"}
     G -->|yes| H["safeTransfer real ON<br/>emit AutoUnwrap<br/><b>no wON minted</b>"]
     G -->|no| I["_mint(recipient, amt)<br/>emit UnwrapFallbackToMint"]
 ```
 
-`ONOFTAdapter._credit` mirrors the bad-recipient handling: `BadRecipientWithCompose`
-revert for composed messages with `_to ∈ {address(0), address(this)}`, otherwise
-redirect to `0xdead` and `safeTransfer` the locked ON. No auto-unwrap branching.
+`ONOFTAdapter._credit` mirrors the bad-recipient handling: `BadRecipient`
+revert for `_to ∈ {address(0), address(this)}`, otherwise `safeTransfer` the
+locked ON to the recipient. No auto-unwrap branching, no `_composedFlag`
+plumbing — composed messages with a bad recipient fall under the same
+`BadRecipient` revert without needing a separate code path.
 
 ---
 
@@ -157,10 +153,14 @@ redirect to `0xdead` and `safeTransfer` the locked ON. No auto-unwrap branching.
   `reserve ≥ amt`, fall back to wON otherwise. Composed messages always mint
   wON to keep `amountReceivedLD` consistent with what the compose handler
   expects to manipulate.
-- **Bad-recipient hardening is symmetric.** Both adapters redirect
-  `address(0)` and `address(this)` to `0xdead`; on `WrappedON` the redirect
-  also forces the mint branch so the reserve is never paid out to a dead
-  recipient.
+- **Bad-recipient hardening is symmetric.** Both adapters reject
+  `address(0)` and `address(this)` with `BadRecipient`; no silent redirect
+  to `0xdead`. The LZ message stays in retryable-pending state with no
+  wON minted and no reserve consumed (see SECURITY.md M4 for the
+  rationale — the redirect approach had a follow-on hazard with composed
+  messages, since `OFTCore` captures the recipient before `_credit` runs
+  and dispatches `sendCompose` to the original bad address regardless of
+  any local rewrite).
 
 See [SECURITY.md](./SECURITY.md) for the audit findings each of these
 behaviours traces back to.

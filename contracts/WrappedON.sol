@@ -16,17 +16,14 @@ import { RateLimiter } from "@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLi
  *         pre-existing non-mintable ON contract held in this contract's reserve.
  *
  * @dev Inbound (BSC -> ETH) credit semantics, evaluated in order:
- *      - Recipient is `address(0)` or `address(this)` AND the message is composed:
- *        revert with `BadRecipientWithCompose`. OFTCore's `_lzReceive` captures
- *        `toAddress` BEFORE calling `_credit` and dispatches `sendCompose` to the
- *        original (unredirected) value, so silently rerouting credit to `0xdead`
- *        would mint wON to a dead address while the compose ends up stuck pending
- *        against a recipient that cannot execute it. Reverting keeps the LZ
- *        message in retryable-pending state with no orphan wON minted.
- *      - Recipient is `address(0)` or `address(this)`, plain message: redirect to
- *        `0xdead` and force the mint path. Sending the real reserve to either
- *        is a permanent burn or a free `seedReserve` paid by the BSC sender;
- *        minting wON instead keeps the stranded amount visible in `totalSupply`.
+ *      - Recipient is `address(0)` or `address(this)`: revert with `BadRecipient`.
+ *        Both are unrecoverable misaddresses; the bridge does NOT silently
+ *        re-route to `0xdead` because that approach would burn real reserve
+ *        on the auto-unwrap branch, mint orphan wON on the mint branch, or
+ *        strand a composed message at a non-functional recipient while the
+ *        compose dispatch ran against the original bad address. Reverting
+ *        leaves the LayerZero message in retryable-pending state with no
+ *        wON minted and no reserve consumed.
  *      - Composed message (valid recipient): ALWAYS mint wON, regardless of
  *        reserve. Compose handlers receive `amountReceivedLD` and assume it
  *        refers to the OFT (wON); auto-unwrapping would deliver real ON
@@ -87,16 +84,21 @@ contract WrappedON is OFT, RateLimiter {
     error ReserveInsufficient(uint256 requested, uint256 available);
     error UnexpectedTransferAmount(uint256 expected, uint256 received);
     error InvalidRateLimitConfig(uint32 dstEid);
-    /// @notice Inbound composed message addressed to `address(0)` or
-    ///         `address(this)`. The OFTCore caller dispatches `sendCompose`
-    ///         to the original `_to` regardless of our local redirect, so
-    ///         silently rerouting credit to `0xdead` would orphan wON at a
-    ///         dead address while the compose call ends up stuck pending
-    ///         against a recipient that cannot execute it. We revert
-    ///         instead — the message stays in retryable-pending state and
-    ///         no wON is minted; the BSC-side debit cannot be undone but
-    ///         conservation accounting is at least not made worse.
-    error BadRecipientWithCompose(address recipient);
+    /// @notice Inbound message addressed to `address(0)` or `address(this)`.
+    ///         The bridge no longer attempts to recover such messages by
+    ///         redirecting to `0xdead`. The previous redirect created two
+    ///         hazards: (1) for composed messages the OFTCore caller
+    ///         dispatches `sendCompose` to the ORIGINAL `_to` regardless of
+    ///         the local redirect, stranding wON at `0xdead` while the
+    ///         compose call ended up stuck pending forever, and (2) for
+    ///         `address(this)` recipients on the auto-unwrap branch the
+    ///         redirect would have sent real reserve to `0xdead` — a
+    ///         permanent burn. Reverting keeps the LayerZero message in
+    ///         retryable-pending state with NO wON minted and NO reserve
+    ///         consumed; the BSC-side debit cannot be undone (the LZ
+    ///         payload is immutable, so a retry hits the same revert), but
+    ///         conservation accounting is not made worse.
+    error BadRecipient(address recipient);
 
     constructor(
         string memory _name,
@@ -232,25 +234,18 @@ contract WrappedON is OFT, RateLimiter {
 
     /// @dev Override of OFT's default `_credit` (which always mints). Branches,
     ///      evaluated in order:
-    ///      - Recipient is `address(0)` or `address(this)` AND the message is
-    ///        composed: revert with `BadRecipientWithCompose`. The OFTCore
-    ///        caller dispatches `endpoint.sendCompose` to the ORIGINAL `_to`
-    ///        regardless of any local redirect (it captured `toAddress` before
-    ///        invoking `_credit`), so silently rerouting credit to `0xdead`
-    ///        would mint wON to a dead recipient while the compose call ends
-    ///        up stuck pending against the bad address. We revert to keep the
-    ///        LZ message in retryable-pending state with no orphan wON
-    ///        minted; conservation accounting is not made worse.
-    ///      - Recipient is `address(0)` or `address(this)`, plain message:
-    ///        redirect to `0xdead` and mint wON there. Sending real reserve
-    ///        to either would be a permanent burn (`0xdead`) or a free
-    ///        `seedReserve` paid by the BSC sender (`address(this)`); minting
-    ///        wON instead keeps the stranded amount visible in `totalSupply`
-    ///        and avoids leaking reserve. Emits `UnwrapFallbackToMint`.
-    ///      - Composed message (`_composedFlag` set, valid recipient): always
-    ///        mint wON. The compose handler downstream operates on
-    ///        `amountReceivedLD` assuming it was credited as wON; auto-
-    ///        unwrapping would deliver real ON instead.
+    ///      - Recipient is `address(0)` or `address(this)`: revert with
+    ///        `BadRecipient`. Both are unrecoverable misaddresses — there is
+    ///        no on-chain way to "fix" the recipient after the BSC-side
+    ///        debit, and any attempt to silently route them somewhere else
+    ///        (e.g. `0xdead`) either burns real reserve, mints orphan wON,
+    ///        or strands a composed message. Reverting keeps the LayerZero
+    ///        message in retryable-pending state with NO wON minted and NO
+    ///        reserve consumed; conservation accounting is not made worse.
+    ///      - Composed message (`_composedFlag` set): always mint wON. The
+    ///        compose handler downstream operates on `amountReceivedLD`
+    ///        assuming it was credited as wON; auto-unwrapping would deliver
+    ///        real ON instead.
     ///      - Plain message + reserve covers the request: transfer real ON, no
     ///        wON minted. Pre/post balance-delta-checks on both sides defend
     ///        against fee-on-transfer or rebasing on the reserve token; on
@@ -267,19 +262,10 @@ contract WrappedON is OFT, RateLimiter {
         uint256 _amountLD,
         uint32 /*_srcEid*/
     ) internal virtual override returns (uint256 amountReceivedLD) {
-        bool rerouted = false;
-        if (_to == address(0x0) || _to == address(this)) {
-            if (_composedFlag) revert BadRecipientWithCompose(_to);
-            _to = address(0xdead);
-            rerouted = true;
-        }
+        if (_to == address(0x0) || _to == address(this)) revert BadRecipient(_to);
 
-        // Reaching this branch with rerouted=true implies _composedFlag=false
-        // (the composed+bad-recipient case reverted above); the emit guard is
-        // unconditional now.
-        if (_composedFlag || rerouted) {
+        if (_composedFlag) {
             _mint(_to, _amountLD);
-            if (rerouted) emit UnwrapFallbackToMint(_to, _amountLD);
             return _amountLD;
         }
 

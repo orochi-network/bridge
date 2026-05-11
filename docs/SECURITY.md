@@ -117,21 +117,28 @@ fix references the commit that lands it.
   silently burned the user's funds while the LZ message was marked
   delivered (wON burned on ETH, ON still locked on BSC — conservation
   break).
-- **Fix (this branch):** for plain messages both contracts redirect
-  `address(0)` and `address(this)` to `address(0xdead)`. On
-  `WrappedON._credit` the redirected path forces the mint branch so real
-  reserve is never sent to a dead recipient. On `ONOFTAdapter._credit`
-  the inner ON is transferred to `0xdead`, which is visible on-chain as
-  a burn rather than a stuck or silently-lost message. For COMPOSED
-  messages the same recipient check reverts with `BadRecipientWithCompose`
-  instead — `OFTCore._lzReceive` captures `toAddress` before invoking
-  `_credit` and dispatches `endpoint.sendCompose(toAddress, ...)` to the
-  ORIGINAL value, so the bare redirect would mint wON to `0xdead` (or
-  forward ON to `0xdead` on BSC) while the compose call ended up stuck
-  pending forever against the unredirected bad address. Reverting keeps
-  the LZ message in retryable-pending state, with no orphan wON minted
-  and no real ON unlocked. Both contracts use the same transient-flag
-  pattern as `M1` to communicate the compose state into `_credit`.
+- **Fix (this branch):** both contracts reject `address(0)` and
+  `address(this)` with an explicit `BadRecipient` revert. The LZ message
+  stays in retryable-pending state with NO wON minted on ETH and NO ON
+  unlocked from the BSC adapter; the bad recipient is in the immutable
+  LZ payload, so a retry hits the same revert and operators must detect
+  the stuck message off-chain.
+- **Why a revert rather than a redirect to `0xdead`:** a redirect at
+  `_credit` level was the original M4 fix, but it created two follow-on
+  hazards. First, `OFTCore._lzReceive` captures `toAddress` BEFORE
+  calling `_credit` and dispatches `endpoint.sendCompose(toAddress, ...)`
+  to the ORIGINAL value, so a redirect would have minted wON at `0xdead`
+  (or unlocked ON at `0xdead` on BSC) while the compose call ended up
+  stuck pending forever against the unredirected bad address — see
+  issue #15. Second, the redirect was a behaviour divergence from
+  upstream that compounded operational complexity (locked ON visibly
+  burned at `0xdead` looked like normal protocol activity rather than a
+  loud, monitorable failure). Reverting unifies the two cases — failure
+  is loud, conservation accounting is not made worse than the upstream
+  default — and removes the need for the `_composedFlag` plumbing on
+  the BSC side. (`WrappedON` still uses `_composedFlag` to force-mint
+  composed messages regardless of reserve — that is M1's concern, not
+  M4's.)
 
 #### M5 — No throttle on outbound flow per EID
 

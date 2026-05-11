@@ -226,67 +226,25 @@ contract ONOFTAdapterTest is TestHelperOz5 {
     }
 
     // -------------------------------------------------------------------------
-    // _credit recipient hardening: address(0) and address(this) reroute to 0xdead
+    // _credit recipient hardening: address(0) and address(this) revert
     // -------------------------------------------------------------------------
 
-    /// @dev Confirms that `ONOFTAdapter._credit` redirects `address(0)` and
-    ///      `address(this)` to `address(0xdead)`.
+    /// @dev `ONOFTAdapter._credit` rejects bad recipient addresses with
+    ///      `BadRecipient` instead of silently rerouting to `0xdead`. The
+    ///      previous redirect approach had two hazards: (1) for composed
+    ///      messages, OFTCore's `_lzReceive` captures `toAddress` before
+    ///      `_credit` runs and dispatches `sendCompose` to the original
+    ///      value, so the redirect would have unlocked real ON to `0xdead`
+    ///      while the compose call stayed stuck pending; (2) the redirect
+    ///      was a behaviour divergence from upstream that added an
+    ///      operational footgun (locked ON visibly burned at `0xdead`
+    ///      rather than a loud failure operators could detect).
     ///
-    ///      - `address(0)` would cause `safeTransfer` to revert on a standard
-    ///        ERC20 (OpenZeppelin rejects zero-address receivers), making the
-    ///        inbound LayerZero message permanently undeliverable.
-    ///      - `address(this)` is a self-transfer no-op on standard ERC20; the
-    ///        message is marked delivered but the recipient receives nothing
-    ///        (silent fund loss).
-    ///
-    ///      Both are redirected to 0xdead so the message always delivers.
-    function test_credit_redirectsBadRecipientToDeadAddress() public {
-        ERC20Mock token = new ERC20Mock("Token", "TOKEN");
-        ONOFTAdapterMock fotAdapter = ONOFTAdapterMock(
-            _deployOApp(
-                type(ONOFTAdapterMock).creationCode,
-                abi.encode(address(token), address(endpoints[aEid]), address(this))
-            )
-        );
-
-        // Seed the adapter with locked tokens (simulating prior BSC-side inflows).
-        uint256 locked = 200 ether;
-        token.mint(address(fotAdapter), locked);
-
-        uint256 amount = 10 ether;
-
-        // Case 1: address(0) recipient → redirected to 0xdead.
-        fotAdapter.credit(address(0), amount, bEid);
-        assertEq(token.balanceOf(address(0xdead)), amount, "address(0) must redirect to 0xdead");
-        assertEq(token.balanceOf(address(fotAdapter)), locked - amount, "adapter balance reduced");
-
-        // Case 2: address(this) (the adapter itself) → redirected to 0xdead.
-        fotAdapter.credit(address(fotAdapter), amount, bEid);
-        assertEq(
-            token.balanceOf(address(0xdead)),
-            2 * amount,
-            "address(this) must redirect to 0xdead"
-        );
-        assertEq(token.balanceOf(address(fotAdapter)), locked - 2 * amount, "adapter balance reduced again");
-    }
-
-    // -------------------------------------------------------------------------
-    // _credit + composed + bad recipient: revert symmetrically with WrappedON
-    // -------------------------------------------------------------------------
-
-    /// @dev OFTCore's `_lzReceive` captures `toAddress` before calling
-    ///      `_credit`, so the bare redirect-to-0xdead in `_credit` would still
-    ///      let the caller dispatch `sendCompose` to the original bad address
-    ///      — leaving the adapter's locked ON unlocked at 0xdead with a
-    ///      compose stuck pending forever. `_credit` reverts when both the
-    ///      bad-recipient redirect AND the composed flag fire, keeping the LZ
-    ///      message in retryable-pending state. Mirrors the symmetric guard
-    ///      in `WrappedON._credit`.
-    ///
-    ///      `creditComposed` on the mock sets the same transient flag that
-    ///      `_lzReceive` sets in production, then calls `_credit` directly,
-    ///      isolating the guard from the rest of LZ plumbing.
-    function test_credit_composedBadRecipient_zero_reverts() public {
+    ///      The unguarded base behaviour both reverted (`address(0)`,
+    ///      `safeTransfer` to zero) AND silently lost funds
+    ///      (`address(this)`, self-transfer no-op while the LZ message was
+    ///      marked delivered). The explicit revert here is loud for both.
+    function test_credit_zeroRecipient_reverts() public {
         ERC20Mock token = new ERC20Mock("Token", "TOKEN");
         ONOFTAdapterMock testAdapter = ONOFTAdapterMock(
             _deployOApp(
@@ -297,15 +255,14 @@ contract ONOFTAdapterTest is TestHelperOz5 {
         uint256 locked = 200 ether;
         token.mint(address(testAdapter), locked);
 
-        vm.expectRevert(abi.encodeWithSelector(ONOFTAdapter.BadRecipientWithCompose.selector, address(0)));
-        testAdapter.creditComposed(address(0), 10 ether, bEid);
+        vm.expectRevert(abi.encodeWithSelector(ONOFTAdapter.BadRecipient.selector, address(0)));
+        testAdapter.credit(address(0), 10 ether, bEid);
 
-        // No tokens unlocked from the adapter on the failed credit.
         assertEq(token.balanceOf(address(testAdapter)), locked, "adapter balance unchanged");
-        assertEq(token.balanceOf(address(0xdead)), 0, "nothing forwarded to 0xdead");
+        assertEq(token.balanceOf(address(0xdead)), 0, "no token leaked to 0xdead");
     }
 
-    function test_credit_composedBadRecipient_self_reverts() public {
+    function test_credit_selfRecipient_reverts() public {
         ERC20Mock token = new ERC20Mock("Token", "TOKEN");
         ONOFTAdapterMock testAdapter = ONOFTAdapterMock(
             _deployOApp(
@@ -316,18 +273,15 @@ contract ONOFTAdapterTest is TestHelperOz5 {
         uint256 locked = 200 ether;
         token.mint(address(testAdapter), locked);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(ONOFTAdapter.BadRecipientWithCompose.selector, address(testAdapter))
-        );
-        testAdapter.creditComposed(address(testAdapter), 10 ether, bEid);
+        vm.expectRevert(abi.encodeWithSelector(ONOFTAdapter.BadRecipient.selector, address(testAdapter)));
+        testAdapter.credit(address(testAdapter), 10 ether, bEid);
 
         assertEq(token.balanceOf(address(testAdapter)), locked, "adapter balance unchanged");
-        assertEq(token.balanceOf(address(0xdead)), 0, "nothing forwarded to 0xdead");
+        assertEq(token.balanceOf(address(0xdead)), 0, "no token leaked to 0xdead");
     }
 
-    /// @dev Sanity check: composed + GOOD recipient is unchanged by the guard
-    ///      — the base credit path still runs and unlocks the real token.
-    function test_credit_composedGoodRecipient_stillUnlocks() public {
+    /// @dev Sanity check: a valid recipient is unaffected by the guard.
+    function test_credit_goodRecipient_unlocks() public {
         ERC20Mock token = new ERC20Mock("Token", "TOKEN");
         ONOFTAdapterMock testAdapter = ONOFTAdapterMock(
             _deployOApp(
@@ -339,7 +293,7 @@ contract ONOFTAdapterTest is TestHelperOz5 {
         token.mint(address(testAdapter), locked);
 
         address bob = address(0xB0B);
-        testAdapter.creditComposed(bob, 10 ether, bEid);
+        testAdapter.credit(bob, 10 ether, bEid);
 
         assertEq(token.balanceOf(bob), 10 ether, "good recipient receives unlock");
         assertEq(token.balanceOf(address(testAdapter)), locked - 10 ether, "adapter balance reduced");
