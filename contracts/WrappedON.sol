@@ -57,10 +57,20 @@ contract WrappedON is OFT, RateLimiter {
     /// @notice Minimum permitted `window` (seconds) when configuring a non-zero
     ///         `limit`. Sub-block-time windows cause upstream `_amountCanBeSent`
     ///         to refill the bucket every block, silently bypassing
-    ///         enforcement (see `setRateLimits` NatSpec). 60s covers BSC's
-    ///         ~3s blocks and Ethereum's ~12s blocks with ample margin while
-    ///         still permitting tight production windows.
-    uint64 internal constant MIN_RATE_LIMIT_WINDOW = 60;
+    ///         enforcement (see `setRateLimits` NatSpec).
+    /// @dev    Single uniform value across both bridge sides, chosen against the
+    ///         slower of the two chains. `ONOFTAdapter` is deployed on BSC
+    ///         (~3s blocks → 20x margin); `WrappedON` is deployed on Ethereum
+    ///         (~12s blocks → 5x margin). Per-side constants were considered
+    ///         (see PR #13 discussion thread) and rejected because the 5x
+    ///         floor on the slower side is still ample for the bridge's
+    ///         expected production windows (typically >= 3600s), and a single
+    ///         constant keeps the operator surface simpler — the floor is a
+    ///         safety rail, not a recommended window.
+    ///         `public` visibility exposes the getter to off-chain tooling
+    ///         and to test boundary assertions that should never hard-code
+    ///         the literal.
+    uint64 public constant MIN_RATE_LIMIT_WINDOW = 60;
 
     /// @notice Pre-existing, non-mintable ON ERC20 used as the reserve asset.
     IERC20 public immutable ON;
