@@ -382,6 +382,61 @@ contract WrappedONTest is TestHelperOz5 {
     }
 
     // -------------------------------------------------------------------------
+    // composed message + bad recipient: revert, do not silently strand wON
+    // -------------------------------------------------------------------------
+
+    /// @dev If a composed message arrives addressed to `address(0)`, the bare
+    ///      redirect-to-0xdead would still let OFTCore's `_lzReceive` dispatch
+    ///      `sendCompose` to the original (zero) address, where the executor's
+    ///      eventual `lzCompose` call would revert against an account with no
+    ///      code. That leaves wON minted at `0xdead` with the compose stuck
+    ///      pending forever. `_credit` reverts instead, keeping the LZ message
+    ///      in retryable-pending state and not minting any orphan wON.
+    ///
+    ///      `creditComposed` on the mock sets the same transient flag that
+    ///      `_lzReceive` sets in production, then calls `_credit` directly —
+    ///      isolating the guard from the rest of LZ plumbing (the test helper
+    ///      would otherwise capture the revert at the endpoint and store it as
+    ///      a failed-message alert, masking the assertion).
+    function test_credit_composedBadRecipient_zero_reverts() public {
+        _seed(500 ether);
+
+        vm.expectRevert(abi.encodeWithSelector(WrappedON.BadRecipientWithCompose.selector, address(0)));
+        wON.creditComposed(address(0), 100 ether, BSC_EID);
+
+        // No wON minted anywhere, reserve untouched.
+        assertEq(wON.balanceOf(address(0xdead)), 0, "no orphan wON minted to 0xdead");
+        assertEq(wON.totalSupply(), 0, "no wON minted by the failed credit");
+        assertEq(wON.reserve(), 500 ether, "reserve untouched");
+    }
+
+    /// @dev Same as above but `_to = address(this)` — the bare redirect would
+    ///      attempt to mint at 0xdead while the compose targeted wON itself,
+    ///      which does not implement `IOAppComposer.lzCompose`.
+    function test_credit_composedBadRecipient_self_reverts() public {
+        _seed(500 ether);
+
+        vm.expectRevert(abi.encodeWithSelector(WrappedON.BadRecipientWithCompose.selector, address(wON)));
+        wON.creditComposed(address(wON), 100 ether, BSC_EID);
+
+        assertEq(wON.balanceOf(address(0xdead)), 0, "no orphan wON minted to 0xdead");
+        assertEq(wON.balanceOf(address(wON)), 0, "no wON minted to self");
+        assertEq(wON.reserve(), 500 ether, "reserve untouched");
+    }
+
+    /// @dev Sanity check: composed + GOOD recipient keeps the existing
+    ///      "force mint" behaviour. Establishes that the new revert only
+    ///      fires for the bad-recipient subcase, not for every composed
+    ///      message.
+    function test_credit_composedGoodRecipient_stillMints() public {
+        _seed(500 ether);
+        wON.creditComposed(bob, 100 ether, BSC_EID);
+
+        assertEq(wON.balanceOf(bob), 100 ether, "composed credit mints to good recipient");
+        assertEq(wON.reserve(), 500 ether, "reserve untouched (compose forced mint)");
+    }
+
+    // -------------------------------------------------------------------------
     // ETH-side auto-unwrap fee-on-transfer detection
     // -------------------------------------------------------------------------
 

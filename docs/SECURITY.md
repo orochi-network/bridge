@@ -117,12 +117,21 @@ fix references the commit that lands it.
   silently burned the user's funds while the LZ message was marked
   delivered (wON burned on ETH, ON still locked on BSC — conservation
   break).
-- **Fix (this branch):** both contracts now redirect `address(0)` and
-  `address(this)` to `address(0xdead)`. On `WrappedON._credit` the
-  redirected path forces the mint branch so real reserve is never sent to
-  a dead recipient. On `ONOFTAdapter._credit` the inner ON is transferred
-  to `0xdead`, which is visible on-chain as a burn rather than a stuck or
-  silently-lost message.
+- **Fix (this branch):** for plain messages both contracts redirect
+  `address(0)` and `address(this)` to `address(0xdead)`. On
+  `WrappedON._credit` the redirected path forces the mint branch so real
+  reserve is never sent to a dead recipient. On `ONOFTAdapter._credit`
+  the inner ON is transferred to `0xdead`, which is visible on-chain as
+  a burn rather than a stuck or silently-lost message. For COMPOSED
+  messages the same recipient check reverts with `BadRecipientWithCompose`
+  instead — `OFTCore._lzReceive` captures `toAddress` before invoking
+  `_credit` and dispatches `endpoint.sendCompose(toAddress, ...)` to the
+  ORIGINAL value, so the bare redirect would mint wON to `0xdead` (or
+  forward ON to `0xdead` on BSC) while the compose call ended up stuck
+  pending forever against the unredirected bad address. Reverting keeps
+  the LZ message in retryable-pending state, with no orphan wON minted
+  and no real ON unlocked. Both contracts use the same transient-flag
+  pattern as `M1` to communicate the compose state into `_credit`.
 
 #### M5 — No throttle on outbound flow per EID
 

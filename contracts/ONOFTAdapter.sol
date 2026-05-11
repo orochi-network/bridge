@@ -5,6 +5,8 @@ import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { OFTAdapter } from "@layerzerolabs/oft-evm/contracts/OFTAdapter.sol";
+import { OFTMsgCodec } from "@layerzerolabs/oft-evm/contracts/libs/OFTMsgCodec.sol";
+import { Origin } from "@layerzerolabs/lz-evm-protocol-v2/contracts/interfaces/ILayerZeroEndpointV2.sol";
 import { RateLimiter } from "@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLimiter.sol";
 
 /**
@@ -60,9 +62,28 @@ import { RateLimiter } from "@layerzerolabs/oapp-evm/contracts/oapp/utils/RateLi
  */
 contract ONOFTAdapter is OFTAdapter, RateLimiter {
     using SafeERC20 for IERC20;
+    using OFTMsgCodec for bytes;
+
+    /// @dev Set in `_lzReceive` so that `_credit` (called by `super._lzReceive`)
+    ///      can reject the combined bad-recipient + composed case. EIP-1153
+    ///      transient storage: auto-cleared at end-of-transaction, no manual
+    ///      reset needed. Not exposed externally; `internal` visibility is for
+    ///      test mocks to drive the composed path without rebuilding LayerZero
+    ///      packet plumbing. Mirrors the same pattern in `WrappedON`.
+    bool internal transient _composedFlag;
 
     error UnexpectedTransferAmount(uint256 expected, uint256 received);
     error InvalidRateLimitConfig(uint32 dstEid);
+    /// @notice Inbound composed message addressed to `address(0)` or
+    ///         `address(this)`. The OFTCore caller dispatches `sendCompose`
+    ///         to the original `_to` regardless of our local redirect, so
+    ///         silently rerouting to `0xdead` would unlock real ON to a
+    ///         dead address while the compose call ends up stuck pending
+    ///         against a recipient that cannot execute it. We revert
+    ///         instead — the message stays in retryable-pending state with
+    ///         no ON unlocked from the adapter; conservation accounting
+    ///         is not made worse.
+    error BadRecipientWithCompose(address recipient);
 
     constructor(
         address _token,
@@ -119,6 +140,22 @@ contract ONOFTAdapter is OFTAdapter, RateLimiter {
         if (received != amountSentLD) revert UnexpectedTransferAmount(amountSentLD, received);
     }
 
+    /// @dev Override of OFTCore._lzReceive. Sets a per-message transient flag
+    ///      the `_credit` override consults to reject the combined bad-
+    ///      recipient + composed case. Mirrors the pattern in WrappedON;
+    ///      transient storage auto-clears at end-of-transaction, so no
+    ///      manual reset is needed.
+    function _lzReceive(
+        Origin calldata _origin,
+        bytes32 _guid,
+        bytes calldata _message,
+        address _executor,
+        bytes calldata _extraData
+    ) internal virtual override {
+        _composedFlag = _message.isComposed();
+        super._lzReceive(_origin, _guid, _message, _executor, _extraData);
+    }
+
     /// @dev Override of OFTAdapter's default `_credit`. The base implementation
     ///      does not guard against bad recipient addresses:
     ///      - `address(0)`: `safeTransfer` to the zero address reverts on
@@ -128,15 +165,26 @@ contract ONOFTAdapter is OFTAdapter, RateLimiter {
     ///        marked delivered but the intended recipient receives nothing
     ///        (silent fund loss).
     ///
-    ///      Both are redirected to `address(0xdead)` so the message always
-    ///      delivers. The locked ON is effectively burned, which is visible
-    ///      on-chain and preferable to a stuck or silently-lost message.
+    ///      For plain messages both are redirected to `address(0xdead)` so the
+    ///      message always delivers. The locked ON is effectively burned,
+    ///      which is visible on-chain and preferable to a stuck or
+    ///      silently-lost message.
+    ///
+    ///      For composed messages the redirect would still let `_credit`
+    ///      succeed at `0xdead` while `OFTCore._lzReceive` dispatched
+    ///      `sendCompose` to the ORIGINAL bad address (it captured
+    ///      `toAddress` before invoking `_credit`), leaving the compose call
+    ///      permanently stuck. We revert with `BadRecipientWithCompose`
+    ///      instead — the message stays in retryable-pending state and no
+    ///      ON is unlocked from the adapter, mirroring the symmetric guard
+    ///      in `WrappedON._credit`.
     function _credit(
         address _to,
         uint256 _amountLD,
         uint32 _srcEid
     ) internal virtual override returns (uint256 amountReceivedLD) {
         if (_to == address(0) || _to == address(this)) {
+            if (_composedFlag) revert BadRecipientWithCompose(_to);
             _to = address(0xdead);
         }
         return super._credit(_to, _amountLD, _srcEid);

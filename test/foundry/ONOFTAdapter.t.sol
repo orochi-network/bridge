@@ -269,6 +269,81 @@ contract ONOFTAdapterTest is TestHelperOz5 {
         );
         assertEq(token.balanceOf(address(fotAdapter)), locked - 2 * amount, "adapter balance reduced again");
     }
+
+    // -------------------------------------------------------------------------
+    // _credit + composed + bad recipient: revert symmetrically with WrappedON
+    // -------------------------------------------------------------------------
+
+    /// @dev OFTCore's `_lzReceive` captures `toAddress` before calling
+    ///      `_credit`, so the bare redirect-to-0xdead in `_credit` would still
+    ///      let the caller dispatch `sendCompose` to the original bad address
+    ///      — leaving the adapter's locked ON unlocked at 0xdead with a
+    ///      compose stuck pending forever. `_credit` reverts when both the
+    ///      bad-recipient redirect AND the composed flag fire, keeping the LZ
+    ///      message in retryable-pending state. Mirrors the symmetric guard
+    ///      in `WrappedON._credit`.
+    ///
+    ///      `creditComposed` on the mock sets the same transient flag that
+    ///      `_lzReceive` sets in production, then calls `_credit` directly,
+    ///      isolating the guard from the rest of LZ plumbing.
+    function test_credit_composedBadRecipient_zero_reverts() public {
+        ERC20Mock token = new ERC20Mock("Token", "TOKEN");
+        ONOFTAdapterMock testAdapter = ONOFTAdapterMock(
+            _deployOApp(
+                type(ONOFTAdapterMock).creationCode,
+                abi.encode(address(token), address(endpoints[aEid]), address(this))
+            )
+        );
+        uint256 locked = 200 ether;
+        token.mint(address(testAdapter), locked);
+
+        vm.expectRevert(abi.encodeWithSelector(ONOFTAdapter.BadRecipientWithCompose.selector, address(0)));
+        testAdapter.creditComposed(address(0), 10 ether, bEid);
+
+        // No tokens unlocked from the adapter on the failed credit.
+        assertEq(token.balanceOf(address(testAdapter)), locked, "adapter balance unchanged");
+        assertEq(token.balanceOf(address(0xdead)), 0, "nothing forwarded to 0xdead");
+    }
+
+    function test_credit_composedBadRecipient_self_reverts() public {
+        ERC20Mock token = new ERC20Mock("Token", "TOKEN");
+        ONOFTAdapterMock testAdapter = ONOFTAdapterMock(
+            _deployOApp(
+                type(ONOFTAdapterMock).creationCode,
+                abi.encode(address(token), address(endpoints[aEid]), address(this))
+            )
+        );
+        uint256 locked = 200 ether;
+        token.mint(address(testAdapter), locked);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(ONOFTAdapter.BadRecipientWithCompose.selector, address(testAdapter))
+        );
+        testAdapter.creditComposed(address(testAdapter), 10 ether, bEid);
+
+        assertEq(token.balanceOf(address(testAdapter)), locked, "adapter balance unchanged");
+        assertEq(token.balanceOf(address(0xdead)), 0, "nothing forwarded to 0xdead");
+    }
+
+    /// @dev Sanity check: composed + GOOD recipient is unchanged by the guard
+    ///      — the base credit path still runs and unlocks the real token.
+    function test_credit_composedGoodRecipient_stillUnlocks() public {
+        ERC20Mock token = new ERC20Mock("Token", "TOKEN");
+        ONOFTAdapterMock testAdapter = ONOFTAdapterMock(
+            _deployOApp(
+                type(ONOFTAdapterMock).creationCode,
+                abi.encode(address(token), address(endpoints[aEid]), address(this))
+            )
+        );
+        uint256 locked = 200 ether;
+        token.mint(address(testAdapter), locked);
+
+        address bob = address(0xB0B);
+        testAdapter.creditComposed(bob, 10 ether, bEid);
+
+        assertEq(token.balanceOf(bob), 10 ether, "good recipient receives unlock");
+        assertEq(token.balanceOf(address(testAdapter)), locked - 10 ether, "adapter balance reduced");
+    }
 }
 
 /// @dev 18-decimal ERC20 that burns 1% on every user-to-user transfer,

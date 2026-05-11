@@ -94,9 +94,11 @@ sequenceDiagram
     Note over Exec: detects DVN quorum
     Exec->>EPETH: lzReceive(origin, guid, message)<br/>(300k gas, enforced)
     EPETH->>WON: _lzReceive → _credit(to, amt)
-    alt to ∈ {address(0), address(this)}
+    alt to ∈ {address(0), address(this)} AND composed
+        Note over WON: revert BadRecipientWithCompose<br/>(LZ message stays retryable;<br/>no orphan wON minted)
+    else to ∈ {address(0), address(this)}
         Note over WON: redirect → 0xdead, force mint
-        WON->>WON: _mint(0xdead, amt)
+        WON->>WON: _mint(0xdead, amt)<br/>emit UnwrapFallbackToMint
     else composed (transient flag set)
         Note over WON: preserve compose semantics
         WON->>WON: _mint(to, amt)
@@ -112,7 +114,8 @@ sequenceDiagram
 The reverse direction (ETH → BSC) is the mirror: `WrappedON.send()` burns wON
 (rate-limited outbound), 15 ETH confirmations, then `ONOFTAdapter._credit`
 unlocks real ON to the recipient (subject to the same `0/this → 0xdead`
-redirect, no auto-unwrap branching).
+redirect for plain messages, the same `BadRecipientWithCompose` revert for
+composed messages, no auto-unwrap branching).
 
 ---
 
@@ -121,19 +124,19 @@ redirect, no auto-unwrap branching).
 ```mermaid
 flowchart TD
     A["_credit(recipient, amt)"] --> B{"recipient is<br/>address(0) or this?"}
-    B -->|yes| C["redirect → 0xdead<br/>(rerouted = true)"]
+    B -->|yes| BC{"_composedFlag set?"}
     B -->|no| D{"_composedFlag set?<br/>(transient storage)"}
-    C --> CC{"_composedFlag set?"}
-    CC -->|yes| CY["_mint(0xdead, amt)<br/><i>no event</i>"]
-    CC -->|no| CN["_mint(0xdead, amt)<br/>emit UnwrapFallbackToMint"]
+    BC -->|yes| BR["revert<br/>BadRecipientWithCompose<br/><i>(LZ message retryable;<br/>no orphan wON)</i>"]
+    BC -->|no| C["redirect → 0xdead<br/>_mint(0xdead, amt)<br/>emit UnwrapFallbackToMint"]
     D -->|yes| F["_mint(recipient, amt)<br/><i>compose handler expects wON</i>"]
     D -->|no| G{"reserve ≥ amt?"}
     G -->|yes| H["safeTransfer real ON<br/>emit AutoUnwrap<br/><b>no wON minted</b>"]
     G -->|no| I["_mint(recipient, amt)<br/>emit UnwrapFallbackToMint"]
 ```
 
-`ONOFTAdapter._credit` is simpler: only the `0/this → 0xdead` redirect, then
-`safeTransfer` of the locked ON to the recipient.
+`ONOFTAdapter._credit` mirrors the bad-recipient handling: `BadRecipientWithCompose`
+revert for composed messages with `_to ∈ {address(0), address(this)}`, otherwise
+redirect to `0xdead` and `safeTransfer` the locked ON. No auto-unwrap branching.
 
 ---
 
