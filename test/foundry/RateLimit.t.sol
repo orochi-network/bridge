@@ -312,7 +312,9 @@ contract RateLimitTest is TestHelperOz5 {
     ///      that makes the decay rate `limit` units per second, refilling
     ///      the bucket every block while the contract still reports as
     ///      "configured". `setRateLimits` rejects the shape so a fat-finger
-    ///      cannot silently disable enforcement.
+    ///      cannot silently disable enforcement. (After the
+    ///      MIN_RATE_LIMIT_WINDOW guard, `window = 0` is rejected as a
+    ///      strict subcase of `window < 60` — same selector, same EID.)
     function test_setRateLimits_rejectsWindowZeroWithNonZeroLimit_bsc() public {
         RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
         cfg[0] = RateLimiter.RateLimitConfig({ dstEid: ETH_EID, limit: 100 ether, window: 0 });
@@ -414,5 +416,93 @@ contract RateLimitTest is TestHelperOz5 {
         (uint256 inFlight, uint256 canSend) = adapter.getAmountCanBeSent(ETH_EID);
         assertApproxEqAbs(inFlight, 60 ether, 1, "in-flight preserved across reconfigure");
         assertApproxEqAbs(canSend, 20 ether, 1, "remaining headroom = newLimit - inFlight");
+    }
+
+    // -------------------------------------------------------------------------
+    // setRateLimits enforces a minimum window when `limit > 0`
+    // -------------------------------------------------------------------------
+
+    /// @dev Sub-block-time windows make the upstream linear-decay term
+    ///      `limit * blockTime` dwarf `limit` each block, so the bucket
+    ///      effectively refills every block while `getAmountCanBeSent`
+    ///      reports a healthy "configured" view — the same silent-disable
+    ///      failure the (`limit > 0`, `window = 0`) guard was added for,
+    ///      reached by a different fat-finger. The validator rejects any
+    ///      `window` strictly below the contract's `MIN_RATE_LIMIT_WINDOW`
+    ///      getter when `limit > 0`.
+    ///
+    ///      Boundary tests read the floor from the getter rather than
+    ///      hard-coding the literal — if the constant is ever retuned the
+    ///      boundary moves with it instead of silently exercising the
+    ///      wrong value.
+    function test_setRateLimits_rejectsSubMinWindow_one_bsc() public {
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
+        cfg[0] = RateLimiter.RateLimitConfig({ dstEid: ETH_EID, limit: 100 ether, window: 1 });
+
+        vm.expectRevert(abi.encodeWithSelector(ONOFTAdapter.InvalidRateLimitConfig.selector, ETH_EID));
+        adapter.setRateLimits(cfg);
+    }
+
+    function test_setRateLimits_rejectsSubMinWindow_minMinusOne_bsc() public {
+        uint64 minWindow = adapter.MIN_RATE_LIMIT_WINDOW();
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
+        cfg[0] = RateLimiter.RateLimitConfig({ dstEid: ETH_EID, limit: 100 ether, window: minWindow - 1 });
+
+        vm.expectRevert(abi.encodeWithSelector(ONOFTAdapter.InvalidRateLimitConfig.selector, ETH_EID));
+        adapter.setRateLimits(cfg);
+    }
+
+    function test_setRateLimits_rejectsSubMinWindow_one_eth() public {
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
+        cfg[0] = RateLimiter.RateLimitConfig({ dstEid: BSC_EID, limit: 100 ether, window: 1 });
+
+        vm.expectRevert(abi.encodeWithSelector(WrappedON.InvalidRateLimitConfig.selector, BSC_EID));
+        wON.setRateLimits(cfg);
+    }
+
+    function test_setRateLimits_rejectsSubMinWindow_minMinusOne_eth() public {
+        uint64 minWindow = wON.MIN_RATE_LIMIT_WINDOW();
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
+        cfg[0] = RateLimiter.RateLimitConfig({ dstEid: BSC_EID, limit: 100 ether, window: minWindow - 1 });
+
+        vm.expectRevert(abi.encodeWithSelector(WrappedON.InvalidRateLimitConfig.selector, BSC_EID));
+        wON.setRateLimits(cfg);
+    }
+
+    /// @dev The minimum is inclusive: exactly `MIN_RATE_LIMIT_WINDOW` must
+    ///      be accepted on both sides.
+    function test_setRateLimits_acceptsExactlyMinWindow_bsc() public {
+        uint64 minWindow = adapter.MIN_RATE_LIMIT_WINDOW();
+        _setLimit(address(adapter), ETH_EID, 100 ether, minWindow);
+        (, uint256 canSend) = adapter.getAmountCanBeSent(ETH_EID);
+        assertEq(canSend, 100 ether, "exactly-min window must be accepted and enforced");
+    }
+
+    function test_setRateLimits_acceptsExactlyMinWindow_eth() public {
+        uint64 minWindow = wON.MIN_RATE_LIMIT_WINDOW();
+        _setLimit(address(wON), BSC_EID, 100 ether, minWindow);
+        (, uint256 canSend) = wON.getAmountCanBeSent(BSC_EID);
+        assertEq(canSend, 100 ether, "exactly-min window must be accepted and enforced");
+    }
+
+    /// @dev Sub-min windows are only rejected when `limit > 0`. A zero-limit
+    ///      entry with any window — including 0 — is the unconfigured /
+    ///      fail-open sentinel and must remain accepted regardless of the
+    ///      window field.
+    function test_setRateLimits_acceptsZeroLimitWithSubMinWindow() public {
+        RateLimiter.RateLimitConfig[] memory cfg = new RateLimiter.RateLimitConfig[](1);
+        cfg[0] = RateLimiter.RateLimitConfig({ dstEid: ETH_EID, limit: 0, window: 1 });
+        adapter.setRateLimits(cfg); // must not revert
+    }
+
+    /// @dev Both sides expose the same constant. Pinned via the getter so
+    ///      cross-side drift would fail this check rather than each side's
+    ///      boundary tests silently disagreeing.
+    function test_minRateLimitWindow_isUniformAcrossSides() public {
+        assertEq(
+            uint256(adapter.MIN_RATE_LIMIT_WINDOW()),
+            uint256(wON.MIN_RATE_LIMIT_WINDOW()),
+            "adapter and wON must share the floor"
+        );
     }
 }

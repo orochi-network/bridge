@@ -38,6 +38,24 @@ contract WrappedON is OFT, RateLimiter {
     using SafeERC20 for IERC20;
     using OFTMsgCodec for bytes;
 
+    /// @notice Minimum permitted `window` (seconds) when configuring a non-zero
+    ///         `limit`. Sub-block-time windows cause upstream `_amountCanBeSent`
+    ///         to refill the bucket every block, silently bypassing
+    ///         enforcement (see `setRateLimits` NatSpec).
+    /// @dev    Single uniform value across both bridge sides, chosen against the
+    ///         slower of the two chains. `ONOFTAdapter` is deployed on BSC
+    ///         (~3s blocks → 20x margin); `WrappedON` is deployed on Ethereum
+    ///         (~12s blocks → 5x margin). Per-side constants were considered
+    ///         (see PR #13 discussion thread) and rejected because the 5x
+    ///         floor on the slower side is still ample for the bridge's
+    ///         expected production windows (typically >= 3600s), and a single
+    ///         constant keeps the operator surface simpler — the floor is a
+    ///         safety rail, not a recommended window.
+    ///         `public` visibility exposes the getter to off-chain tooling
+    ///         and to test boundary assertions that should never hard-code
+    ///         the literal.
+    uint64 public constant MIN_RATE_LIMIT_WINDOW = 60;
+
     /// @notice Pre-existing, non-mintable ON ERC20 used as the reserve asset.
     IERC20 public immutable ON;
 
@@ -101,10 +119,21 @@ contract WrappedON is OFT, RateLimiter {
     ///         indistinguishable, by design — this is NOT a pause; see
     ///         `_outflowOrSkip` and the README "Pausing an EID" for the
     ///         deny-all idiom that halts flow on an EID).
+    /// @dev    Also rejects `(limit > 0, 0 < window < MIN_RATE_LIMIT_WINDOW)`.
+    ///         The upstream NatSpec on `RateLimiter` warns that any window
+    ///         shorter than the destination chain's block time causes the
+    ///         decay term to dominate `limit * blockTime` every block, so
+    ///         enforcement effectively resets each block — the same failure
+    ///         mode as the `window = 0` silent-disable shape, just reached by
+    ///         a different fat-finger (e.g. `3600` typed as `1`, `0xE10` as
+    ///         `0x10`). The deny-all pause idiom (`limit=1`,
+    ///         `window=type(uint64).max`) is unaffected.
     function setRateLimits(RateLimitConfig[] calldata _rateLimitConfigs) external onlyOwner {
         for (uint256 i = 0; i < _rateLimitConfigs.length; i++) {
             RateLimitConfig calldata cfg = _rateLimitConfigs[i];
-            if (cfg.window == 0 && cfg.limit != 0) revert InvalidRateLimitConfig(cfg.dstEid);
+            if (cfg.limit != 0 && cfg.window < MIN_RATE_LIMIT_WINDOW) {
+                revert InvalidRateLimitConfig(cfg.dstEid);
+            }
         }
         _setRateLimits(_rateLimitConfigs);
     }
