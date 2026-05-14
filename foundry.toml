@@ -1,42 +1,46 @@
 [profile.default]
-solc = '0.8.34'
-# Pinned so Hardhat and Foundry produce identical bytecode (Etherscan
-# verification depends on the metadata + EVM target matching).
-# Both Ethereum (Cancun, 2024-03-13) and BSC mainnet (Tycho hardfork, BEP-343,
-# 2024-06-20) have shipped Cancun, so PUSH0 + TLOAD/TSTORE are safe on both.
-# Targeting cancun lets WrappedON use transient storage (EIP-1153) for the
-# per-message _composedFlag, saving an SSTORE/SLOAD pair per inbound LZ msg.
-evm_version = 'cancun'
-bytecode_hash = 'ipfs'
-src = 'contracts'
-out = 'out'
-test = 'test/foundry'
-cache_path = 'cache/foundry'
-verbosity = 3
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+script = "script"
+solc_version = "0.8.34"
 optimizer = true
-optimizer_runs = 20_000
-
-libs = [
-    # We provide a set of useful contract utilities
-    # in the lib directory of @layerzerolabs/toolbox-foundry:
-    # 
-    # - forge-std
-    # - ds-test
-    # - solidity-bytes-utils
-    'node_modules/@layerzerolabs/toolbox-foundry/lib',
-    'node_modules',
+optimizer_runs = 200
+evm_version = "cancun"
+via_ir = false
+ffi = false
+fs_permissions = [
+    {access = "read-write", path = "./deployments"},
+    {access = "read", path = "./out"},
 ]
-
 remappings = [
-    # Due to a misconfiguration of solidity-bytes-utils, an outdated version
-    # of forge-std is being dragged in
-    # 
-    # To remedy this, we'll remap the ds-test and forge-std imports to our own versions
-    'ds-test/=node_modules/@layerzerolabs/toolbox-foundry/lib/ds-test',
-    'forge-std/=node_modules/@layerzerolabs/toolbox-foundry/lib/forge-std',
-    '@layerzerolabs/=node_modules/@layerzerolabs/',
-    '@openzeppelin/=node_modules/@openzeppelin/',
+    "@chainlink/contracts-ccip/=lib/ccip/contracts/src/v0.8/",
+    "@chainlink/local/=lib/chainlink-local/src/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "forge-std/=lib/forge-std/src/",
 ]
 
-[fuzz]
-runs = 1000
+[profile.ci]
+verbosity = 3
+fuzz = {runs = 1_000}
+
+[fmt]
+line_length = 120
+tab_width = 4
+bracket_spacing = false
+int_types = "long"
+quote_style = "double"
+number_underscore = "thousands"
+
+[rpc_endpoints]
+eth = "${ETH_RPC}"
+sepolia = "${SEPOLIA_RPC}"
+bsc = "${BSC_RPC}"
+bsc_testnet = "${BSC_TESTNET_RPC}"
+
+[etherscan]
+eth = {key = "${ETHERSCAN_API_KEY}", chain = 1}
+sepolia = {key = "${ETHERSCAN_API_KEY}", chain = 11_155_111}
+bsc = {key = "${BSCSCAN_API_KEY}", chain = 56}
+bsc_testnet = {key = "${BSCSCAN_API_KEY}", chain = 97}

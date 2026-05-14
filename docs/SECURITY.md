@@ -1,418 +1,228 @@
-# Security
+# Security Findings — ON Bridge
 
-This document captures the security posture of the ON cross-chain bridge: the
-trust assumptions the system relies on, the attack surface it deliberately
-exposes, the audit findings raised so far, and the operator obligations that
-hold the design together off-chain.
+Tracker for issues raised by the multi-agent CCIP compliance & security review (5 expert reviewers, 2026-05-12). Severity reflects pre-mainnet impact, not exploit complexity.
 
-The bridge is a LayerZero V2 OFT mesh between BSC and Ethereum, described in
-`CLAUDE.md`. Read that first if you have not.
+**Legend:** `[ ]` open · `[x]` fixed · `[~]` in progress · `[-]` won't fix (justify in notes)
 
-## Reporting a vulnerability
+---
 
-Please email **chiro@orochi.network** with a description, reproduction steps,
-and the commit hash you reviewed. Do not open a public issue for unpublished
-vulnerabilities. We will acknowledge receipt within 72 hours.
+## CRITICAL — block mainnet rollout
 
-## Trust assumptions
+### [ ] C-1 — `wrapBackedSupply` is never tracked; CCIP minters can drain depositor reserve
+- **Files:** `src/WrappedON.sol:63-75`
+- **Reported by:** WrappedON security review, cross-chain attack surface review, test coverage review (3 independent confirmations)
+- **Issue:** The documented invariant `wrapBackedSupply <= ON.balanceOf(WrappedON)` has no on-chain enforcement. `withdraw` checks the raw `ON.balanceOf(this)`, not the wrap-backed portion. A CCIP-minted wON holder can call `withdraw` and drain a wrap-depositor's reserve, leaving the depositor unable to redeem their own native ON.
+- **Exploit trace:** Alice `deposit(100)` → reserve=100, supply=100. CCIP pool `mint(bob, 50)` → reserve=100, supply=150. Bob `withdraw(50)` → reserve=50. Alice `withdraw(100)` → reverts. Bob has redeemed against Alice's collateral.
+- **Fix:** Add `uint256 public wrapBackedSupply`. Increment in `deposit`, decrement in `withdraw`. Gate `withdraw` on `wrapBackedSupply >= amount` (equivalent to `ON.balanceOf(this) - ccipMintedSupply >= amount`).
+- **Verification:** Add the Foundry invariant test from MUST-ADD #1 below.
 
-The bridge inherits the following assumptions; violating any of them breaks
-the conservation invariant.
+### [ ] C-2 — `RenounceDeployerAdmin` safety guard is always-true
+- **Files:** `script/06_TransferOwnership.s.sol:97`
+- **Reported by:** Deployment scripts review
+- **Issue:** `vm.load(won, bytes32(0))` reads OZ ERC20's `_name` slot, which is non-zero from deployment forward. The check passes unconditionally and provides zero protection against running `make renounce` before the multisig has accepted ownership.
+- **Fix:** Replace the slot-0 check with an actual capability check:
+  ```solidity
+  address multisig = vm.envAddress("MULTISIG");
+  require(won.hasRole(adminRole, multisig), "multisig does not hold admin role yet");
+  ```
+- **Verification:** Add test #7 below (premature-renounce scenario).
 
-| Assumption | Why it matters | Verified |
-|------------|----------------|----------|
-| BSC ON token (`0x0e4F...1D48`) is lossless: `transferFrom(amount)` moves exactly `amount`. | `ONOFTAdapter` reports `amountSentLD` to LayerZero; ETH side credits the full amount. A silent FoT/rebase ⇒ unbacked wON. | Per-call delta guard in `_debit` (see Fix H1). Forked-mainnet dry-run also asserts losslessness today. |
-| BSC ON has 18 decimals. | OFT shared-decimals math expects 18 LD. | Forked dry-run (`DryRun.t.sol`) and `WrappedON.constructor` both check 18. |
-| ETH ON token (`0x33f6...B59d`) has 18 decimals. | wON is 18-decimal; 1:1 swap requires the reserve token to match. | Constructor `DecimalsMismatch` revert. |
-| ETH ON token does not silently re-enter `WrappedON` from inside `safeTransfer`. | `_credit` and `unwrap` use checks-effects-interactions but do not gate with `ReentrancyGuard`. | Manual analysis: ON is a vanilla ERC20 (no ERC777-style hooks). Documented assumption. |
-| Both DVNs (`LayerZero Labs`, `Google` — the DVN run by Google Cloud) act independently. | Compromise of either DVN halts the bridge but does not steal funds. Compromise of both ⇒ arbitrary message forgery. | Operational obligation (DVN diversity). Liveness probe: `yarn check:dvn`. |
-| The deployer EOA is fully handed off to a multisig before going live. | Until handoff, the EOA can rewire peers and mint unbounded wON. | Tracked by the post-deploy checklist; automated by the `lz:oapp:handoff` task (Fix H2). |
+### [ ] C-3 — Rate-limit capacity covers only 0.1% of BSC supply
+- **Files:** `script/05_ApplyChainUpdates.s.sol:20-21`
+- **Reported by:** Cross-chain attack surface review, CCIP compliance review
+- **Issue:** `DEFAULT_CAPACITY = 100_000 ether`, `DEFAULT_RATE = 10 ether`. The BSC `LockReleaseTokenPool` holds up to 100M ON. A compromised CCIP messaging layer or remote ETH pool can drain 100,000 ON immediately, then 864,000 ON/day. The inline `TODO "calibrate from production traffic"` acknowledges this is not production-ready. The `rate > capacity` ratio also means the bucket caps at capacity in practice, making the effective cap 100,000 ON per burst.
+- **Fix:** Set initial capacity to a value the team is willing to lose in one incident (suggested: 10,000–25,000 ON). Make values environment-overridable like script 07. Consider asymmetric inbound vs outbound limits — see M-7.
+- **Verification:** Add rate-limit exhaustion tests (MUST-ADD #5).
 
-## Audit findings
+---
 
-The findings below come from the multi-agent audit on commit `04b16f6`. Each
-fix references the commit that lands it.
+## HIGH
 
-### HIGH
+### [ ] H-1 — `Deployments.writeAddress` wipes the JSON file on every call
+- **Files:** `script/Deployments.sol:25-29`
+- **Reported by:** Deployment scripts review
+- **Issue:** `vm.serializeAddress("deployments", key, value)` only writes one key per call. Running script 02 (writes `"pool"`) after script 01 (wrote `"wrappedON"`) overwrites the file with `{"pool": "0x..."}`, losing `"wrappedON"`. Script 05 then reads stale/missing data.
+- **Fix:**
+  ```solidity
+  function writeAddress(uint256 chainId, string memory key, address value) internal {
+      vm.writeJson(vm.toString(value), path(chainId), string.concat(".", key));
+  }
+  ```
 
-#### H1 — Asymmetric fee-on-transfer protection
-- **Where:** `ONOFTAdapter._debit` (inherited from upstream `OFTAdapter`) does
-  not balance-delta-check the `transferFrom` it issues. `WrappedON._credit`
-  auto-unwrap path does not balance-delta-check the `safeTransfer` it issues.
-- **Why it matters:** if either ON token ever ships fee-on-transfer or
-  rebasing semantics, the bridge silently leaks the fee while accounting for
-  the full pre-fee amount on the other side, breaking conservation.
-- **Fix (this branch):**
-  - `ONOFTAdapter._debit` overridden with a balance-delta guard that reverts
-    with `UnexpectedTransferAmount` on mismatch.
-  - `WrappedON._credit` auto-unwrap branch wraps `safeTransfer` in a pre/post
-    balance-delta check on both sides and reverts with
-    `UnexpectedTransferAmount` on mismatch (the LayerZero message stays
-    retryable). The fallback-to-mint path fires only when
-    `reserveBefore < _amountLD`, not on a delta mismatch — `UnwrapFallbackToMint`
-    therefore signals a depleted reserve, not a FoT activation.
+### [ ] H-2 — Missing `_requireSet` guards on pool constructor args
+- **Files:** `script/02_DeployPools.s.sol:25-39`
+- **Issue:** `cfg.rmnProxy` and `cfg.router` passed to `BurnMintTokenPool` / `LockReleaseTokenPool` constructors without `_requireSet`. If Helper.sol still has placeholder zeros at broadcast time, the pool is permanently misconfigured (constructor args are immutable).
+- **Fix:** Add `_requireSet(cfg.router, "router")` and `_requireSet(cfg.rmnProxy, "rmnProxy")` before each pool deployment.
 
-#### H2 — Manual ownership / delegate handoff
-- **Where:** `deploy/ONOFTAdapter.ts` and `deploy/WrappedON.ts` leave the
-  deployer EOA as both `owner` and `delegate`. The post-deploy checklist
-  required two manual `transferOwnership` and `setDelegate` calls per chain.
-  A forgotten command leaves a hot key with full peer/DVN authority.
-- **Fix (this branch):** the `lz:oapp:handoff` Hardhat task (in
-  `tasks/handoff.ts`) performs `setDelegate(multisig)` and
-  `transferOwnership(multisig)` on a single network, ordered correctly,
-  reading the multisig address from `OWNER_BSC` / `OWNER_ETH` env vars. The
-  deploy/wire/handoff sequence should be performed in a single operator
-  session.
+### [ ] H-3 — Missing `_requireSet` guards in admin registration
+- **Files:** `script/04_RegisterAdminAndPool.s.sol:44-47`
+- **Issue:** `cfg.registryModuleOwnerCustom` and `cfg.tokenAdminRegistry` consumed without zero checks. Calls to `address(0)` silently succeed with empty return data; `acceptAdminRole` and `setPool` become no-ops. The token never gets a registered admin and CCIP message execution will revert at runtime.
+- **Fix:** Add `_requireSet` calls at the top of `run()` before `vm.startBroadcast()`.
 
-#### H3 — BSC→ETH confirmations policy
-- **Where:** `layerzero.config.ts` previously set BSC→ETH = 20 confirmations.
-- **Why it matters:** 20 BSC blocks is *fast finality* per BNB Chain
-  documentation but historical reorgs deeper than 20 blocks exist; a deeper
-  reorg can re-order or drop a send the destination has already accepted.
-- **Fix (this branch):** `BSC_TO_ETH_CONFIRMATIONS` raised from 20 to 30
-  (~90s on BSC's ~3s blocks). The extra ~30s of latency is acceptable for
-  the bridge's expected message profile and clears all historical reorg
-  depths we have observed. ETH→BSC remains 15 (~3 min on ETH's 12s blocks).
+### [ ] H-4 — Missing `_requireSet` on `remoteToken` in chain wiring
+- **Files:** `script/05_ApplyChainUpdates.s.sol:29`
+- **Issue:** On BSC, `_remoteTokenAddress` falls through to `remote.onToken`, which is `address(0)` for the Sepolia testnet config. `abi.encode(address(0))` is written as the remote token. `applyChainUpdates` doesn't validate the bytes, so this succeeds silently — CCIP then presents the wrong destination token to the OffRamp.
+- **Fix:** Add `_requireSet(remoteToken, "remoteToken")` after the address is resolved.
 
-### MEDIUM
+### [ ] H-5 — `setCCIPAdmin` is single-step; typo permanently bricks CCIP admin
+- **Files:** `src/WrappedON.sol:104-109`
+- **Reported by:** WrappedON security review, cross-chain attack surface review
+- **Issue:** `s_ccipAdmin` controls registration of wON in `TokenAdminRegistry` via `registerAdminViaGetCCIPAdmin`. A typo during multisig handoff permanently locks out the legitimate admin with no recovery path — the contract is non-upgradeable and `DEFAULT_ADMIN_ROLE` has no power over `s_ccipAdmin`.
+- **Fix:** Two-step pattern matching OZ `Ownable2Step`:
+  ```solidity
+  address public pendingCcipAdmin;
+  function proposeCCIPAdmin(address newAdmin) external onlyRole(DEFAULT_ADMIN_ROLE) { ... }
+  function acceptCCIPAdmin() external { require(msg.sender == pendingCcipAdmin, ...); ... }
+  ```
 
-#### M1 — `_lzReceive` composed branch duplicates upstream logic
-- **Where:** `WrappedON._lzReceive` re-implemented the composed path inline,
-  emitted `UnwrapFallbackToMint` on every composed message (false positive
-  for any monitor watching that event), and was vulnerable to silent drift
-  if upstream `OFTCore.lzReceive` ever changes.
-- **Fix (this branch):** transient `_composedFlag` set in `_lzReceive`,
-  then `super._lzReceive` is called and the composed path is implemented
-  inside `_credit`. Single source of truth, no duplicated event emission.
+### [ ] H-6 — No reentrancy guard on `deposit`/`withdraw`
+- **Files:** `src/WrappedON.sol:63-75`
+- **Issue:** Not exploitable against the current ON token (standard ERC20, no hooks), but the absence of `nonReentrant` on functions that read external balance, mutate supply, and then call `safeTransfer` is fragile by design. Auditors will flag this regardless.
+- **Fix:** Inherit OZ `ReentrancyGuard` and apply `nonReentrant` to `deposit` and `withdraw`.
 
-#### M2 — Enforced executor gas was symmetric and missing for composed sends
-- **Where:** `layerzero.config.ts` applied 250k to both legs and only
-  configured `msgType: 1` (SEND). Composed inbound on ETH (`_mint` +
-  `endpoint.sendCompose` + LZ plumbing) realistically consumes ~200–220k,
-  leaving only ~30k slack on the symmetric budget. Worse, `msgType: 2`
-  (SEND_AND_CALL) had no enforced `LZ_RECEIVE` gas at all — the very budget
-  the 300k figure was sized for never applied to the path that needed it.
-- **Fix (this branch):** options are split per leg AND per msgType. BSC leg
-  is 250k (plain unlock); ETH leg is 300k for the composed-inbound headroom.
-  Both `msgType: 1` and `msgType: 2` are enforced. `lzCompose` gas is
-  intentionally left unenforced (application-specific).
+### [ ] H-7 — Post-handoff verification silently skips BSC `acceptOwnership` check
+- **Files:** `script/08_PostDeployVerify.s.sol:67,133-140`; `Makefile:85`
+- **Issue:** `_checkOwnershipHandoff` only validates when `MULTISIG` env var is set. The Makefile target doesn't require it. Result: a BSC pool ownership handoff that was never accepted goes undetected; RUNBOOK step 3.3 reports false-green.
+- **Fix:** Make `verify-post-handoff` Makefile target require `MULTISIG`:
+  ```makefile
+  verify-post-handoff:
+      @test -n "$(MULTISIG)" || (echo "MULTISIG required"; exit 1)
+      MULTISIG=$(MULTISIG) forge script script/08_PostDeployVerify.s.sol --rpc-url $(RPC)
+  ```
+- Also assert `TokenAdminRegistry.getTokenConfig(token).administrator` matches expected address (deployer pre-handoff, multisig post-handoff).
 
-#### M3 — DVN config 2-required + 0-optional
-- **Where:** `layerzero.config.ts` declares
-  `requiredDVNs = ['LayerZero Labs', 'Google']`, `optionalDVNs = []`.
-- **Decision (this branch):** keep 2-of-2 required, no optionals. Either
-  DVN going down halts the bridge entirely, but the simpler topology is the
-  intended security posture: a delivery failure must be visible and
-  triaged, not silently routed around. A third DVN would be added only if
-  the operational cost of liveness incidents exceeded the cost of an extra
-  DVN fee per message — which is not the case at the bridge's current
-  message profile. Liveness is verified pre-deploy by `yarn check:dvn`.
+---
 
-#### M4 — `_credit` recipient handling
-- **Decision:** match upstream LayerZero `_credit` exactly. Neither
-  contract guards bad recipients on-chain.
-  - `ONOFTAdapter`: no `_credit` override; inherits
-    `OFTAdapter._credit` verbatim. `address(0)` reverts via OZ ERC20;
-    `address(this)` is a silent self-transfer no-op.
-  - `WrappedON._credit`: keeps the upstream `OFT._credit:83`
-    `address(0) -> 0xdead` redirect and adds no other recipient guard.
-    Auto-unwrap to `0xdead` drains real reserve; mint branches mint at
-    `0xdead`. `address(this)` follows upstream — mints inflate wON's
-    own balance, auto-unwrap reverts via the existing balance-delta
-    guard (`UnexpectedTransferAmount`).
-- **Operator obligation:** monitor off-chain for inbound sends
-  addressed to `address(0)` or to the bridge contracts themselves. No
-  on-chain event distinguishes a misaddressed send from a legitimate
-  delivery in the silent cases.
+## MEDIUM
 
-#### M5 — No throttle on outbound flow per EID
+### [ ] M-1 — `DEFAULT_ADMIN_ROLE` can re-grant `MINTER_ROLE` to anyone post-handoff
+- **Files:** `src/WrappedON.sol:35-36`
+- **Issue:** OZ `AccessControl` permits `DEFAULT_ADMIN_ROLE` to grant `MINTER_ROLE` to any address. A compromised multisig can mint unlimited wON. The "MINTER_ROLE only goes to the pool" constraint in CLAUDE.md is documentation, not on-chain enforcement.
+- **Fix options:** (a) Override `_grantRole` to revert when granting `MINTER_ROLE`/`BURNER_ROLE` to non-pool addresses; (b) make pool address immutable and enforce in `mint`/`burn` directly; (c) document the trust assumption explicitly in NatSpec.
 
-- **Where:** `ONOFTAdapter._debit` and `WrappedON._debit` (inherited from
-  upstream OFT) accept arbitrarily large per-window outbound flow. A
-  compromised hot key on a user account, or a contract-level exploit that
-  drains an integrator, can move the entire bucket in a single block with
-  no on-chain ceiling.
-- **Why it matters:** the canonical reserve on BSC and the unwrap reserve
-  on ETH are bounded resources. An unbounded drain is more destructive
-  than a metered one — operators have no time-window to react before the
-  reserve is gone.
-- **Fix (this branch):** both contracts inherit the LayerZero
-  `RateLimiter` extension and call the `_outflowOrSkip(dstEid, amountSentLD)`
-  wrapper in `_debit` after the lossless-transfer guard. The wrapper
-  delegates to upstream `_outflow` when the EID is configured and skips
-  it for the all-zero `(limit=0, window=0)` sentinel — fail-open — so a
-  freshly-deployed contract is usable before the multisig dials in
-  production limits. `setRateLimits` rejects every `(limit>0, window<60)`
-  shape with `InvalidRateLimitConfig` to prevent a fat-finger from
-  silently disabling enforcement. This covers both the upstream
-  silent-disable `(limit>0, window=0)` case (where upstream's div-by-zero
-  guard substitutes `window=1` and refills the bucket every second) and
-  any sub-block-time window (e.g. `3600` typed as `1`, `0xE10` as `0x10`)
-  where the linear-decay term `limit * blockTime` dwarfs `limit` every
-  block. 60s covers BSC's ~3s blocks and ETH's ~12s blocks with margin
-  while still permitting tight production windows; the deny-all pause
-  idiom (`limit=1`, `window=type(uint64).max`) is unaffected. Owner-only
-  setters (`setRateLimits` / `resetRateLimits`) are exposed for the
-  multisig.
-- **Known limitation (acknowledged trade-off):** `(0, 0)` is the
-  canonical "unconfigured / fail-open" sentinel and is
-  indistinguishable from "operator wrote back to zero." Writing
-  `setRateLimits([(eid, 0, 0)])` therefore RETURNS the EID to the
-  unenforced state; it does NOT pause it. To halt outbound flow on an
-  EID, write a deny-all config (`limit=1, window=type(uint64).max`) —
-  documented in the README "Pausing an EID" section and called out
-  inline on `_outflowOrSkip` in both contracts. We accepted this
-  trade-off rather than introduce a separate `configured` storage flag
-  (one extra SLOAD per `_debit` + one first-time SSTORE per EID): the
-  deny-all idiom gives the operator a literal pause with the existing
-  surface, and the README + NatSpec warn against the `(0, 0)`
-  footgun.
-  Inbound (`_credit`) is intentionally NOT rate-limited: an arrived
-  message has already been debited on the source chain, so throttling it
-  can only brick LayerZero delivery (the message becomes permanently
-  stuck when the cap is hit) without recovering any tokens. Unconfigured
-  EIDs (`limit==0 && window==0`) bypass the check so a freshly-deployed
-  contract is usable before the multisig dials in production limits.
-  Sizing guidance and the failure mode (`RateLimitExceeded`) are
-  documented in the README "Rate limiting" section. Note: rate limiting
-  bounds a *single-window* drain, not a sustained one — operators must
-  still monitor cumulative outbound flow off-chain and tighten or reset
-  if the protocol comes under attack across multiple windows.
+### [ ] M-2 — `burn(address, uint256)` bypasses allowance and appears unused
+- **Files:** `src/WrappedON.sol:89-91`
+- **Issue:** The two-argument `burn` overload destroys tokens from any account without an allowance check. The actual `BurnMintTokenPool` v1.5.1 only calls `burn(uint256)` (single-argument, self-burn). The two-argument overload is a footgun if `BURNER_ROLE` is ever misgranted.
+- **Fix:** Either remove the two-argument overload (preferred — confirm via pool source first) or add explicit NatSpec warning that allowance is bypassed.
 
-### LOW / cleanup
+### [ ] M-3 — `proposeAdministrator` fallback path has no companion script
+- **Files:** `script/04_RegisterAdminAndPool.s.sol:72`
+- **Issue:** When BSC ON exposes neither `getCCIPAdmin` nor `Ownable`, script 04 reverts and instructs the operator to have the token owner call `proposeAdministrator` manually. After that, `acceptAdminRole` + `setPool` must still happen, but there's no companion script entry point and the revert message says "re-run skipping registration" — no such flag exists.
+- **Fix:** Add `runPostPropose()` entry point that skips `_registerAdmin` and only calls `acceptAdminRole` + `setPool`. Update the revert message to point at it.
 
-- Caret pragma in `contracts/mocks/ONOFTAdapterMock.sol` replaced with the
-  exact pin `0.8.34` to match the project policy.
-- `deploy/MyERC20Mock.ts` gated with `network.live` so a stray
-  `--tags MyERC20Mock` cannot deploy a useless mock to mainnet.
-- Required DVN canonical name corrected from `'Google Cloud'` to `'Google'`
-  in `layerzero.config.ts`. The LayerZero metadata registry's
-  `canonicalName` for the DVN run by Google Cloud is `Google` (its `id` is
-  `google-cloud`). `metadata-tools` does an exact (`===`) `canonicalName`
-  match at `lz:oapp:wire` time — the same exact-match rule applies to
-  executor names — and the previous string would have failed wire with
-  `Can't find DVN: "Google Cloud" on chainKey: "bsc"`.
-- Pre-deploy DVN liveness probe added (`scripts/check-dvn.js`, exposed as
-  `yarn check:dvn`). Fetches the LZ metadata registry, resolves each
-  required DVN canonical name to a per-chain address, then verifies the
-  contract has bytecode and responds to `quorum()` on each mainnet.
-- Bytecode-diff CI added (`.github/workflows/bytecode-diff.yml` +
-  `scripts/check-bytecode.js`, exposed as `yarn check:bytecode`).
-  Compares Hardhat and Foundry `deployedBytecode` for every production
-  contract after stripping the CBOR metadata trailer (which embeds an IPFS
-  hash that legitimately differs between toolchains because of source-path
-  resolution). Asserts byte-identical runtime code on every PR touching
-  `contracts/` or compiler settings. Stripped runtime is currently
-  identical for both `ONOFTAdapter` (15,827 bytes) and `WrappedON`
-  (20,685 bytes); rerun `yarn check:bytecode` to refresh after any
-  contract or compiler-setting change.
+### [ ] M-4 — E2E test does not exercise script 04's auto-detection branches
+- **Files:** `test/DeploymentE2E.t.sol:149-154`
+- **Issue:** The test uses the `proposeAdministrator` fallback path. Production script 04 tries `getCCIPAdmin` first, then `Ownable.owner`. The auto-detection branches (option 1 and option 2) are never exercised.
+- **Fix:** Add a second E2E variant where `onBsc` is deployed by `deployer` so `Ownable.owner() == deployer`, exercising the auto-detection path script 04 will actually use on mainnet.
 
-### Resolved (no further action)
+### [ ] M-5 — Script 05 reads remote artifact with no existence guard
+- **Files:** `script/05_ApplyChainUpdates.s.sol:28`; `script/Deployments.sol`
+- **Issue:** `vm.readFile` throws an opaque Forge error if the artifact file doesn't exist. Running ETH script 05 before BSC has been deployed reverts mid-broadcast with a confusing message.
+- **Fix:** Add `require(vm.exists(file), "Missing artifact — deploy remote chain first")` in `Deployments.readAddress`.
 
-- **Migration plan if the ETH ON token ever upgrades.** Both ON tokens are
-  immutable on their deployed addresses: BSC ON
-  (`0x0e4F...1D48`) and ETH ON (`0x33f6...B59d`) have no owner-controlled
-  upgrade path, no proxy, and the issuer has confirmed they will not be
-  changed. There is no fee-on-transfer; protocol fees that may apply to
-  the token live outside the ERC20 transfer path and do not affect the
-  amount delivered by `transferFrom`. The losslessness invariant is
-  re-asserted on every BSC-side send by the `_debit` balance-delta guard
-  and on every ETH-side `wrap` / `seedReserve` by the
-  `UnexpectedTransferAmount` guard, so any future deviation would surface
-  as an explicit revert rather than silent loss.
+### [ ] M-6 — Rate limit defaults are hardcoded with TODO and no mainnet gate
+- **Files:** `script/05_ApplyChainUpdates.s.sol:17-21`
+- **Issue:** Unlike script 07 (env-driven), script 05 hardcodes capacity/rate. Forgetting to update them before mainnet broadcast goes live as-is.
+- **Fix:** Read from environment with defaults; at minimum, `require(block.chainid != 1 && block.chainid != 56 || values overridden)` gate.
 
-### Outstanding (operator action items, not code changes)
+### [ ] M-7 — Rate limits are symmetric but exposure is asymmetric
+- **Files:** `script/05_ApplyChainUpdates.s.sol`
+- **Issue:** Inbound and outbound limits are identical, but a compromised ETH pool (unbounded wON mint) and a compromised BSC pool (drain of 100M locked ON) carry very different downside. BSC inbound is the last line of defense against ETH-side key compromise.
+- **Fix:** Set BSC inbound capacity conservatively (5k–10k ON initially), increase gradually based on production traffic.
 
-- Run `yarn check:dvn` against archive RPCs immediately before every
-  mainnet deploy, in addition to the existing `yarn test:dryrun`.
-- After `lz:oapp:handoff`, the multisig must call `setRateLimits` on both
-  contracts to apply production caps for the BSC↔ETH pathway. Until this
-  runs, both EIDs are unconfigured and unlimited (the `(0, 0)` storage
-  default is fail-open by design — see Fix M5 above and the README
-  "Rate limiting" section).
+### [ ] M-8 — BSC pool starts empty; ETH→BSC direction reverts at launch
+- **Files:** `RUNBOOK.md` (documentation gap)
+- **Issue:** `acceptLiquidity=false` means the pool can never be pre-funded. The first user must bridge BSC→ETH; ETH→BSC is unavailable until then. Not currently documented in user-facing materials.
+- **Fix:** Document explicitly in RUNBOOK.md and any user-facing materials.
 
-## Acknowledged design trade-offs (not bugs)
+### [ ] M-9 — `supportsInterface` may diverge from CCIP pool's vendored IERC20
+- **Files:** `src/WrappedON.sol:27-31,114`
+- **Issue:** The contract uses CCIP-vendored `IBurnMintERC20` for the interface ID computation but inherits OZ v5's `IERC20`. Current `BurnMintTokenPool` (1.5.1) doesn't introspect `supportsInterface`, so not a deployment blocker — but future pool versions or third-party integrators may, and would see `false`.
+- **Fix:** Document explicitly as an accepted risk for future pool upgrades.
 
-The following are documented in `CLAUDE.md` and remain by design.
+---
 
-- **Front-running grief vector.** A wON holder can drain the reserve via
-  `unwrap` while another user's BSC→ETH bridge is in flight, forcing them
-  onto the wON fallback. Auto-unwrap is best-effort; integrators should not
-  treat it as a guarantee.
-- **`seedReserve` is one-way.** Donors receive no wON in return.
-- **ON token pause / blacklist may stall a message.** If the ON token is
-  paused or blacklists the recipient, the auto-unwrap branch reverts inside
-  `_credit`, leaving the message retryable but undelivered until the lock
-  lifts. There is an indirect recovery path: any wON holder can drain the
-  reserve below the message amount, at which point the fallback-to-mint
-  branch fires on retry.
-- **Compose handler reverts strand wON at the handler address.** Standard
-  OFT compose semantics: the mint is committed in `_lzReceive`; the compose
-  call is dispatched separately by the executor. If the handler reverts,
-  wON is held by the handler contract. Recovery is the handler's
-  responsibility.
+## LOW
 
-## Rate-limiter operations
+### [ ] L-1 — Zero-amount `deposit`/`withdraw` succeed and emit misleading events
+- **Files:** `src/WrappedON.sol:63-75`
+- **Fix:** `if (amount == 0) revert ZeroAmount();` at the top of both.
 
-Both bridge contracts (`ONOFTAdapter` on BSC, `WrappedON` on Ethereum)
-inherit the LayerZero `RateLimiter` mixin and expose two owner-only
-mutators:
+### [ ] L-2 — `console.log` prints wrong chain selector
+- **Files:** `script/05_ApplyChainUpdates.s.sol:51`
+- **Issue:** Logs `local.chainSelector` where `remote.chainSelector` was intended. No functional impact; misleading operator output.
+- **Fix:** Replace `local.chainSelector` with `remote.chainSelector`.
 
-- `setRateLimits(RateLimitConfig[] calldata)` — set per-EID `(limit, window)`.
-- `resetRateLimits(uint32[] calldata)` — zero `amountInFlight` for given EIDs.
+### [ ] L-3 — `make test-e2e` silently skips PoolRoundtrip tests
+- **Files:** `Makefile:46`
+- **Issue:** Forge only honors the last `--match-path` flag. CI may show green while roundtrip tests aren't running.
+- **Fix:** `--match-path 'test/{PoolRoundtrip,DeploymentE2E}.t.sol'` or run `make test`.
 
-`RateLimitConfig` is `(uint32 dstEid, uint192 limit, uint64 window)`. The
-public mapping `rateLimits(dstEid)` returns the live state
-`(amountInFlight, lastUpdated, limit, window)`.
+### [ ] L-4 — Renounce script doesn't verify multisig has accepted pool ownership
+- **Files:** `script/06_TransferOwnership.s.sol:89-104`
+- **Issue:** Only checks deployer holds wON `DEFAULT_ADMIN_ROLE`. Pool `Ownable` and `TokenAdminRegistry` admin role can still be pending.
+- **Fix:** Add read-only `require(ITokenPoolOwnable(pool).owner() == multisig, ...)` before renouncing.
 
-### Capping outbound flow at 100,000 ON / hour
+### [ ] L-5 — Script 03 re-run emits spurious `RoleGranted` events
+- **Files:** `script/03_GrantRoles.s.sol:18-20`
+- **Issue:** OZ `grantRole` is a silent no-op if role already held but still emits the event. Mildly misleading audit trail. Not a code change — clarify RUNBOOK idempotency wording.
 
-After the post-deploy handoff (CLAUDE.md post-deploy checklist Step 5;
-README Step 12), the multisig calls `setRateLimits` on each contract.
-To cap BSC→ETH outbound at 100,000 ON per hour:
+### [ ] L-6 — Chain selectors duplicated in tests instead of referencing Helper
+- **Files:** `test/PoolRoundtrip.t.sol:41-42`, `test/DeploymentE2E.t.sol:39-40`
+- **Fix:** Reference `Helper.ETH_MAINNET_SELECTOR` and `Helper.BSC_MAINNET_SELECTOR` directly.
 
-```ts
-// On BSC, multisig calls ONOFTAdapter.setRateLimits:
-const cfg = [{
-  dstEid: 30101,                       // Ethereum mainnet EID
-  limit:  100_000n * 10n ** 18n,       // 100,000 ON, 18-decimal wei
-  window: 3600,                        // 1 hour, in seconds
-}]
-await adapter.connect(multisig).setRateLimits(cfg)
-```
+### [ ] L-7 — Operational: pool redeploy without coordinated `applyChainUpdates` silently breaks bridge
+- **Files:** `RUNBOOK.md`
+- **Fix:** Document the dual-chain coordination requirement.
 
-Mirror on Ethereum to cap ETH→BSC outbound:
+---
 
-```ts
-// On Ethereum, multisig calls WrappedON.setRateLimits:
-const cfgEth = [{ dstEid: 30102, limit: 100_000n * 10n ** 18n, window: 3600 }]
-await wON.connect(multisig).setRateLimits(cfgEth)
-```
+## Test Coverage Gaps
 
-Buckets are independent per direction; capping only one side leaves the
-other free to drain.
+### MUST-ADD before mainnet
 
-### Adjusting an existing limit
+- [ ] **T-1** Foundry invariant test for the reserve property (random interleaving of `deposit`/`withdraw`/`mint`/`burn`). Required to validate C-1's fix.
+- [ ] **T-2** Fork tests against real BSC ON token (`0x0e4F6209eD984b21EDEA43acE6e09559eD051D48`) resolving the CLAUDE.md open item: which admin-registration branch does the token expose?
+- [ ] **T-3** Zero-amount `deposit`/`withdraw` edge cases (pins the design decision from L-1).
+- [ ] **T-4** `supportsInterface(type(IBurnMintERC20).interfaceId) == true` assertion.
+- [ ] **T-5** Rate-limit exhaustion: `lockOrBurn` revert when amount > capacity; refill behavior over time.
 
-Calling `setRateLimits` with the same `dstEid` and a new `(limit, window)`
-**preserves the running window's `amountInFlight`** — upstream
-`_setRateLimits` checkpoints decay at the old rate before the new rate
-kicks in, so a tightening cannot retroactively wipe accounting.
+### SHOULD-ADD
 
-To explicitly clear `amountInFlight` (e.g. after a confirmed incident
-response) without changing the limit, use `resetRateLimits`:
+- [ ] **T-6** `setCCIPAdmin` event emission assertion.
+- [ ] **T-7** Premature-renounce scenario: deployer renounces before multisig accepts pool ownership → confirm no-admin state is detectable.
+- [ ] **T-8** Non-BURNER caller cannot use `burn(address, uint256)` even with full allowance.
+- [ ] **T-9** Stray `ON.transfer(address(won), x)` does not mint wON and does not allow overclaiming.
+- [ ] **T-10** `releaseOrMint` with wrong source-pool address is rejected.
 
-```ts
-await adapter.connect(multisig).resetRateLimits([30101])
-```
+### NICE-TO-HAVE
 
-This zeros only the in-flight counter; `(limit, window)` are untouched.
+- [ ] **T-11** `provideLiquidity` on BSC pool reverts (pins `acceptLiquidity=false` permanence).
+- [ ] **T-12** Sequential `withdraw` then `deposit` in same block preserves accounting.
+- [ ] **T-13** `RenounceDeployerAdmin` script with deployer-role-already-renounced fails clearly.
 
-### Emergency stop
+---
 
-`(0, 0)` is **fail-open**, not pause. To halt outbound flow on an EID,
-write a deny-all config:
+## Confirmed-correct (no action needed)
 
-```ts
-const denyAll = [{
-  dstEid: 30101,
-  limit:  1n,                                  // smallest legal value: validator
-                                                // rejects (limit>0, window<60), so
-                                                // limit must be ≥1 alongside a window
-                                                // ≥ 60 — type(uint64).max satisfies both.
-  window: 18_446_744_073_709_551_615n,         // type(uint64).max
-}]
-await adapter.connect(multisig).setRateLimits(denyAll)
-```
+- Stock pool usage (no subclassing of `BurnMintTokenPool` / `LockReleaseTokenPool`).
+- `acceptLiquidity = false` on BSC pool (`02_DeployPools.s.sol:38`).
+- `localTokenDecimals = 18` consistent on both pools.
+- Chain selectors `ETH_MAINNET_SELECTOR = 5009297550715157269`, `BSC_MAINNET_SELECTOR = 11344663589394136015`.
+- `block.chainid` dispatch covers mainnet/testnet pairs and reverts on unsupported chains (anvil chainid 31337 included).
+- `vm.startBroadcast` placement: view calls outside, state changes inside.
+- CCIP-delegated concerns (replay, message ordering, idempotency) correctly not re-implemented in this repo.
+- No decimal scaling needed (both tokens 18 decimals).
 
-The decay rate is `1 / type(uint64).max ≈ 0`, so the bucket effectively
-never refills. Any non-zero outbound reverts with `RateLimitExceeded` on
-the source-chain `send()` **before** any LayerZero plumbing engages —
-users keep their funds. `setRateLimits` also preserves `amountInFlight`
-across the deny-all transition (upstream `_setRateLimits` does NOT reset
-`amountInFlight` / `lastUpdated` — see `RateLimiter.sol:183`), so the
-running window does not bleed during the pause and a subsequent un-pause
-inherits exactly the in-flight state at the moment the deny-all landed.
+---
 
-To resume, the multisig has two paths:
+## Review provenance
 
-1. **Carry-over** — write the production config back via `setRateLimits`.
-   `amountInFlight` is preserved, so the bucket immediately reflects any
-   accounting accumulated up to the pause. Use this when the pause was
-   precautionary and you want continuity with the prior window.
-2. **Clean-bucket** — call `resetRateLimits([dstEid])` first to zero
-   `amountInFlight`, then `setRateLimits` to write the production config.
-   Use this after a confirmed incident response, when the pre-pause
-   window's accounting is no longer trusted.
+Five expert agents (2026-05-12 review):
+1. CCIP protocol compliance
+2. WrappedON contract security
+3. Deployment & operations security
+4. Cross-chain attack surface
+5. Test coverage & invariant adequacy
 
-The `setRateLimits` validator additionally rejects every
-`(limit>0, window<60)` shape with `InvalidRateLimitConfig`. This covers
-both the upstream silent-disable `(limit>0, window=0)` case (where
-`_amountCanBeSent` substitutes `window = 1` to avoid div-by-zero and the
-bucket refills every second) and any sub-block-time window (e.g. `3600`
-typed as `1`, `0xE10` as `0x10`) where the linear-decay term `limit *
-blockTime` dwarfs `limit` every block. The 60s floor covers BSC's ~3s
-blocks and ETH's ~12s blocks with margin; the all-zero `(0, 0)`
-sentinel and the deny-all pause idiom remain accepted.
-
-### Verifying state
-
-Before and after every change, signers should read the live state on
-both chains:
-
-```sh
-cast call $ADAPTER_BSC \
-  "rateLimits(uint32)(uint192,uint64,uint192,uint64)" 30101 \
-  --rpc-url $RPC_URL_BSC
-# Returns: (amountInFlight, lastUpdated, limit, window)
-```
-
-The upstream `RateLimiter` mixin emits two security-sensitive events
-that an off-chain audit trail must index together:
-
-- `RateLimitsChanged(RateLimitConfig[] rateLimitConfigs)` — every
-  successful `setRateLimits` call (initial config, tightening, loosening,
-  deny-all, and resume).
-- `RateLimitsReset(uint32[] eids)` — every successful `resetRateLimits`
-  call. This zeros `amountInFlight` and is the security-relevant signal
-  for "incident response cleared the running window's accounting".
-
-Indexing only `RateLimitsChanged` will miss the reset events; indexing
-both gives a complete record of every cap change and every accounting
-clear, with which signer proposed each, when it landed, and on which
-contract.
-
-Cross-references: full sizing guidance and the operator workflow live in
-[README.md "Rate limiting"](../README.md#rate-limiting); the high-level
-model is in [CLAUDE.md "Rate limiting"](../CLAUDE.md#rate-limiting).
-
-## Operator obligations
-
-- Run `yarn test:dryrun` against archive RPCs before every mainnet
-  deploy.
-- Run `yarn check:dvn` immediately before `lz:oapp:wire` to confirm
-  both required DVNs are reachable on BSC and Ethereum mainnet.
-- Compress deploy → `lz:oapp:wire` → `lz:oapp:handoff` into a single
-  operator session. Do not leave the deployer EOA as owner overnight.
-- Monitor `WrappedON.reserve()` against a daily-flow threshold; refill via
-  `wrap` (recoverable) or `seedReserve` (one-way subsidy) as needed.
-- Subscribe to alerts on `UnwrapFallbackToMint` events: the false-positive
-  case from M1 is gone, so every emission indicates a depleted reserve.
-  A fee-on-transfer mismatch in the auto-unwrap branch reverts with
-  `UnexpectedTransferAmount` instead of emitting the event.
-- Configure outbound rate limits on both contracts via `setRateLimits`
-  immediately after the multisig handoff (README Step 13 / CLAUDE.md
-  post-deploy checklist Step 7). Unconfigured EIDs are fail-open — the
-  bridge is usable from block one but unprotected against single-block
-  drain until the multisig dials limits in. To halt flow on an EID, use
-  the deny-all idiom (`limit=1, window=type(uint64).max`) — do NOT
-  write `(0, 0)`, which fail-opens. See README "Rate limiting" and
-  "Pausing an EID" for the calldata.
-- Monitor cumulative outbound flow per EID off-chain. The on-chain
-  `RateLimiter` only bounds a single window; sustained attack traffic
-  can still drain over several windows. Tighten or reset limits if
-  cumulative flow looks anomalous.
-- Coordinate with the ON token issuer on both chains before any pause /
-  upgrade / blacklist change.
-- Monitor for inbound sends addressed to `address(0)` or to the bridge
-  contracts themselves — see M4.
+C-1, H-2/H-3/H-4, and H-5 were independently identified by multiple reviewers — treat as highest confidence.

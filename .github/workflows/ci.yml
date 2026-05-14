@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  FOUNDRY_PROFILE: ci
+
+jobs:
+  test:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Show forge version
+        run: forge --version
+
+      - name: Patch vendored pragmas (0.8.24 -> ^0.8.24)
+        run: make patch-pragmas
+
+      - name: Forge build (sizes)
+        run: forge build --sizes
+
+      - name: Forge fmt check
+        run: forge fmt --check
+
+      - name: Forge test
+        run: forge test -vvv
+
+      - name: Forge coverage summary
+        run: forge coverage --report summary
+        continue-on-error: true
+
+  slither:
+    name: Slither static analysis
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Install Slither
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install slither-analyzer
+
+      - name: Patch vendored pragmas (0.8.24 -> ^0.8.24)
+        run: make patch-pragmas
+
+      - name: Run Slither
+        run: slither src/ --filter-paths "lib/" --exclude-dependencies
