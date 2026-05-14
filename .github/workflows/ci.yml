@@ -65,5 +65,9 @@ jobs:
       - name: Patch vendored pragmas (0.8.24 -> ^0.8.24)
         run: make patch-pragmas
 
+      # `naming-convention` is excluded because slither treats immutables as regular state
+      # variables and flags our deliberate `IERC20 public immutable ON` for not being mixedCase.
+      # The Solidity style guide allows UPPER_CASE for immutables that reference a constant
+      # external address.
       - name: Run Slither
-        run: slither src/ --filter-paths "lib/" --exclude-dependencies
+        run: slither src/ --filter-paths "lib/" --exclude-dependencies --exclude naming-convention
