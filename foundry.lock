@@ -1,8 +1,8 @@
 {
   "lib/ccip": {
-    "branch": {
-      "name": "ccip-develop",
-      "rev": "171f9f0cf249765116e3131b61f5b4157566f25f"
+    "tag": {
+      "name": "v2.17.0-ccip1.5.16",
+      "rev": "ae80e255dbe38e0f2536d5a36b0990a7b4d9a0d2"
     }
   },
   "lib/chainlink-local": {

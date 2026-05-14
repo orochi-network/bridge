@@ -28,13 +28,11 @@ contract ApplyChainUpdates is Script, Helper {
         address remotePool = Deployments.readAddress(_remoteChainId(block.chainid), "pool");
         address remoteToken = _remoteTokenAddress(block.chainid, remote);
 
-        bytes[] memory remotePoolAddresses = new bytes[](1);
-        remotePoolAddresses[0] = abi.encode(remotePool);
-
         TokenPool.ChainUpdate[] memory updates = new TokenPool.ChainUpdate[](1);
         updates[0] = TokenPool.ChainUpdate({
             remoteChainSelector: remote.chainSelector,
-            remotePoolAddresses: remotePoolAddresses,
+            allowed: true,
+            remotePoolAddress: abi.encode(remotePool),
             remoteTokenAddress: abi.encode(remoteToken),
             outboundRateLimiterConfig: RateLimiter.Config({
                 isEnabled: true, capacity: DEFAULT_CAPACITY, rate: DEFAULT_RATE
@@ -45,7 +43,7 @@ contract ApplyChainUpdates is Script, Helper {
         });
 
         vm.startBroadcast();
-        TokenPool(localPool).applyChainUpdates(new uint64[](0), updates);
+        TokenPool(localPool).applyChainUpdates(updates);
         vm.stopBroadcast();
 
         console.log("Linked pool %s (selector %d) -> remote pool %s", localPool, local.chainSelector, remotePool);

@@ -66,21 +66,20 @@ contract Fork_BSC is Test {
 
         // Deploy BSC pool. acceptLiquidity=false keeps withdrawLiquidity permanently disabled.
         vm.prank(deployer);
-        bscPool = new LockReleaseTokenPool(ICCIP_IERC20(ON_BSC), 18, new address[](0), BSC_RMN, false, BSC_ROUTER);
+        bscPool = new LockReleaseTokenPool(ICCIP_IERC20(ON_BSC), new address[](0), BSC_RMN, false, BSC_ROUTER);
 
         // Wire to ETH (placeholder remote pool address; filled by script 05 at deploy time).
-        bytes[] memory remotePool = new bytes[](1);
-        remotePool[0] = abi.encode(fakeRemoteEthPool);
         TokenPool.ChainUpdate[] memory updates = new TokenPool.ChainUpdate[](1);
         updates[0] = TokenPool.ChainUpdate({
             remoteChainSelector: ETH_SELECTOR,
-            remotePoolAddresses: remotePool,
+            allowed: true,
+            remotePoolAddress: abi.encode(fakeRemoteEthPool),
             remoteTokenAddress: abi.encode(ON_ETH_WON),
             outboundRateLimiterConfig: RateLimiter.Config({isEnabled: true, capacity: 100_000 ether, rate: 10 ether}),
             inboundRateLimiterConfig: RateLimiter.Config({isEnabled: true, capacity: 100_000 ether, rate: 10 ether})
         });
         vm.prank(deployer);
-        bscPool.applyChainUpdates(new uint64[](0), updates);
+        bscPool.applyChainUpdates(updates);
     }
 
     // ─── ON token ownership model (resolves the "known open item" in CLAUDE.md) ──
@@ -119,9 +118,7 @@ contract Fork_BSC is Test {
         assertEq(bscPool.getRmnProxy(), BSC_RMN);
         assertTrue(bscPool.isSupportedChain(ETH_SELECTOR));
 
-        bytes[] memory remotes = bscPool.getRemotePools(ETH_SELECTOR);
-        assertEq(remotes.length, 1);
-        assertEq(abi.decode(remotes[0], (address)), fakeRemoteEthPool);
+        assertEq(abi.decode(bscPool.getRemotePool(ETH_SELECTOR), (address)), fakeRemoteEthPool);
 
         assertFalse(bscPool.canAcceptLiquidity(), "withdrawLiquidity must be permanently disabled");
         assertTrue(bscPool.getCurrentOutboundRateLimiterState(ETH_SELECTOR).isEnabled);

@@ -77,9 +77,8 @@ contract PoolRoundtripTest is Test {
         MockON onEth = new MockON("ON", 0, address(0xdead));
         vm.prank(admin);
         won = new WrappedON(IERC20(address(onEth)), admin);
-        ethPool = new BurnMintTokenPool(
-            IBurnMintERC20(address(won)), 18, new address[](0), address(ethRmn), address(ethRouter)
-        );
+        ethPool =
+            new BurnMintTokenPool(IBurnMintERC20(address(won)), new address[](0), address(ethRmn), address(ethRouter));
 
         // Pool gets MINTER+BURNER on wON.
         vm.startPrank(admin);
@@ -89,7 +88,7 @@ contract PoolRoundtripTest is Test {
 
         // ── BSC side deploy ─────────────────────────────────────────────────
         bscPool = new LockReleaseTokenPool(
-            ICCIP_IERC20(address(onBsc)), 18, new address[](0), address(bscRmn), false, address(bscRouter)
+            ICCIP_IERC20(address(onBsc)), new address[](0), address(bscRmn), false, address(bscRouter)
         );
 
         // ── Wire routers (the only ramps we recognise are our test fixtures) ─
@@ -100,28 +99,26 @@ contract PoolRoundtripTest is Test {
 
         // ── Wire pools to each other with rate limits ───────────────────────
         TokenPool.ChainUpdate[] memory ethToBsc = new TokenPool.ChainUpdate[](1);
-        bytes[] memory bscPoolAddr = new bytes[](1);
-        bscPoolAddr[0] = abi.encode(address(bscPool));
         ethToBsc[0] = TokenPool.ChainUpdate({
             remoteChainSelector: BSC_SELECTOR,
-            remotePoolAddresses: bscPoolAddr,
+            allowed: true,
+            remotePoolAddress: abi.encode(address(bscPool)),
             remoteTokenAddress: abi.encode(address(onBsc)),
             outboundRateLimiterConfig: _limit(100_000 ether, 10 ether),
             inboundRateLimiterConfig: _limit(100_000 ether, 10 ether)
         });
-        ethPool.applyChainUpdates(new uint64[](0), ethToBsc);
+        ethPool.applyChainUpdates(ethToBsc);
 
         TokenPool.ChainUpdate[] memory bscToEth = new TokenPool.ChainUpdate[](1);
-        bytes[] memory ethPoolAddr = new bytes[](1);
-        ethPoolAddr[0] = abi.encode(address(ethPool));
         bscToEth[0] = TokenPool.ChainUpdate({
             remoteChainSelector: ETH_SELECTOR,
-            remotePoolAddresses: ethPoolAddr,
+            allowed: true,
+            remotePoolAddress: abi.encode(address(ethPool)),
             remoteTokenAddress: abi.encode(address(won)),
             outboundRateLimiterConfig: _limit(100_000 ether, 10 ether),
             inboundRateLimiterConfig: _limit(100_000 ether, 10 ether)
         });
-        bscPool.applyChainUpdates(new uint64[](0), bscToEth);
+        bscPool.applyChainUpdates(bscToEth);
     }
 
     function _limit(uint128 capacity, uint128 rate) internal pure returns (RateLimiter.Config memory) {

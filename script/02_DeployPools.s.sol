@@ -22,8 +22,7 @@ contract DeployPools is Script, Helper {
         if (block.chainid == 1 || block.chainid == 11_155_111) {
             address won = Deployments.readAddress(block.chainid, "wrappedON");
             vm.startBroadcast();
-            BurnMintTokenPool p =
-                new BurnMintTokenPool(IBurnMintERC20(won), 18, new address[](0), cfg.rmnProxy, cfg.router);
+            BurnMintTokenPool p = new BurnMintTokenPool(IBurnMintERC20(won), new address[](0), cfg.rmnProxy, cfg.router);
             vm.stopBroadcast();
             pool = address(p);
             console.log("BurnMintTokenPool:", pool);
@@ -32,7 +31,6 @@ contract DeployPools is Script, Helper {
             vm.startBroadcast();
             LockReleaseTokenPool p = new LockReleaseTokenPool(
                 IERC20(cfg.onToken),
-                18,
                 new address[](0),
                 cfg.rmnProxy,
                 false, // acceptLiquidity = false: withdrawLiquidity is permanently disabled (footgun removed)

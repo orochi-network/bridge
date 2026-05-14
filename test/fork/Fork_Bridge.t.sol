@@ -78,7 +78,7 @@ contract Fork_Bridge is Test {
         vm.selectFork(ethFork);
         vm.startPrank(deployer);
         won = new WrappedON(IERC20(ON_ETH), deployer);
-        ethPool = new BurnMintTokenPool(IBurnMintERC20(address(won)), 18, new address[](0), ETH_RMN, ETH_ROUTER);
+        ethPool = new BurnMintTokenPool(IBurnMintERC20(address(won)), new address[](0), ETH_RMN, ETH_ROUTER);
         won.grantRole(won.MINTER_ROLE(), address(ethPool));
         won.grantRole(won.BURNER_ROLE(), address(ethPool));
         vm.stopPrank();
@@ -86,40 +86,38 @@ contract Fork_Bridge is Test {
         // ── Deploy on BSC ────────────────────────────────────────────────────────
         vm.selectFork(bscFork);
         vm.prank(deployer);
-        bscPool = new LockReleaseTokenPool(ICCIP_IERC20(ON_BSC), 18, new address[](0), BSC_RMN, false, BSC_ROUTER);
+        bscPool = new LockReleaseTokenPool(ICCIP_IERC20(ON_BSC), new address[](0), BSC_RMN, false, BSC_ROUTER);
 
         // ── Wire ETH pool → BSC (now that bscPool address is known) ─────────────
         vm.selectFork(ethFork);
         {
-            bytes[] memory bscRemote = new bytes[](1);
-            bscRemote[0] = abi.encode(address(bscPool));
             TokenPool.ChainUpdate[] memory up = new TokenPool.ChainUpdate[](1);
             up[0] = TokenPool.ChainUpdate({
                 remoteChainSelector: BSC_SELECTOR,
-                remotePoolAddresses: bscRemote,
+                allowed: true,
+                remotePoolAddress: abi.encode(address(bscPool)),
                 remoteTokenAddress: abi.encode(ON_BSC),
                 outboundRateLimiterConfig: _limit(),
                 inboundRateLimiterConfig: _limit()
             });
             vm.prank(deployer);
-            ethPool.applyChainUpdates(new uint64[](0), up);
+            ethPool.applyChainUpdates(up);
         }
 
         // ── Wire BSC pool → ETH (now that ethPool address is known) ─────────────
         vm.selectFork(bscFork);
         {
-            bytes[] memory ethRemote = new bytes[](1);
-            ethRemote[0] = abi.encode(address(ethPool));
             TokenPool.ChainUpdate[] memory up = new TokenPool.ChainUpdate[](1);
             up[0] = TokenPool.ChainUpdate({
                 remoteChainSelector: ETH_SELECTOR,
-                remotePoolAddresses: ethRemote,
+                allowed: true,
+                remotePoolAddress: abi.encode(address(ethPool)),
                 remoteTokenAddress: abi.encode(address(won)),
                 outboundRateLimiterConfig: _limit(),
                 inboundRateLimiterConfig: _limit()
             });
             vm.prank(deployer);
-            bscPool.applyChainUpdates(new uint64[](0), up);
+            bscPool.applyChainUpdates(up);
         }
     }
 

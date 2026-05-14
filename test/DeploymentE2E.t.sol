@@ -111,14 +111,12 @@ contract DeploymentE2ETest is Test {
     /// @dev Mirrors `script/02_DeployPools.s.sol` for both chains.
     function _run02_deployPools() internal {
         vm.prank(deployer);
-        ethPool = new BurnMintTokenPool(
-            IBurnMintERC20(address(won)), 18, new address[](0), address(ethRmn), address(ethRouter)
-        );
+        ethPool =
+            new BurnMintTokenPool(IBurnMintERC20(address(won)), new address[](0), address(ethRmn), address(ethRouter));
 
         vm.prank(bscTokenOwner);
         bscPool = new LockReleaseTokenPool(
             CCIP_IERC20(address(onBsc)),
-            18,
             new address[](0),
             address(bscRmn),
             false, // acceptLiquidity disabled
@@ -156,31 +154,29 @@ contract DeploymentE2ETest is Test {
 
     /// @dev Mirrors `script/05_ApplyChainUpdates.s.sol` for both chains.
     function _run05_applyChainUpdates() internal {
-        bytes[] memory bscRemote = new bytes[](1);
-        bscRemote[0] = abi.encode(address(bscPool));
         TokenPool.ChainUpdate[] memory ethToBsc = new TokenPool.ChainUpdate[](1);
         ethToBsc[0] = TokenPool.ChainUpdate({
             remoteChainSelector: BSC_SELECTOR,
-            remotePoolAddresses: bscRemote,
+            allowed: true,
+            remotePoolAddress: abi.encode(address(bscPool)),
             remoteTokenAddress: abi.encode(address(onBsc)),
             outboundRateLimiterConfig: _limit(),
             inboundRateLimiterConfig: _limit()
         });
         vm.prank(deployer);
-        ethPool.applyChainUpdates(new uint64[](0), ethToBsc);
+        ethPool.applyChainUpdates(ethToBsc);
 
-        bytes[] memory ethRemote = new bytes[](1);
-        ethRemote[0] = abi.encode(address(ethPool));
         TokenPool.ChainUpdate[] memory bscToEth = new TokenPool.ChainUpdate[](1);
         bscToEth[0] = TokenPool.ChainUpdate({
             remoteChainSelector: ETH_SELECTOR,
-            remotePoolAddresses: ethRemote,
+            allowed: true,
+            remotePoolAddress: abi.encode(address(ethPool)),
             remoteTokenAddress: abi.encode(address(won)),
             outboundRateLimiterConfig: _limit(),
             inboundRateLimiterConfig: _limit()
         });
         vm.prank(bscTokenOwner);
-        bscPool.applyChainUpdates(new uint64[](0), bscToEth);
+        bscPool.applyChainUpdates(bscToEth);
     }
 
     function _limit() internal pure returns (RateLimiter.Config memory) {
@@ -204,13 +200,8 @@ contract DeploymentE2ETest is Test {
         assertTrue(ethPool.isSupportedChain(BSC_SELECTOR));
         assertTrue(bscPool.isSupportedChain(ETH_SELECTOR));
 
-        bytes[] memory ethRemotePools = ethPool.getRemotePools(BSC_SELECTOR);
-        assertEq(ethRemotePools.length, 1);
-        assertEq(abi.decode(ethRemotePools[0], (address)), address(bscPool));
-
-        bytes[] memory bscRemotePools = bscPool.getRemotePools(ETH_SELECTOR);
-        assertEq(bscRemotePools.length, 1);
-        assertEq(abi.decode(bscRemotePools[0], (address)), address(ethPool));
+        assertEq(abi.decode(ethPool.getRemotePool(BSC_SELECTOR), (address)), address(bscPool));
+        assertEq(abi.decode(bscPool.getRemotePool(ETH_SELECTOR), (address)), address(ethPool));
 
         assertEq(abi.decode(ethPool.getRemoteToken(BSC_SELECTOR), (address)), address(onBsc));
         assertEq(abi.decode(bscPool.getRemoteToken(ETH_SELECTOR), (address)), address(won));

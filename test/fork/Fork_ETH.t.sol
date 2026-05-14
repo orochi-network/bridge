@@ -63,7 +63,7 @@ contract Fork_ETH is Test {
 
         vm.startPrank(deployer);
         won = new WrappedON(IERC20(ON_ETH), deployer);
-        ethPool = new BurnMintTokenPool(IBurnMintERC20(address(won)), 18, new address[](0), ETH_RMN, ETH_ROUTER);
+        ethPool = new BurnMintTokenPool(IBurnMintERC20(address(won)), new address[](0), ETH_RMN, ETH_ROUTER);
         won.grantRole(won.MINTER_ROLE(), address(ethPool));
         won.grantRole(won.BURNER_ROLE(), address(ethPool));
 
@@ -74,17 +74,16 @@ contract Fork_ETH is Test {
 
         // Wire ETH pool to BSC. Uses a placeholder remote pool address because the real BSC pool
         // is not deployed here; the address is filled in at actual deploy time via script 05.
-        bytes[] memory remotePool = new bytes[](1);
-        remotePool[0] = abi.encode(fakeRemoteBscPool);
         TokenPool.ChainUpdate[] memory updates = new TokenPool.ChainUpdate[](1);
         updates[0] = TokenPool.ChainUpdate({
             remoteChainSelector: BSC_SELECTOR,
-            remotePoolAddresses: remotePool,
+            allowed: true,
+            remotePoolAddress: abi.encode(fakeRemoteBscPool),
             remoteTokenAddress: abi.encode(ON_BSC),
             outboundRateLimiterConfig: RateLimiter.Config({isEnabled: true, capacity: 100_000 ether, rate: 10 ether}),
             inboundRateLimiterConfig: RateLimiter.Config({isEnabled: true, capacity: 100_000 ether, rate: 10 ether})
         });
-        ethPool.applyChainUpdates(new uint64[](0), updates);
+        ethPool.applyChainUpdates(updates);
         vm.stopPrank();
     }
 
@@ -106,9 +105,7 @@ contract Fork_ETH is Test {
         assertEq(ethPool.getRmnProxy(), ETH_RMN);
         assertTrue(ethPool.isSupportedChain(BSC_SELECTOR));
 
-        bytes[] memory remotes = ethPool.getRemotePools(BSC_SELECTOR);
-        assertEq(remotes.length, 1);
-        assertEq(abi.decode(remotes[0], (address)), fakeRemoteBscPool);
+        assertEq(abi.decode(ethPool.getRemotePool(BSC_SELECTOR), (address)), fakeRemoteBscPool);
 
         assertTrue(ethPool.getCurrentOutboundRateLimiterState(BSC_SELECTOR).isEnabled);
         assertTrue(ethPool.getCurrentInboundRateLimiterState(BSC_SELECTOR).isEnabled);

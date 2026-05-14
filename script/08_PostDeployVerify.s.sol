@@ -91,15 +91,9 @@ contract PostDeployVerify is Script, Helper {
             revert RemoteChainNotSupported(remoteSelector);
         }
 
-        bytes[] memory remotePools = TokenPool(pool).getRemotePools(remoteSelector);
-        bool found;
-        for (uint256 i = 0; i < remotePools.length; ++i) {
-            if (abi.decode(remotePools[i], (address)) == expectedRemotePool) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) revert RemotePoolNotLinked(remoteSelector, expectedRemotePool);
+        bytes memory remotePoolBytes = TokenPool(pool).getRemotePool(remoteSelector);
+        address remotePool = abi.decode(remotePoolBytes, (address));
+        if (remotePool != expectedRemotePool) revert RemotePoolNotLinked(remoteSelector, expectedRemotePool);
 
         bytes memory remoteTokenBytes = TokenPool(pool).getRemoteToken(remoteSelector);
         address remoteToken = abi.decode(remoteTokenBytes, (address));
@@ -108,7 +102,7 @@ contract PostDeployVerify is Script, Helper {
         }
 
         console.log("[ok] pool.isSupportedChain(%d) == true", remoteSelector);
-        console.log("[ok] pool.getRemotePools(%d) contains %s", remoteSelector, expectedRemotePool);
+        console.log("[ok] pool.getRemotePool(%d) == %s", remoteSelector, expectedRemotePool);
         console.log("[ok] pool.getRemoteToken(%d) == %s", remoteSelector, expectedRemoteToken);
     }
 
