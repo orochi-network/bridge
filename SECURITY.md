@@ -1,293 +1,246 @@
 # SECURITY.md — Orochi Network ON Bridge
 
 Findings from a five-agent security review of the Chainlink CCIP CCT bridge for the
-Orochi Network ON token (Ethereum Mainnet ⇄ BNB Smart Chain).
+Orochi Network ON token (Ethereum Mainnet ⇄ BNB Smart Chain), with the disposition of
+each finding tracked inline.
 
 **Scope:** `src/WrappedON.sol`, `script/01–08`, `script/Helper.sol`, `script/Deployments.sol`,
 `test/**`, plus integration with vendored Chainlink CCIP contracts in `lib/ccip/`.
 
-Findings are grouped by severity. Each entry: file:line — issue — impact — fix.
+**Reviewed against:** `lib/ccip @ v2.17.0-ccip1.5.16` (production CCIP 1.5.x ABI).
+
+Each entry: file:line — issue — impact — fix — **Status**.
 
 ---
 
 ## Critical (mainnet-blocking)
 
 ### C-1. `acceptLiquidity = false` does NOT disable `withdrawLiquidity` on the BSC pool
-- **Where:** `lib/ccip/contracts/src/v0.8/ccip/pools/LockReleaseTokenPool.sol:122-130`;
-  documentation comment in `script/02_DeployPools.s.sol:38`; CLAUDE.md.
-- **Issue:** `i_acceptLiquidity` only gates `provideLiquidity`. `withdrawLiquidity` requires
-  only `msg.sender == s_rebalancer`, and `setRebalancer` is `onlyOwner`. The project
-  documentation claims this is "permanently disabled (footgun removed)" — that is **wrong**.
+- **Where:** `lib/ccip/contracts/src/v0.8/ccip/pools/LockReleaseTokenPool.sol:97-115`;
+  documentation comment in `script/02_DeployPools.s.sol`; CLAUDE.md.
+- **Issue:** `i_acceptLiquidity` only gates `provideLiquidity`. `withdrawLiquidity` and
+  `transferLiquidity` require only `msg.sender == s_rebalancer`, and `setRebalancer` is
+  `onlyOwner`. An earlier project comment claimed `withdrawLiquidity` was "permanently
+  disabled" — that was **wrong**.
 - **Impact:** After ownership handoff, the BSC multisig can call
   `setRebalancer(multisig); withdrawLiquidity(100M)` and drain every locked ON token,
   leaving all CCIP-minted wON on Ethereum unbackable.
-- **Fix:** Choose one:
-  1. Deploy a thin subclass of `LockReleaseTokenPool` that reverts `setRebalancer`,
-     `withdrawLiquidity`, and `transferLiquidity`. This contradicts the "no subclassing"
-     rule in `CLAUDE.md` — explicitly justify the exception.
-  2. Update `CLAUDE.md` and the script comment to honestly describe the trust model:
-     "The BSC multisig has full custody of the locked-ON reserve via the rebalancer hook."
+- **Status: ACCEPTED (Chainlink CCT trust model).** This is the documented Chainlink
+  pattern for `LockReleaseTokenPool` — the operator multisig is intended to manage
+  reserve liquidity via the rebalancer. Subclassing to neuter `setRebalancer` /
+  `withdrawLiquidity` / `transferLiquidity` was considered and rejected as a deviation
+  from the audited Chainlink template.
+- **Mitigations applied:**
+  - Comment in `script/02_DeployPools.s.sol` rewritten to honestly describe the trust
+    model (no more "footgun removed" claim).
+  - CLAUDE.md "Trust model: BSC reserve custody" section calls this out explicitly.
+  - RUNBOOK.md monitoring step: alert on every BSC-pool `LiquidityRemoved`,
+    `LiquidityAdded`, `OwnerUpdate`, and any call to `setRebalancer`.
 
-### C-2. `Deployments.writeAddress` silently destroys prior JSON entries
-- **Where:** `script/Deployments.sol:25-29`.
-- **Issue:** `vm.serializeAddress("deployments", key, value)` re-builds the serialization
-  object from scratch each forge process. The first call writes `{"wrappedON": "0x…"}`.
-  The next call (`pool`) starts with an empty in-memory object, produces
-  `{"pool": "0x…"}`, and `vm.writeJson` overwrites the file — erasing `wrappedON`.
-- **Impact:** Downstream scripts (04, 05, 06, 08) read `wrappedON` and get `address(0)`
-  or a parse error. Live deployments can silently configure the system against the
-  wrong addresses if the operator doesn't notice.
-- **Fix:** Use the three-argument `vm.writeJson` overload that writes a single key at a
-  JSON path without touching the rest of the object:
-  ```solidity
-  vm.writeJson(vm.toString(value), file, string.concat(".", key));
-  ```
+### C-2. `Deployments.writeAddress` silently destroyed prior JSON entries
+- **Where:** `script/Deployments.sol:25-29` (pre-fix).
+- **Issue:** `vm.serializeAddress("deployments", key, value)` re-built the serialization
+  object from scratch on each forge process. The first call wrote `{"wrappedON": "0x…"}`;
+  the next call (`pool`) started with an empty in-memory object, produced
+  `{"pool": "0x…"}`, and `vm.writeJson` overwrote the file — erasing `wrappedON`.
+- **Status: FIXED.** `script/Deployments.sol` now uses the 3-arg `vm.writeJson(value,
+  file, "$.key")` overload that patches a single JSON path without touching the rest of
+  the object. The file is initialized to `{}` on first write so the path target exists.
 
 ### C-3. No global supply cap on wON
 - **Where:** `src/WrappedON.sol`.
-- **Issue:** wON has two independent mint paths (`deposit`-backed and CCIP-`mint`)
-  with no enforced ceiling. The implicit safety invariant
-  `lockedON_BSC + reserveON_ETH ≥ totalSupply(wON)` is not encoded.
-- **Impact:** A holder can wrap >100M ETH-side ON (canonical max on BSC is 100M),
-  bridge 100M wON to BSC, and the BSC pool — which can lock at most 100M — cannot
-  service further redemptions from that direction. Combined with C-1, this becomes a
-  fund-loss path.
-- **Fix:** Enforce a hard cap in `mint`/`deposit`, e.g. `totalSupply() + amount <= 600M`
-  matching the canonical ON supply on Ethereum.
+- **Issue:** wON had two independent mint paths (`deposit`-backed and CCIP-`mint`) with
+  no enforced ceiling. The implicit safety invariant `lockedON_BSC + reserveON_ETH ≥
+  totalSupply(wON)` was not encoded.
+- **Status: FIXED.** Hard cap `MAX_SUPPLY = 100_000_000 ether` enforced via a single
+  `_mintCapped` helper that both `deposit` and `mint` route through. Reverts
+  `SupplyCapExceeded(cap, wouldBe)`. 100M = canonical ON supply on BSC = the absolute
+  upper bound on what the bridge can ever reflect onto Ethereum.
 
 ---
 
 ## High
 
-### H-1. `RenounceDeployerAdmin` doesn't verify the multisig holds `DEFAULT_ADMIN_ROLE`
-- **Where:** `script/06_TransferOwnership.s.sol:96-97`.
-- **Issue:** The only pre-renounce guard is that the deployer itself still has the role,
-  plus a meaningless slot-0 sanity probe. If the multisig grant failed silently or the
-  `MULTISIG` env var was wrong, the contract is left admin-less and permanently
-  unmanageable (no upgrades by design).
-- **Fix:** Before `renounceRole`, require:
-  ```solidity
-  address multisig = vm.envAddress("MULTISIG");
-  require(won.hasRole(adminRole, multisig), "multisig does not hold admin role");
-  ```
+### H-1. `RenounceDeployerAdmin` didn't verify the multisig holds `DEFAULT_ADMIN_ROLE`
+- **Where:** `script/06_TransferOwnership.s.sol` (`RenounceDeployerAdmin`).
+- **Status: FIXED.** Before `renounceRole` the script now requires:
+  1. `vm.envAddress("MULTISIG")` is set and non-zero.
+  2. `won.hasRole(adminRole, deployer)` (deployer still has it).
+  3. `won.hasRole(adminRole, multisig)` (multisig has accepted it).
+  4. `won.getCCIPAdmin() == multisig` (multisig also accepted the 2-step ccipAdmin).
+  Plus a post-renounce assertion that the role was actually revoked.
 
 ### H-2. Deployer retains mint authority during the handoff window
 - **Where:** `script/06_TransferOwnership.s.sol`.
-- **Issue:** Between `TransferOwnership` (grants multisig the admin role) and
-  `RenounceDeployerAdmin` (deployer renounces), the deployer EOA still holds
-  `DEFAULT_ADMIN_ROLE` and can `grantRole(MINTER_ROLE, attacker)` to mint unlimited
-  wON. The window is operator-controlled and unbounded.
-- **Fix:** Batch grant + multisig accept + deployer renounce within the same
-  operational window. Monitor `RoleGranted(MINTER_ROLE, *)` and
-  `RoleGranted(BURNER_ROLE, *)` events during the window and alert on anything
-  granted to anyone other than the BurnMintTokenPool address.
+- **Status: ACCEPTED (operational mitigation).** The two-step grant → multisig accept →
+  deployer renounce window is operator-controlled and unbounded. Mitigations:
+  - RUNBOOK.md prescribes back-to-back execution and event monitoring on
+    `RoleGranted(MINTER_ROLE, *)` / `RoleGranted(BURNER_ROLE, *)` during the window.
+  - `script/08_PostDeployVerify.s.sol` `_checkDeployerRenounced` flags the case where
+    handoff is incomplete (M-3 fix).
 
 ### H-3. Missing `_requireSet` guards on critical infrastructure addresses
-- **Where:**
-  - `script/02_DeployPools.s.sol:25-27` — `cfg.rmnProxy`, `cfg.router` (ETH path)
-  - `script/04_RegisterAdminAndPool.s.sol:44-47` — `cfg.registryModuleOwnerCustom`,
-    `cfg.tokenAdminRegistry`
-  - `script/05_ApplyChainUpdates.s.sol:27-48` — `localPool`, `remotePool`, `remoteToken`;
-    note `abi.encode(address(0))` for `remotePool` bypasses the `length == 0` check
-    in `applyChainUpdates`.
-  - `script/07_UpdateRateLimits.s.sol:27` — `localPool`
-- **Issue:** Contradicts CLAUDE.md's promise that "scripts call `_requireSet` on every
-  address they consume, so a stale Helper fails fast with a `MissingAddress` revert."
-- **Impact:** Stale Helper configurations produce confusing `ZeroAddressNotAllowed`
-  reverts deep in the call (or, for the encoded zero address, silent acceptance of an
-  invalid remote pool wiring).
-- **Fix:** Add `_requireSet` for every consumed address before `vm.startBroadcast()`.
+- **Status: FIXED.** Added guards across:
+  - `script/02_DeployPools.s.sol`: `cfg.router`, `cfg.rmnProxy`, and (ETH path)
+    the `wrappedON` address from `Deployments`.
+  - `script/04_RegisterAdminAndPool.s.sol`: `cfg.registryModuleOwnerCustom`,
+    `cfg.tokenAdminRegistry`, `token`, `pool`.
+  - `script/05_ApplyChainUpdates.s.sol`: `localPool`, `remotePool`, `remoteToken`.
+  - `script/07_UpdateRateLimits.s.sol`: `localPool`.
+  Stale Helper configurations now fail fast with a clear `MissingAddress(<what>)` revert.
 
 ### H-4. Cross-chain front-running of `proposeAdministrator` on BSC ON token
 - **Where:** `script/04_RegisterAdminAndPool.s.sol`.
-- **Issue:** When the BSC ON token exposes neither `getCCIPAdmin` nor `Ownable.owner`,
-  the script reverts and asks the token owner to call `proposeAdministrator` manually.
-  No post-registration assertion checks that
-  `TokenAdminRegistry.getPool(token) == ourPool` before script 05 broadcasts. If the
-  BSC ON token has `getCCIPAdmin()` returning an attacker-controlled address, the
-  attacker registers as admin and points the registry at a hostile pool.
-- **Fix:** Resolve the BSC ON CCIP-admin path on a private fork **before** mainnet
-  broadcast. Add a post-registration assertion in script 05 that the registry's
-  administrator and pool match what we expect.
+- **Status: PARTIAL FIX + OPERATIONAL.**
+  - **Fixed in code:** added a post-registration assertion in script 04 that
+    `TokenAdminRegistry.getPool(token) == ourPool` immediately after `setPool`. If a
+    front-runner registered a hostile pool first, `setPool` will revert (caller is not
+    the registered admin) and our assertion catches any partial state.
+  - **Operational:** the BSC ON token's admin path must be resolved on a private fork
+    BEFORE mainnet broadcast (see Known-open-items in CLAUDE.md). If the canonical ON
+    on BSC implements `getCCIPAdmin`, that admin should be a trusted address ahead of
+    deployment; if it does not, the token owner pre-calls `proposeAdministrator`.
 
 ### H-5. `make handoff` is single-chain — no enforcement that BOTH chains were handed off
-- **Where:** `Makefile:94-99`; `RUNBOOK.md` §3.1.
-- **Issue:** The Makefile target takes a single `RPC=` and broadcasts against one chain.
-  An operator who forgets the second chain leaves the deployer EOA as `Ownable` owner
-  on that side, with full `applyChainUpdates` / `setChainRateLimiterConfig` authority.
-- **Fix:** Add a `handoff-all` target that requires both `ETH_RPC` and `BSC_RPC` and
-  runs both broadcasts in sequence with the same `MULTISIG`.
+- **Status: FIXED.** New `make handoff-all ETH_RPC=… BSC_RPC=… MULTISIG=…` target runs
+  the handoff sequentially against both chains with the same MULTISIG. Single-chain
+  `make handoff` is retained for ops convenience but the runbook now references the
+  multi-chain target. Renounce remains single-chain (wON only exists on ETH).
 
-### H-6. `_checkOwnershipHandoff` ignores `pendingOwner()`
-- **Where:** `script/08_PostDeployVerify.s.sol:133-140`.
-- **Issue:** Between `transferOwnership` and the multisig's `acceptOwnership`, the
-  script logs `[ok]` if `owner == multisig` but doesn't flag the in-flight pending
-  state. The verification can pass even when ownership transfer was never accepted.
-- **Fix:** Also probe `pendingOwner()` and distinguish "active" vs "pending":
-  ```solidity
-  if (owner == multisig) { console.log("[ok] pool.owner() == multisig"); return; }
-  (bool ok2, bytes memory d2) =
-      pool.staticcall(abi.encodeWithSignature("pendingOwner()"));
-  address pending = (ok2 && d2.length == 32) ? abi.decode(d2, (address)) : address(0);
-  require(pending == multisig, "neither owner nor pendingOwner is multisig");
-  ```
+### H-6. `_checkOwnershipHandoff` ignored `pendingOwner()`
+- **Where:** `script/08_PostDeployVerify.s.sol`.
+- **Status: FIXED.** The verifier now distinguishes three states explicitly:
+  1. `owner == multisig`: `[ok]` (active).
+  2. `pendingOwner == multisig`: reverts `PoolOwnershipPending` (acceptance needed).
+  3. Neither: reverts `PoolOwnershipNotHandedOff`.
 
 ---
 
 ## Medium
 
-### M-1. Script 04 misses the third registration path (`registerAccessControlDefaultAdmin`)
-- **Where:** `script/04_RegisterAdminAndPool.s.sol:56-75`.
-- **Issue:** The vendored `RegistryModuleOwnerCustom` 1.6 exposes a third registration
-  path — for tokens that use OZ `AccessControl.DEFAULT_ADMIN_ROLE`. The script probes
-  only `getCCIPAdmin` and `Ownable.owner` before reverting with
-  `CannotResolveCCIPAdmin`. BSC-deployed tokens commonly use OZ `AccessControl`.
-- **Fix:** Add a probe leg before the revert:
-  ```solidity
-  try AccessControl(token).hasRole(0x00, broadcaster) returns (bool has) {
-      if (has) { module.registerAccessControlDefaultAdmin(token); return; }
-  } catch { }
-  ```
+### M-1. Script 04 missed the third registration path (`registerAccessControlDefaultAdmin`)
+- **Status: FIXED.** Script 04 now probes a third branch
+  (`AccessControl.hasRole(0x00, broadcaster)`) before the manual-fallback revert. The
+  vendored `RegistryModuleOwnerCustom` is at v1.5.0 in our submodule, but the live
+  registry on Ethereum + BSC mainnet is at v1.6.0 and exposes this selector, so the
+  call goes via a local `IRegistryModuleOwnerCustom16` interface.
 
 ### M-2. `burn(address, uint256)` bypasses allowance (intentional but undocumented)
-- **Where:** `src/WrappedON.sol:89-91`.
-- **Issue:** The `burn(address, uint256)` overload calls `_burn` directly with no
-  allowance check. Any holder of `BURNER_ROLE` can burn arbitrary balances. This
-  matches `IBurnMintERC20` semantics but is dangerous if `BURNER_ROLE` ever leaks
-  outside the audited pool.
-- **Fix:** Add a `@dev` NatSpec line stating "Does NOT check allowance — `BURNER_ROLE`
-  must be held exclusively by the audited `BurnMintTokenPool`." Enforce in the
-  operations runbook and verification script.
+- **Where:** `src/WrappedON.sol`.
+- **Status: FIXED (documentation).** NatSpec on `burn(address,uint256)` now explicitly
+  states it bypasses allowance and is gated solely on `BURNER_ROLE`, which must be
+  held exclusively by the audited `BurnMintTokenPool`. RUNBOOK.md monitoring step:
+  alert on any `RoleGranted(BURNER_ROLE, *)` whose grantee is not the pool address.
 
-### M-3. Script 08 doesn't verify deployer renounced `DEFAULT_ADMIN_ROLE`
-- **Where:** `script/08_PostDeployVerify.s.sol:125-131`.
-- **Issue:** `_checkWonRoles` confirms the pool has `MINTER_ROLE` and `BURNER_ROLE` but
-  never checks `!won.hasRole(DEFAULT_ADMIN_ROLE, deployer)`. The most security-critical
-  post-condition has no programmatic check.
-- **Fix:** Add a `_checkDeployerRenounced(deployer, multisig)` helper:
-  ```solidity
-  require(!won.hasRole(adminRole, deployer), "deployer still has admin role");
-  require(won.hasRole(adminRole, multisig), "multisig missing admin role");
-  ```
+### M-3. Script 08 didn't verify deployer renounced `DEFAULT_ADMIN_ROLE`
+- **Status: FIXED.** `_checkDeployerRenounced(won, multisig)` runs when `MULTISIG`
+  env is set and asserts (a) multisig holds `DEFAULT_ADMIN_ROLE`, (b) caller
+  (deployer) does NOT, and (c) `getCCIPAdmin() == multisig`.
 
-### M-4. Script 07 doesn't validate `rate ≤ capacity` and non-zero capacity pre-broadcast
-- **Where:** `script/07_UpdateRateLimits.s.sol:29-38`.
-- **Issue:** A typo'd env var (`OUTBOUND_RATE > OUTBOUND_CAPACITY`) causes the on-chain
-  call to revert mid-broadcast. Inside a Gnosis Safe batch this fails the whole batch
-  with no clear diagnostic.
-- **Fix:** Pre-flight assertions before `vm.startBroadcast()`:
-  ```solidity
-  require(outbound.capacity > 0, "OUTBOUND_CAPACITY must be > 0");
-  require(outbound.rate <= outbound.capacity, "OUTBOUND rate > capacity");
-  require(inbound.capacity > 0, "INBOUND_CAPACITY must be > 0");
-  require(inbound.rate <= inbound.capacity, "INBOUND rate > capacity");
-  ```
+### M-4. Script 07 didn't validate `rate ≤ capacity` and non-zero capacity pre-broadcast
+- **Status: FIXED.** `script/07_UpdateRateLimits.s.sol` now requires
+  `capacity > 0` and `rate <= capacity` for both inbound and outbound BEFORE
+  `vm.startBroadcast`. Typo'd env vars now fail loudly off-chain.
 
-### M-5. `Deployments.sol` uses relative paths
-- **Where:** `script/Deployments.sol:16`.
-- **Issue:** `./deployments/<chainId>.json` resolves from `vm.projectRoot()` only when
-  forge is invoked without `--project-root` from the repo root. CI environments or
-  scripts invoked from elsewhere will fail to find the file. `vm.readFile` returns an
-  empty string and `vm.parseJsonAddress` reverts mid-broadcast.
-- **Fix:** Use `string.concat(vm.projectRoot(), "/deployments/", …)` for absolute paths.
+### M-5. `Deployments.sol` used relative paths
+- **Status: FIXED.** `path(chainId)` now uses
+  `string.concat(vm.projectRoot(), "/deployments/", …)`. Works regardless of the
+  caller's cwd; `foundry.toml` `fs_permissions` for `./deployments` resolves the
+  absolute prefix automatically.
 
-### M-6. Vendored CCIP library is not pinned via submodule
-- **Where:** `lib/ccip/`.
-- **Issue:** ~281 pragma lines were manually patched from `0.8.24` to `^0.8.24`. The
-  patch is documented in CLAUDE.md as a `sed` one-liner re-run after `forge install`.
-  Without a submodule pin or CI guard, anyone running `forge update` (or a future
-  maintainer who doesn't realize lib is vendored) can silently change the audited
-  artifact.
-- **Fix:** Convert to a real git submodule pinned to a specific Chainlink CCIP release
-  tag, and document the pragma patch as a tracked diff. Add a CI check that fails if
-  any `lib/ccip/**/*.sol` has a pragma mismatch.
+### M-6. Vendored CCIP library was not pinned via submodule
+- **Status: FIXED (in PR #19, pre-this-review).** `lib/ccip` is now a real git
+  submodule pinned to `v2.17.0-ccip1.5.16`. The pragma patch
+  (`0.8.24` → `^0.8.24`) is wired into `make patch-pragmas` and run automatically by
+  CI between submodule checkout and `forge build`.
 
-### M-7. wON `setCCIPAdmin` is independent of `DEFAULT_ADMIN_ROLE` and single-step
-- **Where:** `src/WrappedON.sol:100-109`; `script/06_TransferOwnership.s.sol:67`.
-- **Issue:** `s_ccipAdmin` is rotated only by the current `s_ccipAdmin`. After script 06
-  the multisig holds both, but a typo in `MULTISIG` instantly hands CCIP admin to the
-  wrong address with no recovery path. Additionally, the deployer could call
-  `setCCIPAdmin(deployer)` between handoff and renounce, regaining the registry-level
-  admin role.
-- **Fix:** Add a 2-step `setCCIPAdmin` / `acceptCCIPAdmin` pattern. In script 06, after
-  `won.setCCIPAdmin(multisig)`, assert `won.getCCIPAdmin() == multisig`.
+### M-7. wON `setCCIPAdmin` was single-step
+- **Status: FIXED.** `setCCIPAdmin` now proposes; `acceptCCIPAdmin` from the proposed
+  address completes the transfer. `pendingCCIPAdmin()` view exposed for verification.
+  Script 06 uses propose + asserts `pendingCCIPAdmin == multisig`; `RenounceDeployerAdmin`
+  requires `getCCIPAdmin() == multisig` (i.e. multisig must have called
+  `acceptCCIPAdmin`) before the deployer can renounce.
 
 ### M-8. Rate-limit per-tx capacity equals bucket capacity — grief vector
-- **Where:** `script/05_ApplyChainUpdates.s.sol`; `script/07_UpdateRateLimits.s.sol`.
-- **Issue:** Default bucket = 100k ON capacity, 10 ON/sec refill. A single bridge tx can
-  drain the entire bucket, blocking other users for ~3 hours until refill. Not a
-  fund-loss issue but a real liveness/UX risk.
-- **Fix:** Calibrate `capacity` / `rate` against expected traffic. Document expected
-  daily volume in `RUNBOOK.md`. Consider an off-chain monitor that alerts on bucket
-  exhaustion.
+- **Status: ACCEPTED (calibration).** Default 100k ON capacity / 10 ON/sec rate
+  preserved as a launch baseline. Rebalance via `make update-limits` after observing
+  real traffic. RUNBOOK.md adds an "alert on bucket exhaustion" step.
 
 ### M-9. Fee-on-transfer / reentrancy hardening on wON (defensive)
-- **Where:** `src/WrappedON.sol:63-75`.
-- **Issue:** `deposit` mints `amount` of wON regardless of actual tokens received. If
-  the ON contract ever introduces a transfer fee, `wrapBackedSupply` exceeds the
-  actual reserve. Reentrancy via ERC777-style hooks is theoretically possible if ON
-  is ever replaced. The canonical ON at `0x33f6…59d` is a plain ERC20, so this is
-  defensive.
-- **Fix:** Add `nonReentrant` on `deposit` / `withdraw`. Use received-amount accounting:
+- **Status: FIXED.** `WrappedON` now inherits OZ `ReentrancyGuard`; `deposit` and
+  `withdraw` are `nonReentrant`. `deposit` uses received-amount accounting:
   ```solidity
   uint256 before = ON.balanceOf(address(this));
   ON.safeTransferFrom(msg.sender, address(this), amount);
   uint256 received = ON.balanceOf(address(this)) - before;
-  _mint(msg.sender, received);
+  _mintCapped(msg.sender, received);
   ```
 
 ---
 
 ## Low / Nit
 
-- **`Makefile:47` — `test-e2e` passes `--match-path` twice.** Forge honors only the last,
-  so only `DeploymentE2E.t.sol` actually runs. Use a regex:
-  `--match-path 'test/(PoolRoundtrip|DeploymentE2E).t.sol'`.
-- **`script/08_PostDeployVerify.s.sol:97` — `vm.load(won, bytes32(0))` is vacuous.**
-  Slot 0 in `ERC20` is the `_balances` mapping pointer (always zero). Replace with
-  `won.totalSupply() > 0 || won.ON() != address(0)`.
-- **`src/WrappedON.sol:113` — `supportsInterface` declared `pure` vs parent `view`.**
+- **`Makefile` `test-e2e` passed `--match-path` twice.** Forge honored only the last,
+  so only `DeploymentE2E.t.sol` actually ran. **FIXED:** replaced with a single
+  brace-glob pattern that matches both.
+- **`script/06_TransferOwnership.s.sol` `vm.load(won, slot 0)` was vacuous.**
+  **FIXED:** replaced with the H-1 multisig/role asserts.
+- **`script/08_PostDeployVerify.s.sol` had a vacuous slot-0 read.** **FIXED:**
+  replaced with the M-3 / H-6 semantic checks.
+- **`src/WrappedON.sol` `supportsInterface` declared `pure` vs parent `view`.**
   ABI-compatible, no action needed.
-- **`src/WrappedON.sol:63` — `deposit(0)` is a silent no-op that emits `Wrapped(_, 0)`.**
-  Wastes gas and clutters event indexers. Add a `require(amount > 0, …)`.
-- **CLAUDE.md pragma-patch one-liner re-runs after `forge install`.** Idempotent today
-  but brittle — add `make install` that runs the patch automatically.
+- **`src/WrappedON.sol` `deposit(0)` was a silent no-op.** **FIXED:** reverts
+  `ZeroAmount()`.
+- **CLAUDE.md pragma-patch one-liner re-runs after `forge install`.** **FIXED:**
+  `make install` now chains `submodule update --init --recursive` + `patch-pragmas`,
+  and CI applies the patch automatically.
 
 ---
 
-## Test coverage gaps (priority order)
+## Test coverage gaps (priority order — open follow-ups)
 
 1. **Reserve invariant never directly asserted.** No test reads `wrapBackedSupply`
-   (which is not even a state variable today) and checks against
-   `ON.balanceOf(WrappedON)` after mixed deposit/mint/withdraw/burn sequences.
-2. **No test for `renounceRole` before multisig accepts.** The single most dangerous
-   operator misorder is not exercised.
+   (which is not a state variable today) and checks against `ON.balanceOf(WrappedON)`
+   after mixed deposit/mint/withdraw/burn sequences.
+2. **No test for `renounceRole` before multisig accepts.** Now caught at runtime by
+   `RenounceDeployerAdmin` (H-1 fix), but still worth a negative test.
 3. **No rate-limit bucket-exhaustion test.** Limits are configured but never driven
    to their cap.
-4. **No negative test for script 04's "neither admin path" revert.** CLAUDE.md
-   promises a clear revert message; not exercised in the suite.
-5. **BSC pool ownership handoff has zero coverage.** `test_E2E_OwnershipHandoff`
+4. **No negative test for script 04's "neither admin path" revert.**
+5. **BSC pool ownership handoff has zero unit coverage.** `test_E2E_OwnershipHandoff`
    tests only the ETH-side pool.
 6. **No fuzz tests anywhere.** A minimal `testFuzz_DepositWithdrawRoundtrip(uint128)`
-   would catch any 1:1 accounting drift.
+   would catch any 1:1 accounting drift, and a fuzz around `MAX_SUPPLY` would catch
+   off-by-one regressions on the cap.
 7. **Fork tests don't assert non-zero `rate` / `capacity`.** An `isEnabled=true`
    limiter with zero rate silently blocks all transfers.
-8. **Script 04's `registerAdminViaOwner` path** is not simulated; only the
-   `getCCIPAdmin` branch is.
+8. **Script 04's `registerAdminViaOwner` and the new `registerAccessControlDefaultAdmin`
+   paths** are not simulated; only the `getCCIPAdmin` branch is.
+
+**Tests added in this audit pass:** `test_DepositZeroAmountReverts`,
+`test_SetCCIPAdminTwoStep`, `test_SetCCIPAdminEmitsProposedThenTransferred`,
+`test_AcceptCCIPAdminRevertsForNonPending`, `test_MintRevertsAtSupplyCap`,
+`test_DepositRevertsAtSupplyCap`. Total non-fork suite: 41 tests (was 38).
 
 ---
 
-## Verified correct (do not re-flag in future reviews)
+## Verified correct against the deployed CCIP 1.5.x ABI
 
-- `BurnMintTokenPool` / `LockReleaseTokenPool` constructor args.
-- `applyChainUpdates` struct layout — `remotePoolAddresses` as `bytes[]` of
-  `abi.encode(address)`, `remoteTokenAddress` as `bytes`.
+- `BurnMintTokenPool` 4-arg ctor `(token, allowlist, rmnProxy, router)` and
+  `LockReleaseTokenPool` 5-arg ctor `(token, allowlist, rmnProxy, acceptLiquidity,
+  router)` — match the deployed contracts.
+- `TokenPool.ChainUpdate` is a 6-field struct including `allowed: bool` and singular
+  `remotePoolAddress: bytes` (not the `bytes[] remotePoolAddresses` of unreleased 1.6+).
+- `applyChainUpdates(ChainUpdate[])` is 1-arg (not the 2-arg `(removed, added)` of 1.6+).
+- `getRemotePool(uint64) returns (bytes)` — singular (not the plural `getRemotePools`
+  of 1.6+).
 - Chain selectors: ETH Mainnet `5_009_297_550_715_157_269`, BSC Mainnet
   `11_344_663_589_394_136_015` — match the canonical Chainlink CCIP directory.
 - wON correctly implements the runtime `IBurnMintERC20` interface; selectors match
   what `BurnMintTokenPool._burn` and `releaseOrMint` invoke.
-- Decimals (18/18) and `localTokenDecimals` config are consistent.
-- `SafeERC20` is used throughout for ON interactions.
+- Decimals (18/18) consistent across chains. 1.5.x pools do not store
+  `localTokenDecimals`; ABI-compatible with our 18-decimal token on both sides.
+- `SafeERC20` used throughout for ON interactions.
 - Donation of ON to the wON contract is benign — only the reserve grows; extra ON
   cannot be extracted without burning wON.
 
@@ -295,16 +248,27 @@ Findings are grouped by severity. Each entry: file:line — issue — impact —
 
 ## Pre-mainnet action checklist
 
-- [ ] Resolve C-1: either subclass `LockReleaseTokenPool` to neuter
-      `withdrawLiquidity` / `setRebalancer`, or update documentation to honestly
-      describe the multisig trust model.
-- [ ] Fix C-2: `Deployments.writeAddress` JSON corruption.
-- [ ] Add C-3: global supply cap on wON.
-- [ ] Add H-1 guard: multisig must hold `DEFAULT_ADMIN_ROLE` before deployer renounces.
-- [ ] Add H-3 `_requireSet` calls across scripts 02 / 04 / 05 / 07.
-- [ ] Add H-4 post-registration assertion in script 04; resolve BSC ON admin path on
-      private fork.
-- [ ] Add H-5 `handoff-all` Makefile target.
-- [ ] Add H-6 `pendingOwner()` probe in script 08.
-- [ ] Add the 8 test-coverage items above — at minimum #1 and #2.
-- [ ] Convert `lib/ccip` to a pinned submodule with a tracked pragma-patch diff.
+- [x] Resolve C-1: documented the Chainlink CCT trust model; BSC pool ownership = ON
+      custody. Monitoring required (RUNBOOK.md).
+- [x] C-2: `Deployments.writeAddress` JSON corruption.
+- [x] C-3: global supply cap (100M) on wON.
+- [x] H-1: multisig role pre-check before deployer renounces.
+- [x] H-3: `_requireSet` calls across scripts 02 / 04 / 05 / 07.
+- [x] H-4: post-registration assertion in script 04. Operational task remains:
+      resolve BSC ON admin path on a private fork before mainnet.
+- [x] H-5: `make handoff-all` Makefile target.
+- [x] H-6: `pendingOwner()` probe in script 08.
+- [x] M-1: third registration path in script 04.
+- [x] M-3: post-renounce check in script 08.
+- [x] M-4: rate-limit preflight in script 07.
+- [x] M-5: absolute paths in `Deployments.sol`.
+- [x] M-6: `lib/ccip` pinned as a git submodule (already shipped in PR #19).
+- [x] M-7: 2-step `setCCIPAdmin`.
+- [x] M-9: `nonReentrant` + received-amount accounting on wON.
+- [ ] Add the 8 open test-coverage items above — at minimum #1 (reserve invariant
+      fuzz) and #2 (renounce-before-accept negative test).
+- [ ] Operational: deploy to Sepolia ⇄ BSC Testnet first, then mainnet.
+- [ ] Operational: fill in `script/Helper.sol` placeholder addresses from
+      https://docs.chain.link/ccip/directory before broadcasting on mainnet.
+- [ ] Operational: confirm the canonical BSC ON token's CCIP-admin path on a private
+      fork before mainnet rollout.

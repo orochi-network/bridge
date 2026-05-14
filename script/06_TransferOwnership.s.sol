@@ -58,14 +58,22 @@ contract TransferOwnership is Script, Helper {
         console.log("Pool ownership transfer initiated:", pool, "->", multisig);
         console.log("   (multisig must call acceptOwnership)");
 
+        // After acceptOwnership, the multisig holds custody of the locked-ON reserve via
+        // setRebalancer/withdrawLiquidity — see SECURITY.md C-1 for the trust model.
+
         if (block.chainid == 1 || block.chainid == 11_155_111) {
             WrappedON won = WrappedON(token);
             bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
             won.grantRole(adminRole, multisig);
             console.log("wON DEFAULT_ADMIN_ROLE granted to:", multisig);
 
+            // Two-step CCIP admin handoff (see WrappedON M-7): propose now; multisig must
+            // call `acceptCCIPAdmin` to take possession. Keeps a typo'd MULTISIG from
+            // permanently stranding the role.
             won.setCCIPAdmin(multisig);
-            console.log("wON CCIP admin set to:           ", multisig);
+            require(won.pendingCCIPAdmin() == multisig, "wON pendingCCIPAdmin != multisig");
+            console.log("wON CCIP admin proposed to:      ", multisig);
+            console.log("   (multisig must call acceptCCIPAdmin)");
         }
 
         ITokenAdminRegistry(cfg.tokenAdminRegistry).transferAdminRole(token, multisig);
@@ -86,20 +94,29 @@ contract TransferOwnership is Script, Helper {
 ///         Run ONLY after verifying the multisig holds the role and has accepted pool ownership
 ///         + registry admin role on both chains. ETH side only — wON does not exist on BSC.
 contract RenounceDeployerAdmin is Script, Helper {
+    error MultisigEnvMissing();
+
     function run() external {
         if (block.chainid != 1 && block.chainid != 11_155_111) revert UnsupportedChain(block.chainid);
+
+        // Multisig MUST be passed in and MUST already hold the role — otherwise the renounce
+        // would leave the contract admin-less and permanently unmanageable.
+        address multisig = vm.envAddress("MULTISIG");
+        if (multisig == address(0)) revert MultisigEnvMissing();
 
         WrappedON won = WrappedON(Deployments.readAddress(block.chainid, "wrappedON"));
         bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
         address deployer = msg.sender;
 
         require(won.hasRole(adminRole, deployer), "deployer does not hold admin role");
-        require(address(uint160(uint256(vm.load(address(won), bytes32(0))))) != address(0), "wON not initialized");
+        require(won.hasRole(adminRole, multisig), "multisig does NOT hold admin role yet");
+        require(won.getCCIPAdmin() == multisig, "wON ccipAdmin not yet accepted by multisig");
 
         vm.startBroadcast();
         won.renounceRole(adminRole, deployer);
         vm.stopBroadcast();
 
+        require(!won.hasRole(adminRole, deployer), "renounce failed: deployer still has role");
         console.log("Deployer", deployer, "renounced DEFAULT_ADMIN_ROLE on wON", address(won));
     }
 }

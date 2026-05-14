@@ -127,14 +127,17 @@ Once the bridge is verified on mainnet, hand off control to the operations multi
 ### 3.1 Begin handoff (deployer EOA)
 
 ```bash
-make handoff RPC=eth MULTISIG=0x<safe-address>
-make handoff RPC=bsc MULTISIG=0x<safe-address>
+make handoff-all ETH_RPC=eth BSC_RPC=bsc MULTISIG=0x<safe-address>
 ```
 
-Each invocation:
-- Calls `pool.transferOwnership(multisig)` (two-step).
-- (ETH only) Grants wON `DEFAULT_ADMIN_ROLE` to the multisig and sets CCIP admin to the multisig.
+The single target runs the handoff sequentially against both chains with the same multisig — preventing the half-handed-off-on-one-chain footgun (audit H-5). For single-chain handoffs (e.g. during testnet dry runs) use `make handoff RPC=<chain> MULTISIG=…`.
+
+Each per-chain invocation:
+- Calls `pool.transferOwnership(multisig)` (two-step Ownable).
+- (ETH only) Grants wON `DEFAULT_ADMIN_ROLE` to the multisig and proposes the new CCIP admin (two-step — multisig must call `acceptCCIPAdmin`).
 - Calls `TokenAdminRegistry.transferAdminRole(token, multisig)` (two-step).
+
+**Monitor while the handoff is in flight.** During the grant→accept→renounce window, the deployer EOA still holds `MINTER_ROLE`/`BURNER_ROLE` admin authority (audit H-2). Watch for unexpected `RoleGranted` events on wON — see [Trust model](#trust-model-bsc-reserve-custody).
 
 ### 3.2 Multisig accepts (from the Safe UI / SDK)
 
@@ -144,6 +147,7 @@ Queue these transactions on the multisig:
 |---|---|
 | ETH   | `pool.acceptOwnership()` on the BurnMintTokenPool |
 | ETH   | `registry.acceptAdminRole(wON)` on TokenAdminRegistry |
+| ETH   | `wON.acceptCCIPAdmin()` (completes the two-step CCIP admin transfer) |
 | BSC   | `pool.acceptOwnership()` on the LockReleaseTokenPool |
 | BSC   | `registry.acceptAdminRole(ON_BSC)` on TokenAdminRegistry |
 
@@ -158,13 +162,18 @@ This adds an ownership-handoff check: `pool.owner() == multisig` on each chain.
 
 ### 3.4 Deployer renounces wON admin role (ETH only)
 
-After 3.2 confirms the multisig is operational:
+After 3.2 + 3.3 confirm the multisig holds every role:
 
 ```bash
-make renounce RPC=eth
+make renounce RPC=eth MULTISIG=0x<safe-address>
 ```
 
-This calls `won.renounceRole(DEFAULT_ADMIN_ROLE, deployer)`. After this point, only the multisig can grant/revoke wON roles. **Do not skip this step.**
+The script now pre-asserts (audit H-1):
+- Multisig holds `DEFAULT_ADMIN_ROLE` on wON.
+- Multisig is `getCCIPAdmin()` (i.e. it called `acceptCCIPAdmin`).
+- The deployer still holds the role at call time.
+
+Then calls `won.renounceRole(DEFAULT_ADMIN_ROLE, deployer)`. After this point, only the multisig can grant/revoke wON roles. **Do not skip this step.**
 
 ---
 
@@ -196,9 +205,33 @@ These contracts are non-upgradeable. To replace a pool:
 2. Multisig: `wON.grantRole(MINTER_ROLE, newPool)` + `BURNER_ROLE` (ETH side).
 3. Multisig: `registry.setPool(token, newPool)` on the affected chain.
 4. Multisig: `applyChainUpdates` on the new pool to link the remote.
-5. Drain the old pool: on the LockRelease side, set `acceptLiquidity=true` is required for `withdrawLiquidity`; since we deploy with `acceptLiquidity=false` permanently, the locked tokens cannot be moved without a corresponding burn on the other chain. **Plan migrations such that net positions are zero before swapping.**
+5. Drain the old pool. The locked-ON reserve on the BSC `LockReleaseTokenPool` is movable by the pool owner via `setRebalancer` → `withdrawLiquidity` (see [Trust model](#trust-model-bsc-reserve-custody) below). Either rebalance manually under multisig governance, or — preferred — plan migrations such that net positions are zero before swapping so no reserve movement is needed.
 
 ---
+
+## Trust model: BSC reserve custody
+
+Chainlink's `LockReleaseTokenPool` is built around a trusted-operator pattern. After ownership handoff, the BSC pool's `owner` (the ops multisig) can:
+
+- Call `setRebalancer(addr)` (`onlyOwner`) — designates which address may move the locked-ON reserve.
+- The designated rebalancer can call `provideLiquidity(amount)` (only when `acceptLiquidity=true`; we deploy with `false`, so this path is blocked) and `withdrawLiquidity(amount)` / `transferLiquidity(from, amount)`.
+
+This means the multisig effectively has custody of the BSC-side locked-ON reserve. This is the **documented Chainlink CCT pattern** for `LockReleaseTokenPool` and is intentional. See `SECURITY.md` C-1 for the full discussion.
+
+**Required monitoring** (set up an off-chain alert before mainnet handoff):
+
+| Event / call | Where | Severity |
+|---|---|---|
+| `LiquidityRemoved(remover, amount)` | BSC pool | **Critical** |
+| `LiquidityAdded(provider, amount)` | BSC pool | High |
+| `setRebalancer(addr)` calldata trace | BSC pool | **Critical** |
+| `OwnershipTransferRequested` / `OwnershipTransferred` | BSC pool | **Critical** |
+| `RoleGranted(MINTER_ROLE, *)` where grantee ≠ ETH pool | wON | **Critical** |
+| `RoleGranted(BURNER_ROLE, *)` where grantee ≠ ETH pool | wON | **Critical** |
+| `CCIPAdminTransferProposed` / `CCIPAdminTransferred` | wON | High |
+| Outbound / inbound rate-limit bucket exhausted | both pools | Medium |
+
+Source the events in `lib/ccip/contracts/src/v0.8/ccip/pools/LockReleaseTokenPool.sol` and `src/WrappedON.sol`. Page the on-call rotation on Critical lines.
 
 ## Appendix: file references
 

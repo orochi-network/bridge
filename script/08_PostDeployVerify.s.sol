@@ -26,7 +26,9 @@ contract PostDeployVerify is Script, Helper {
     error RemoteTokenMismatch(uint64 selector, address expected, address actual);
     error RateLimitDisabled(string direction);
     error RoleMissing(string role, address account);
+    error RoleNotRenounced(string role, address account);
     error PoolOwnershipNotHandedOff(address pool, address owner, address expectedMultisig);
+    error PoolOwnershipPending(address pool, address pending, address expectedMultisig);
 
     function run() external view {
         NetworkConfig memory local = getConfig(block.chainid);
@@ -56,7 +58,12 @@ contract PostDeployVerify is Script, Helper {
 
         // Optional: check ownership handoff if MULTISIG env var is set.
         try vm.envAddress("MULTISIG") returns (address multisig) {
-            if (multisig != address(0)) _checkOwnershipHandoff(localPool, multisig);
+            if (multisig != address(0)) {
+                _checkOwnershipHandoff(localPool, multisig);
+                if (block.chainid == 1 || block.chainid == 11_155_111) {
+                    _checkDeployerRenounced(WrappedON(localToken), multisig);
+                }
+            }
         } catch {
             console.log("  (skipping multisig handoff check -- MULTISIG env var not set)");
         }
@@ -125,12 +132,33 @@ contract PostDeployVerify is Script, Helper {
     }
 
     function _checkOwnershipHandoff(address pool, address multisig) internal view {
-        // Pool owner should be the multisig (after multisig.acceptOwnership()).
+        // Active state: owner == multisig (after multisig.acceptOwnership()).
         (bool ok, bytes memory data) = pool.staticcall(abi.encodeWithSignature("owner()"));
         require(ok && data.length == 32, "pool owner() call failed");
         address owner = abi.decode(data, (address));
-        if (owner != multisig) revert PoolOwnershipNotHandedOff(pool, owner, multisig);
-        console.log("[ok] pool.owner() == multisig %s", multisig);
+        if (owner == multisig) {
+            console.log("[ok] pool.owner() == multisig %s", multisig);
+            return;
+        }
+
+        // Pending state: transferOwnership called, multisig has not yet accepted.
+        (bool ok2, bytes memory d2) = pool.staticcall(abi.encodeWithSignature("pendingOwner()"));
+        address pending = (ok2 && d2.length == 32) ? abi.decode(d2, (address)) : address(0);
+        if (pending == multisig) {
+            console.log("[pending] pool.pendingOwner() == multisig %s (call acceptOwnership)", multisig);
+            revert PoolOwnershipPending(pool, pending, multisig);
+        }
+
+        revert PoolOwnershipNotHandedOff(pool, owner, multisig);
+    }
+
+    function _checkDeployerRenounced(WrappedON won, address multisig) internal view {
+        bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
+        if (!won.hasRole(adminRole, multisig)) revert RoleMissing("DEFAULT_ADMIN_ROLE", multisig);
+        if (won.hasRole(adminRole, msg.sender)) revert RoleNotRenounced("DEFAULT_ADMIN_ROLE", msg.sender);
+        if (won.getCCIPAdmin() != multisig) revert RoleMissing("ccipAdmin", multisig);
+        console.log("[ok] wON DEFAULT_ADMIN_ROLE held only by multisig %s", multisig);
+        console.log("[ok] wON ccipAdmin == multisig %s", multisig);
     }
 
     function _remoteChainId(uint256 chainId) internal pure returns (uint256) {

@@ -28,6 +28,10 @@ contract ApplyChainUpdates is Script, Helper {
         address remotePool = Deployments.readAddress(_remoteChainId(block.chainid), "pool");
         address remoteToken = _remoteTokenAddress(block.chainid, remote);
 
+        _requireSet(localPool, "localPool (run script 02 on this chain first)");
+        _requireSet(remotePool, "remotePool (run script 02 on the remote chain first)");
+        _requireSet(remoteToken, "remoteToken");
+
         TokenPool.ChainUpdate[] memory updates = new TokenPool.ChainUpdate[](1);
         updates[0] = TokenPool.ChainUpdate({
             remoteChainSelector: remote.chainSelector,

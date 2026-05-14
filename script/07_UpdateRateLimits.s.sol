@@ -25,6 +25,7 @@ contract UpdateRateLimits is Script, Helper {
         uint64 remoteSelector = _remoteSelector(block.chainid);
 
         address localPool = Deployments.readAddress(block.chainid, "pool");
+        _requireSet(localPool, "localPool (run script 02 first)");
 
         RateLimiter.Config memory outbound = RateLimiter.Config({
             isEnabled: vm.envOr("OUTBOUND_ENABLED", true),
@@ -36,6 +37,13 @@ contract UpdateRateLimits is Script, Helper {
             capacity: uint128(vm.envUint("INBOUND_CAPACITY")),
             rate: uint128(vm.envUint("INBOUND_RATE"))
         });
+
+        // Preflight: catch typos before broadcasting. Mid-broadcast reverts inside a Gnosis
+        // Safe batch fail the whole batch with no diagnostic.
+        require(outbound.capacity > 0, "OUTBOUND_CAPACITY must be > 0");
+        require(outbound.rate <= outbound.capacity, "OUTBOUND_RATE must be <= OUTBOUND_CAPACITY");
+        require(inbound.capacity > 0, "INBOUND_CAPACITY must be > 0");
+        require(inbound.rate <= inbound.capacity, "INBOUND_RATE must be <= INBOUND_CAPACITY");
 
         vm.startBroadcast();
         TokenPool(localPool).setChainRateLimiterConfig(remoteSelector, outbound, inbound);

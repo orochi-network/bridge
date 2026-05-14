@@ -294,18 +294,19 @@ contract DeploymentE2ETest is Test {
         bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
         assertTrue(won.hasRole(adminRole, deployer));
 
-        // Begin handoff: transferOwnership + grant admin + set CCIP admin + transferAdminRole.
+        // Begin handoff: transferOwnership + grant admin + propose CCIP admin + transferAdminRole.
         vm.startPrank(deployer);
         ethPool.transferOwnership(multisig);
         won.grantRole(adminRole, multisig);
-        won.setCCIPAdmin(multisig);
+        won.setCCIPAdmin(multisig); // two-step: now pending
         ethRegistry.transferAdminRole(address(won), multisig);
         vm.stopPrank();
 
-        // Multisig accepts each role.
+        // Multisig accepts each role (including the two-step CCIP admin).
         vm.startPrank(multisig);
         ethPool.acceptOwnership();
         ethRegistry.acceptAdminRole(address(won));
+        won.acceptCCIPAdmin();
         vm.stopPrank();
 
         // Final step: deployer renounces wON admin role.

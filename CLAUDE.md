@@ -43,6 +43,12 @@ There are TWO mint paths for wON; both produce identical fungible tokens but bac
 
 Documented invariant: `wrapBackedSupply <= ON.balanceOf(WrappedON)`. `withdraw` reverts when `ON.balanceOf(this) < amount`. CCIP-bridged users who want native ETH ON depend on someone else having wrapped — this is an arbitrage layer, not a guaranteed redemption.
 
+**Hard supply cap**: `WrappedON.MAX_SUPPLY = 100_000_000 ether`. Both `deposit` and `mint` revert with `SupplyCapExceeded` if `totalSupply() + amount` would exceed this. The cap matches the canonical ON supply on BSC, which is the absolute upper bound on what the bridge can ever reflect onto Ethereum (audit C-3).
+
+## Trust model: BSC reserve custody
+
+`LockReleaseTokenPool` is constructed with `acceptLiquidity = false`, which disables **only** `provideLiquidity`. By design, the pool owner (the ops multisig after handoff) keeps full custody of the locked-ON reserve via `setRebalancer` → `withdrawLiquidity`. This is Chainlink's CCT pattern and is not a bug — but it does mean the multisig is a custody-grade authority on BSC. See `SECURITY.md` C-1 and `RUNBOOK.md` for monitoring guidance.
+
 ## Layout
 
 ```
@@ -57,9 +63,9 @@ script/05_ApplyChainUpdates.s.sol both chains — wires remote pool + rate limit
 script/06_TransferOwnership.s.sol both chains — handoff to multisig (TransferOwnership + RenounceDeployerAdmin contracts)
 script/07_UpdateRateLimits.s.sol  ops — adjust setChainRateLimiterConfig (env-driven)
 script/08_PostDeployVerify.s.sol  view-only — programmatic check of all wiring
-test/WrappedON.t.sol              unit tests (18)
-test/PoolRoundtrip.t.sol          pool wiring + lockOrBurn/releaseOrMint (4)
-test/DeploymentE2E.t.sol          full sequence simulation incl. handoff + rate-limit update (4)
+test/WrappedON.t.sol              unit tests
+test/PoolRoundtrip.t.sol          pool wiring + lockOrBurn/releaseOrMint
+test/DeploymentE2E.t.sol          full sequence simulation incl. handoff + rate-limit update
 test/mocks/                       MockRouter, MockRMN
 test/fork/Fork_ETH.t.sol          ETH mainnet fork — deploy + registry + bridge simulation (4)
 test/fork/Fork_BSC.t.sol          BSC mainnet fork — token ownership probe + pool + bridge sim (4)
@@ -71,7 +77,7 @@ deployments/<chainId>.json        written by scripts via vm.writeJson
 
 Everything goes through the `Makefile`. The full sequence is documented in `RUNBOOK.md`. Key targets:
 
-- `make test`                  — full test suite (26 tests, no fork).
+- `make test`                  — full test suite (41 tests, no fork).
 - `make test-unit`             — WrappedON.t.sol unit tests only.
 - `make test-e2e`              — PoolRoundtrip + DeploymentE2E integration tests.
 - `make test-fork ETH_RPC=... BSC_RPC=...` — fork tests against live mainnet (9 tests).

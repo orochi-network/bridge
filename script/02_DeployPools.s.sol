@@ -19,8 +19,12 @@ contract DeployPools is Script, Helper {
     function run() external returns (address pool) {
         NetworkConfig memory cfg = getConfig(block.chainid);
 
+        _requireSet(cfg.router, "router");
+        _requireSet(cfg.rmnProxy, "rmnProxy");
+
         if (block.chainid == 1 || block.chainid == 11_155_111) {
             address won = Deployments.readAddress(block.chainid, "wrappedON");
+            _requireSet(won, "wrappedON (run script 01 first)");
             vm.startBroadcast();
             BurnMintTokenPool p = new BurnMintTokenPool(IBurnMintERC20(won), new address[](0), cfg.rmnProxy, cfg.router);
             vm.stopBroadcast();
@@ -29,13 +33,12 @@ contract DeployPools is Script, Helper {
         } else if (block.chainid == 56 || block.chainid == 97) {
             _requireSet(cfg.onToken, "onToken (canonical ON on BSC)");
             vm.startBroadcast();
-            LockReleaseTokenPool p = new LockReleaseTokenPool(
-                IERC20(cfg.onToken),
-                new address[](0),
-                cfg.rmnProxy,
-                false, // acceptLiquidity = false: withdrawLiquidity is permanently disabled (footgun removed)
-                cfg.router
-            );
+            // acceptLiquidity=false blocks `provideLiquidity` ONLY. By Chainlink's CCT design,
+            // `withdrawLiquidity` and `setRebalancer` remain operator-controlled: the pool
+            // owner (the ops multisig after handoff) has custody of the locked-ON reserve.
+            // This is the documented Chainlink trust model — see SECURITY.md C-1.
+            LockReleaseTokenPool p =
+                new LockReleaseTokenPool(IERC20(cfg.onToken), new address[](0), cfg.rmnProxy, false, cfg.router);
             vm.stopBroadcast();
             pool = address(p);
             console.log("LockReleaseTokenPool:", pool);

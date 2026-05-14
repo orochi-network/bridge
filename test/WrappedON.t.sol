@@ -53,17 +53,10 @@ contract WrappedONTest is Test {
         vm.stopPrank();
     }
 
-    function test_DepositZeroAmountIsNoOp() public {
-        // deposit(0) is not guarded: succeeds silently, emits Wrapped(alice,0), changes nothing.
-        vm.startPrank(alice);
-        on.approve(address(won), 0);
-        vm.expectEmit(true, false, false, true);
-        emit WrappedON.Wrapped(alice, 0);
+    function test_DepositZeroAmountReverts() public {
+        vm.prank(alice);
+        vm.expectRevert(WrappedON.ZeroAmount.selector);
         won.deposit(0);
-        vm.stopPrank();
-
-        assertEq(won.totalSupply(), 0);
-        assertEq(on.balanceOf(address(won)), 0);
     }
 
     function test_DepositMintsOneToOne() public {
@@ -276,19 +269,34 @@ contract WrappedONTest is Test {
         assertEq(won.getCCIPAdmin(), admin);
     }
 
-    function test_SetCCIPAdminByCurrent() public {
+    function test_SetCCIPAdminTwoStep() public {
         address newAdmin = makeAddr("newAdmin");
+
+        // Step 1 — current admin proposes; getCCIPAdmin unchanged until accept.
         vm.prank(admin);
         won.setCCIPAdmin(newAdmin);
+        assertEq(won.pendingCCIPAdmin(), newAdmin);
+        assertEq(won.getCCIPAdmin(), admin, "admin must not change until accept");
+
+        // Step 2 — proposed acceptor takes the role.
+        vm.prank(newAdmin);
+        won.acceptCCIPAdmin();
         assertEq(won.getCCIPAdmin(), newAdmin);
+        assertEq(won.pendingCCIPAdmin(), address(0));
     }
 
-    function test_SetCCIPAdminEmitsEvent() public {
+    function test_SetCCIPAdminEmitsProposedThenTransferred() public {
         address newAdmin = makeAddr("newAdmin");
+
+        vm.expectEmit(true, true, false, false);
+        emit WrappedON.CCIPAdminTransferProposed(admin, newAdmin);
         vm.prank(admin);
+        won.setCCIPAdmin(newAdmin);
+
         vm.expectEmit(true, true, false, false);
         emit WrappedON.CCIPAdminTransferred(admin, newAdmin);
-        won.setCCIPAdmin(newAdmin);
+        vm.prank(newAdmin);
+        won.acceptCCIPAdmin();
     }
 
     function test_SetCCIPAdminRevertsForNonAdmin() public {
@@ -301,6 +309,43 @@ contract WrappedONTest is Test {
         vm.prank(admin);
         vm.expectRevert(WrappedON.ZeroAddress.selector);
         won.setCCIPAdmin(address(0));
+    }
+
+    function test_AcceptCCIPAdminRevertsForNonPending() public {
+        address newAdmin = makeAddr("newAdmin");
+        vm.prank(admin);
+        won.setCCIPAdmin(newAdmin);
+
+        vm.prank(alice);
+        vm.expectRevert(WrappedON.OnlyPendingCCIPAdmin.selector);
+        won.acceptCCIPAdmin();
+    }
+
+    // ─── Supply cap ───────────────────────────────────────────────────────────
+
+    function test_MintRevertsAtSupplyCap() public {
+        uint256 cap = won.MAX_SUPPLY();
+        vm.prank(pool);
+        won.mint(alice, cap);
+        assertEq(won.totalSupply(), cap);
+
+        vm.prank(pool);
+        vm.expectRevert(abi.encodeWithSelector(WrappedON.SupplyCapExceeded.selector, cap, cap + 1));
+        won.mint(alice, 1);
+    }
+
+    function test_DepositRevertsAtSupplyCap() public {
+        // Move all 1M mock ON to the cap test: alice holds 1M ON; cap is 100M wON.
+        // To verify the deposit-path cap, pre-mint up to cap via the pool then attempt to deposit 1.
+        uint256 cap = won.MAX_SUPPLY();
+        vm.prank(pool);
+        won.mint(bob, cap);
+
+        vm.startPrank(alice);
+        on.approve(address(won), 1);
+        vm.expectRevert(abi.encodeWithSelector(WrappedON.SupplyCapExceeded.selector, cap, cap + 1));
+        won.deposit(1);
+        vm.stopPrank();
     }
 
     // ─── Constructor guards ───────────────────────────────────────────────────

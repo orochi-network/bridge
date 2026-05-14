@@ -1,5 +1,5 @@
 .PHONY: help install patch-pragmas build test test-unit test-e2e test-fork fmt fmt-check coverage clean \
-        deploy-eth deploy-bsc verify-eth verify-bsc handoff renounce update-limits
+        deploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce renounce-all update-limits
 
 # ─── Defaults ──────────────────────────────────────────────────────────────────
 SHELL := /bin/bash
@@ -54,7 +54,7 @@ test-unit:
 	forge test --match-path 'test/WrappedON.t.sol' -vvv
 
 test-e2e:
-	forge test --match-path 'test/PoolRoundtrip.t.sol' --match-path 'test/DeploymentE2E.t.sol' -vvv
+	forge test --match-path 'test/{PoolRoundtrip,DeploymentE2E}.t.sol' -vvv
 
 test-fork:
 	@test -n "$(ETH_RPC)" || (echo "ETH_RPC env var required"; exit 1)
@@ -108,12 +108,27 @@ handoff:
 	MULTISIG=$(MULTISIG) forge script script/06_TransferOwnership.s.sol:TransferOwnership \
 	    --rpc-url $(RPC) $(DEPLOY_FLAGS) --sig "run()"
 
+# Atomic two-chain handoff. Both ETH_RPC and BSC_RPC must point at the same operational
+# environment (testnet pair OR mainnet pair) so the same MULTISIG ends up wired on both sides.
+handoff-all:
+	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
+	@test -n "$(ETH_RPC)"     || (echo "ETH_RPC env var required"; exit 1)
+	@test -n "$(BSC_RPC)"     || (echo "BSC_RPC env var required"; exit 1)
+	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
+	$(MAKE) handoff MULTISIG=$(MULTISIG) RPC=$(ETH_RPC)
+	$(MAKE) handoff MULTISIG=$(MULTISIG) RPC=$(BSC_RPC)
+
 # Final renounce — only after multisig has accepted everything on both chains.
 renounce:
+	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
 	@test -n "$(RPC)"         || (echo "RPC required"; exit 1)
 	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
-	forge script script/06_TransferOwnership.s.sol:RenounceDeployerAdmin \
+	MULTISIG=$(MULTISIG) forge script script/06_TransferOwnership.s.sol:RenounceDeployerAdmin \
 	    --rpc-url $(RPC) $(DEPLOY_FLAGS) --sig "run()"
+
+# Renounce on ETH only — wON does not exist on BSC, so this is single-chain by design.
+# We keep a `renounce-all` alias for symmetry with `handoff-all`.
+renounce-all: renounce
 
 update-limits:
 	@test -n "$(RPC)"               || (echo "RPC required"; exit 1)
