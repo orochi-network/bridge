@@ -9,7 +9,20 @@ each finding tracked inline.
 
 **Reviewed against:** `lib/ccip @ v2.17.0-ccip1.5.16` (production CCIP 1.5.x ABI).
 
-Each entry: file:line — issue — impact — fix — **Status**.
+## Status summary (PR #19, commit 0233f30)
+
+| Severity | Total | Fixed in code | Accepted (documented) | Partial / operational |
+|---|---:|---:|---:|---:|
+| Critical | 3 | 2 (C-2, C-3) | 1 (C-1) | 0 |
+| High     | 6 | 4 (H-1, H-3, H-5, H-6) | 1 (H-2) | 1 (H-4) |
+| Medium   | 9 | 8 (M-1, M-2, M-3, M-4, M-5, M-6, M-7, M-9) | 1 (M-8 calibration) | 0 |
+| Low/Nit  | 6 | 5 | 1 (`supportsInterface pure` — no action needed) | 0 |
+| **Total** | **24** | **19** | **4** | **1** |
+
+CI status (`feat/ccip-bridge`): Build & test ✓, Slither static analysis ✓ (`naming-convention`
+excluded for the deliberate `IERC20 public immutable ON`). 41/41 non-fork tests pass.
+
+Each entry below: file:line — issue — impact — fix — **Status**.
 
 ---
 

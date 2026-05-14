@@ -6,9 +6,9 @@ This file is project memory for Claude Code working in this repository. Keep it 
 
 A Foundry project implementing a **Chainlink CCIP Cross-Chain Token (CCT) bridge** for the Orochi Network **ON** token between Ethereum Mainnet and BNB Smart Chain.
 
-- **BSC side**: stock `LockReleaseTokenPool` against the existing ON token. `acceptLiquidity = false` on construction — `withdrawLiquidity` is permanently disabled.
-- **Ethereum side**: stock `BurnMintTokenPool` against a new **wON** token (this repo's only custom contract).
-- **wON** is also a 1:1 wrapper holding a reserve of native ETH-side ON. `deposit` mints wON 1:1 against deposited ON; `withdraw` burns wON and returns ON when the reserve allows.
+- **BSC side**: stock `LockReleaseTokenPool` against the existing ON token. `acceptLiquidity = false` on construction disables `provideLiquidity`; the operator multisig still has custody of the reserve via `setRebalancer` → `withdrawLiquidity` (Chainlink CCT trust model — see [Trust model](#trust-model-bsc-reserve-custody)).
+- **Ethereum side**: stock `BurnMintTokenPool` against a new **wON** token (this repo's only custom contract). wON has a hard `MAX_SUPPLY` of 100M.
+- **wON** is also a 1:1 wrapper holding a reserve of native ETH-side ON. `deposit` mints wON 1:1 against deposited ON (received-amount accounting, `nonReentrant`); `withdraw` burns wON and returns ON when the reserve allows.
 
 ## Token addresses (canonical)
 
@@ -27,11 +27,13 @@ A Foundry project implementing a **Chainlink CCIP Cross-Chain Token (CCT) bridge
 
 ## Conventions
 
-- **Solidity 0.8.34, optimizer 200, evm_version = cancun.** Library files in `lib/` use `^0.8.24` (patched from exact `0.8.24` to allow compilation with 0.8.34). Re-run the patch if `forge install` resets them: `find lib -name "*.sol" | xargs sed -i 's/^pragma solidity 0\.8\.24;/pragma solidity ^0.8.24;/'`
-- **Use stock Chainlink contracts** for `BurnMintTokenPool` and `LockReleaseTokenPool`. Do NOT subclass — extra inheritance increases audit surface for zero functional gain.
+- **Solidity 0.8.34, optimizer 200, evm_version = cancun.** `lib/` is git submodules (see `.gitmodules`); `lib/ccip` is pinned to **`v2.17.0-ccip1.5.16`** to match the deployed production CCIP 1.5.x ABI on both ETH + BSC mainnet.
+- **Pragma patch**: vendored Chainlink + OZ sources pin `pragma solidity 0.8.24;`; our project pins 0.8.34. `make patch-pragmas` rewrites them to `^0.8.24`. This runs automatically as part of `make install` and as a CI step after submodule checkout. Re-run manually if you do `git submodule update`.
+- **Use stock Chainlink contracts** for `BurnMintTokenPool` and `LockReleaseTokenPool`. Do NOT subclass — extra inheritance increases audit surface for zero functional gain. (Subclassing was considered and rejected for SECURITY.md C-1; the Chainlink trust model is documented instead.)
 - **Only one custom contract**: `src/WrappedON.sol`. Keep it small. New custom contracts require justification.
-- **Decimals**: ON and wON are both 18. `localTokenDecimals = 18` on both pools. No remote scaling needed.
+- **Decimals**: ON and wON are both 18. CCIP 1.5.x pools do not store `localTokenDecimals`; off-chain registration in the CCIP directory records 18/18 for both.
 - **Roles on wON**: `MINTER_ROLE` and `BURNER_ROLE` go ONLY to the `BurnMintTokenPool` on Ethereum. `DEFAULT_ADMIN_ROLE` starts on deployer, then transfers to the ops multisig after wiring.
+- **CCIP admin handoff is two-step**: `setCCIPAdmin(addr)` proposes; the proposed address must call `acceptCCIPAdmin()` to take effect. Same for `Ownable` ownership on pools and `TokenAdminRegistry` admin roles.
 - **No upgrades**: contracts are non-upgradeable by design. Migration path = redeploy + re-register in `TokenAdminRegistry` + `applyChainUpdates`.
 
 ## Reserve invariant (wON)
@@ -58,7 +60,7 @@ script/Deployments.sol            JSON artifact read/write helper
 script/01_DeployWrappedON.s.sol   ETH only — deploys wON
 script/02_DeployPools.s.sol       both chains — chain-dispatched on block.chainid
 script/03_GrantRoles.s.sol        ETH only — grants MINTER/BURNER on wON to the pool
-script/04_RegisterAdminAndPool.s.sol  both chains — probes getCCIPAdmin / Ownable / proposeAdministrator
+script/04_RegisterAdminAndPool.s.sol  both chains — probes getCCIPAdmin / Ownable / AccessControl, then setPool + post-asserts the wiring
 script/05_ApplyChainUpdates.s.sol both chains — wires remote pool + rate limits
 script/06_TransferOwnership.s.sol both chains — handoff to multisig (TransferOwnership + RenounceDeployerAdmin contracts)
 script/07_UpdateRateLimits.s.sol  ops — adjust setChainRateLimiterConfig (env-driven)
@@ -77,6 +79,7 @@ deployments/<chainId>.json        written by scripts via vm.writeJson
 
 Everything goes through the `Makefile`. The full sequence is documented in `RUNBOOK.md`. Key targets:
 
+- `make install`               — submodule init + patch-pragmas (one-time after clone).
 - `make test`                  — full test suite (41 tests, no fork).
 - `make test-unit`             — WrappedON.t.sol unit tests only.
 - `make test-e2e`              — PoolRoundtrip + DeploymentE2E integration tests.
@@ -84,15 +87,16 @@ Everything goes through the `Makefile`. The full sequence is documented in `RUNB
 - `make deploy-eth RPC=...`    — scripts 01→05 on the Ethereum side.
 - `make deploy-bsc RPC=...`    — scripts 02 + 04 + 05 on the BSC side.
 - `make verify-eth/bsc RPC=...` — script 08 view-only verification.
-- `make handoff MULTISIG=0x..`  — script 06 handoff to multisig.
-- `make renounce RPC=...`       — final deployer-renounce after multisig confirmed.
+- `make handoff-all ETH_RPC=... BSC_RPC=... MULTISIG=0x..` — atomic two-chain handoff.
+- `make renounce RPC=eth MULTISIG=0x..` — final deployer-renounce after multisig accepts everything.
 - `make update-limits ...`      — script 07 rate-limit tuning.
 
 ## Build & test
 
 ```bash
+make install                                             # submodules + patch-pragmas
 forge build
-forge test -vvv --no-match-path "test/fork/**"          # 26 mock-based tests (no RPC needed)
+forge test -vvv --no-match-path "test/fork/**"          # 41 mock-based tests (no RPC needed)
 make test-fork ETH_RPC=<url> BSC_RPC=<url>              # 9 mainnet fork tests
 make test-unit                                           # WrappedON.t.sol only
 make test-e2e                                            # PoolRoundtrip + DeploymentE2E only
@@ -105,13 +109,17 @@ Sequence: testnet (Sepolia ⇄ BSC Testnet) first, then mainnet. Scripts are num
 
 Final step on both chains: transfer pool `Ownable` ownership and wON `DEFAULT_ADMIN_ROLE` to a Gnosis Safe; deployer EOA `renounceRole`s.
 
-## Known open items
+## Known open items (operational, pre-mainnet)
 
-- BSC ON token CCIP-admin hook: confirm whether `0x0e4F6209eD984b21EDEA43acE6e09559eD051D48` exposes `getCCIPAdmin`, is `Ownable`, or requires the token owner to call `proposeAdministrator`. `script/04_RegisterAdminAndPool.s.sol` branches on this automatically and reverts with a clear message if neither path works. Resolve before mainnet rollout.
-- **All CCIP infrastructure addresses in `script/Helper.sol` (router / rmnProxy / tokenAdminRegistry / registryModuleOwnerCustom / linkToken) are intentionally `address(0)` placeholders.** Fill them in from https://docs.chain.link/ccip/directory before broadcasting. Scripts call `_requireSet` on every address they consume, so a stale Helper fails fast with a `MissingAddress` revert.
+- BSC ON token CCIP-admin hook: confirm whether `0x0e4F6209eD984b21EDEA43acE6e09559eD051D48` exposes `getCCIPAdmin`, is `Ownable`, or uses OZ `AccessControl.DEFAULT_ADMIN_ROLE`. `script/04_RegisterAdminAndPool.s.sol` probes all three paths (with the AccessControl path routing through a local interface for the 1.6.0 registry on prod), then reverts with a clear instruction if none match. Resolve on a private fork before mainnet rollout (audit H-4).
+- **CCIP infrastructure addresses in `script/Helper.sol` are intentionally `address(0)` placeholders.** Fill them in from https://docs.chain.link/ccip/directory before broadcasting. Scripts call `_requireSet` on every address they consume.
+- Test coverage gaps (priority order in `SECURITY.md`): reserve-invariant fuzz; renounce-before-multisig-accept negative test; rate-limit bucket exhaustion test; both BSC-side ownership-handoff coverage and `registerAdminViaOwner` / `registerAccessControlDefaultAdmin` script-04 coverage.
 
 ## Reference
 
+- `README.md` — operator-facing step-by-step (clone → deploy → handoff → ops).
+- `RUNBOOK.md` — deep dive on each step + trust model + required monitoring.
+- `SECURITY.md` — audit ledger; every finding has a Status (fixed / accepted / operational).
 - Plan: `/home/parallels/.claude/plans/orochi-network-token-on-gleaming-cat.md`
 - Chainlink CCIP CCT docs: https://docs.chain.link/ccip/concepts/cross-chain-token/overview
 - Reference repo: https://github.com/smartcontractkit/ccip-starter-kit-foundry
