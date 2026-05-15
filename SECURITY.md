@@ -231,8 +231,13 @@ Each entry below: file:line — issue — impact — fix — **Status**.
    the AccessControl role but has NOT accepted the two-step CCIP admin handoff —
    the exact orphaning scenario H-1 was designed to prevent. The test then completes
    the accept step and shows the renounce works once preconditions are met.
-3. **No rate-limit bucket-exhaustion test.** Limits are configured but never driven
-   to their cap.
+3. ~~**No rate-limit bucket-exhaustion test.**~~ **CLOSED.** Three new tests in
+   `test/PoolRoundtrip.t.sol`:
+   `test_RateLimitBucketExhaustionReverts` (single over-cap transfer hits
+   `TokenMaxCapacityExceeded`); `test_RateLimitBucketRefillsOverTime` (drains the
+   bucket, asserts immediate re-lock fails, advances `block.timestamp` and asserts
+   refilled transfer succeeds); `test_RateLimitDisabledAllowsLargeTransfer` (sanity
+   check on `isEnabled = false`).
 4. **No negative test for script 04's "neither admin path" revert.**
 5. **BSC pool ownership handoff has zero unit coverage.** `test_E2E_OwnershipHandoff`
    tests only the ETH-side pool.

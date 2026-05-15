@@ -246,5 +246,94 @@ contract PoolRoundtripTest is Test {
         vm.expectRevert();
         bscPool.lockOrBurn(inLock);
     }
+
+    // ─── Rate-limit exhaustion (SECURITY.md gap [3]) ───────────────────────────
+
+    /// @notice An over-capacity `lockOrBurn` reverts with `TokenMaxCapacityExceeded`. With
+    ///         the test rig's 100k-ether capacity and 10-ether-per-second refill, a single
+    ///         100,001 ether transfer must hit the cap.
+    function test_RateLimitBucketExhaustionReverts() public {
+        uint256 over = 100_001 ether;
+        vm.prank(alice);
+        onBsc.transfer(address(bscPool), over);
+
+        Pool.LockOrBurnInV1 memory inLock = Pool.LockOrBurnInV1({
+            receiver: abi.encode(alice),
+            remoteChainSelector: ETH_SELECTOR,
+            originalSender: alice,
+            amount: over,
+            localToken: address(onBsc)
+        });
+        vm.prank(bscOnRamp);
+        vm.expectRevert(
+            abi.encodeWithSelector(RateLimiter.TokenMaxCapacityExceeded.selector, 100_000 ether, over, address(onBsc))
+        );
+        bscPool.lockOrBurn(inLock);
+    }
+
+    /// @notice Draining the bucket to zero then immediately retrying reverts with
+    ///         `TokenRateLimitReached`. After a sufficient time advance the bucket refills
+    ///         (rate-per-second), unblocking subsequent transfers — proves the bucket isn't
+    ///         a one-shot kill switch.
+    function test_RateLimitBucketRefillsOverTime() public {
+        // Drain: lock exactly capacity (100k) — bucket goes to ~0.
+        uint256 cap = 100_000 ether;
+        vm.prank(alice);
+        onBsc.transfer(address(bscPool), cap);
+
+        Pool.LockOrBurnInV1 memory inLock = Pool.LockOrBurnInV1({
+            receiver: abi.encode(alice),
+            remoteChainSelector: ETH_SELECTOR,
+            originalSender: alice,
+            amount: cap,
+            localToken: address(onBsc)
+        });
+        vm.prank(bscOnRamp);
+        bscPool.lockOrBurn(inLock);
+
+        // Try to lock 1 more ether immediately — bucket is empty, must revert.
+        vm.prank(alice);
+        onBsc.transfer(address(bscPool), 1 ether);
+        Pool.LockOrBurnInV1 memory inLock2 = Pool.LockOrBurnInV1({
+            receiver: abi.encode(alice),
+            remoteChainSelector: ETH_SELECTOR,
+            originalSender: alice,
+            amount: 1 ether,
+            localToken: address(onBsc)
+        });
+        vm.prank(bscOnRamp);
+        vm.expectRevert(); // RateLimiter.TokenRateLimitReached(minWait, available, token)
+        bscPool.lockOrBurn(inLock2);
+
+        // Advance enough time to refill 1 ether at the 10-ether-per-second rate.
+        vm.warp(block.timestamp + 1);
+        vm.prank(bscOnRamp);
+        bscPool.lockOrBurn(inLock2); // must succeed after refill
+    }
+
+    /// @notice Outbound-rate-limit disabled means transfers above capacity flow through —
+    ///         locking the SECURITY.md M-8 calibration behaviour into a test (operator can
+    ///         disable a single direction independently).
+    function test_RateLimitDisabledAllowsLargeTransfer() public {
+        // Owner disables outbound only.
+        RateLimiter.Config memory off = RateLimiter.Config({isEnabled: false, capacity: 0, rate: 0});
+        RateLimiter.Config memory on = _limit(100_000 ether, 10 ether);
+        bscPool.setChainRateLimiterConfig(ETH_SELECTOR, off, on);
+
+        uint256 huge = 5_000_000 ether;
+        vm.prank(alice);
+        onBsc.transfer(address(bscPool), huge);
+
+        Pool.LockOrBurnInV1 memory inLock = Pool.LockOrBurnInV1({
+            receiver: abi.encode(alice),
+            remoteChainSelector: ETH_SELECTOR,
+            originalSender: alice,
+            amount: huge,
+            localToken: address(onBsc)
+        });
+        vm.prank(bscOnRamp);
+        bscPool.lockOrBurn(inLock);
+        assertEq(onBsc.balanceOf(address(bscPool)), huge);
+    }
 }
 
