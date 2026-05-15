@@ -238,7 +238,16 @@ Each entry below: file:line — issue — impact — fix — **Status**.
    bucket, asserts immediate re-lock fails, advances `block.timestamp` and asserts
    refilled transfer succeeds); `test_RateLimitDisabledAllowsLargeTransfer` (sanity
    check on `isEnabled = false`).
-4. **No negative test for script 04's "neither admin path" revert.**
+4. ~~**No negative test for script 04's "neither admin path" revert.**~~ **CLOSED.**
+   `test/Script04Paths.t.sol` covers four failure-mode dispatches:
+   `test_RegisterAdmin_NeitherPathReverts` (bare ERC20 → `CannotResolveCCIPAdmin`);
+   `test_RegisterAdmin_GetCCIPAdminMismatchFallsThrough` (path 1 condition fails,
+   falls through to revert); `test_RegisterAdmin_AccessControlPath_FallsThroughAgainstV15Module`
+   (path 3 reached, v1.6 selector unavailable on the vendored v1.5 module, inner
+   try/catch fallthrough fires path-4 revert with a clear diagnostic).
+   Side effect: the path-3 invocation is now wrapped in its own try/catch in
+   `script/04_RegisterAdminAndPool.s.sol` so an unexpectedly-v1.5 registry produces
+   a clear `CannotResolveCCIPAdmin` instead of a bare empty revert.
 5. **BSC pool ownership handoff has zero unit coverage.** `test_E2E_OwnershipHandoff`
    tests only the ETH-side pool.
 6. **No fuzz tests anywhere.** A minimal `testFuzz_DepositWithdrawRoundtrip(uint128)`

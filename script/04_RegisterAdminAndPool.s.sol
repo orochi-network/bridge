@@ -96,10 +96,15 @@ contract RegisterAdminAndPool is Script, Helper {
         } catch { /* not supported */ }
 
         // Path 3: AccessControl.DEFAULT_ADMIN_ROLE (registry 1.6 path).
+        // Wrap the v1.6 selector call in its OWN try/catch so an operator running against
+        // a registry without `registerAccessControlDefaultAdmin` (e.g. an unexpectedly
+        // v1.5 deployment) falls through to the path-4 diagnostic revert instead of
+        // bubbling up a bare empty revert. See test_Script04PathsTest gap [8] coverage.
         try IAccessControlRead(token).hasRole(0x00, broadcaster) returns (bool has) {
             if (has) {
-                IRegistryModuleOwnerCustom16(moduleAddr).registerAccessControlDefaultAdmin(token);
-                return;
+                try IRegistryModuleOwnerCustom16(moduleAddr).registerAccessControlDefaultAdmin(token) {
+                    return;
+                } catch { /* v1.6 selector not available on this registry */ }
             }
         } catch { /* not supported */ }
 
