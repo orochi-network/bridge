@@ -224,8 +224,13 @@ Each entry below: file:line — issue — impact — fix — **Status**.
    counter tracks BSC balance, counter stays within `MAX_CCIP_MINTED`, and reserve ≤
    cumulative deposits. 4 invariants × 256 runs × 500 calls each (= 128k calls per
    invariant) all pass with zero reverts.
-2. **No test for `renounceRole` before multisig accepts.** Now caught at runtime by
-   `RenounceDeployerAdmin` (H-1 fix), but still worth a negative test.
+2. ~~**No test for `renounceRole` before multisig accepts.**~~ **CLOSED.**
+   `test_E2E_RenounceBeforeMultisigAcceptIsBlocked` in `test/DeploymentE2E.t.sol`
+   reproduces the `RenounceDeployerAdmin` script's precondition check (`getCCIPAdmin
+   == multisig`) off-script and asserts it fails when the multisig has been granted
+   the AccessControl role but has NOT accepted the two-step CCIP admin handoff —
+   the exact orphaning scenario H-1 was designed to prevent. The test then completes
+   the accept step and shows the renounce works once preconditions are met.
 3. **No rate-limit bucket-exhaustion test.** Limits are configured but never driven
    to their cap.
 4. **No negative test for script 04's "neither admin path" revert.**

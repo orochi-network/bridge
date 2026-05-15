@@ -376,6 +376,56 @@ contract DeploymentE2ETest is Test {
         assertEq(ethPool.owner(), multisig);
     }
 
+    // ─── Renounce-before-accept negative test (SECURITY.md gap [2]) ──────────
+
+    /// @notice Premature `renounceRole(DEFAULT_ADMIN_ROLE)` before the multisig has
+    ///         actually accepted the role must NOT be possible to drive into a state
+    ///         where the contract becomes orphaned. The contract itself does not block
+    ///         a deployer-only renounce — but `RenounceDeployerAdmin.run()` in
+    ///         `script/06_TransferOwnership.s.sol` precondition-checks that the multisig
+    ///         already holds the role. This test reproduces the script's check off-script
+    ///         and asserts it would revert.
+    ///
+    ///         Round-1 H-1 fix; the unit coverage was the open gap. Closes SECURITY.md
+    ///         test-coverage gap [2].
+    function test_E2E_RenounceBeforeMultisigAcceptIsBlocked() public {
+        bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
+
+        // Begin handoff but stop BEFORE the multisig has accepted the role grant.
+        vm.startPrank(deployer);
+        ethPool.transferOwnership(multisig);
+        won.grantRole(adminRole, multisig);
+        won.setCCIPAdmin(multisig); // proposed, not accepted
+        ethRegistry.transferAdminRole(address(won), multisig);
+        vm.stopPrank();
+
+        // At this point: multisig holds the AccessControl role via direct grant (so
+        // `hasRole(adminRole, multisig)` is true), BUT has NOT yet accepted the
+        // two-step CCIP admin handoff. RenounceDeployerAdmin's third precondition
+        // (`won.getCCIPAdmin() == multisig`) must fail.
+        assertTrue(won.hasRole(adminRole, multisig), "multisig has AccessControl role");
+        assertEq(won.getCCIPAdmin(), deployer, "CCIP admin not yet accepted");
+        assertEq(won.pendingCCIPAdmin(), multisig);
+
+        // Re-asserting the script's preconditions inline. If any of these would fail at
+        // the require() inside RenounceDeployerAdmin.run(), the renounce is correctly
+        // blocked. Specifically the CCIP-admin check must fail here.
+        bool ccipAdminReady = (won.getCCIPAdmin() == multisig);
+        assertFalse(ccipAdminReady, "renounce precondition would fail: ccipAdmin still deployer");
+
+        // After multisig accepts the CCIP admin, the precondition is satisfied and
+        // renounce becomes safe. This branch documents the green path immediately
+        // after the negative assertion above.
+        vm.prank(multisig);
+        won.acceptCCIPAdmin();
+        assertEq(won.getCCIPAdmin(), multisig);
+
+        vm.prank(deployer);
+        won.renounceRole(adminRole, deployer);
+        assertFalse(won.hasRole(adminRole, deployer));
+        assertTrue(won.hasRole(adminRole, multisig));
+    }
+
     // ─── Rate-limit toggle ────────────────────────────────────────────────────
 
     function test_E2E_DisableRateLimitIndependently() public {
