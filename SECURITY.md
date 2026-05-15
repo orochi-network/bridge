@@ -254,9 +254,13 @@ Each entry below: file:line — issue — impact — fix — **Status**.
    assertions (owner unchanged until accept), and the C-1 trust-model verification that
    after handoff `setRebalancer` is owner-only for the new (multisig) owner — exactly
    the path the BSC custody-handoff RUNBOOK monitoring is designed around.
-6. **No fuzz tests anywhere.** A minimal `testFuzz_DepositWithdrawRoundtrip(uint128)`
-   would catch any 1:1 accounting drift, and a fuzz around `MAX_SUPPLY` would catch
-   off-by-one regressions on the cap.
+6. ~~**No fuzz tests anywhere.**~~ **CLOSED.** Three property fuzz tests in
+   `test/WrappedON.t.sol` (in addition to the stateful invariants from gap [1]):
+   `testFuzz_DepositWithdrawRoundtrip` (deposit→withdraw round-trip preserves every
+   balance exactly); `testFuzz_CcipMintCapBoundary` (mint exactly to the cap succeeds,
+   one wei over reverts — locks the cap arithmetic against off-by-one regressions);
+   `testFuzz_CcipMintBurnRoundtripReusesCap` (mint→burn→mint sequence frees cap
+   headroom). 256 runs each.
 7. **Fork tests don't assert non-zero `rate` / `capacity`.** An `isEnabled=true`
    limiter with zero rate silently blocks all transfers.
 8. **Script 04's `registerAdminViaOwner` and the new `registerAccessControlDefaultAdmin`

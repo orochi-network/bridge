@@ -506,4 +506,75 @@ contract WrappedONTest is Test {
         assertEq(won.name(), "Wrapped Orochi Network");
         assertEq(won.symbol(), "wON");
     }
+
+    // ─── Fuzz tests (SECURITY.md gap [6]) ─────────────────────────────────────
+
+    /// @notice Deposit-then-withdraw must round-trip exactly. Catches any 1:1 accounting
+    ///         drift in the deposit/withdraw pair (e.g. if a fee or rounding crept into
+    ///         the received-amount accounting).
+    function testFuzz_DepositWithdrawRoundtrip(uint128 amount) public {
+        vm.assume(amount > 0);
+        // Bound to MockON supply so the test stays meaningful.
+        amount = uint128(bound(uint256(amount), 1, on.balanceOf(alice)));
+
+        uint256 aliceONBefore = on.balanceOf(alice);
+        uint256 reserveBefore = on.balanceOf(address(won));
+
+        vm.startPrank(alice);
+        on.approve(address(won), amount);
+        won.deposit(amount);
+        assertEq(won.balanceOf(alice), amount, "deposit mints 1:1");
+        assertEq(on.balanceOf(address(won)) - reserveBefore, amount, "reserve grows by amount");
+
+        won.withdraw(amount);
+        vm.stopPrank();
+
+        // After roundtrip: every balance is exactly where it started.
+        assertEq(won.balanceOf(alice), 0, "wON burned");
+        assertEq(on.balanceOf(address(won)), reserveBefore, "reserve back to baseline");
+        assertEq(on.balanceOf(alice), aliceONBefore, "alice ON balance restored");
+        assertEq(won.totalSupply(), 0);
+    }
+
+    /// @notice CCIP mint up to the cap succeeds; one wei over reverts. Boundary fuzz around
+    ///         `MAX_CCIP_MINTED` to catch off-by-one regressions.
+    function testFuzz_CcipMintCapBoundary(uint128 underBy) public {
+        uint256 cap = won.MAX_CCIP_MINTED();
+        underBy = uint128(bound(uint256(underBy), 1, 1_000_000 ether));
+        uint256 firstMint = cap - underBy;
+
+        vm.prank(pool);
+        won.mint(alice, firstMint);
+        assertEq(won.ccipMintedSupply(), firstMint);
+
+        // Filling exactly to the cap must succeed.
+        vm.prank(pool);
+        won.mint(alice, underBy);
+        assertEq(won.ccipMintedSupply(), cap);
+
+        // One wei over must revert.
+        vm.prank(pool);
+        vm.expectRevert(abi.encodeWithSelector(WrappedON.CCIPMintCapExceeded.selector, cap, cap + 1));
+        won.mint(alice, 1);
+    }
+
+    /// @notice CCIP mint→burn→mint roundtrip frees cap headroom. Saturating decrement
+    ///         must allow re-using the cap after each ETH→BSC bridge.
+    function testFuzz_CcipMintBurnRoundtripReusesCap(uint128 amount) public {
+        uint256 cap = won.MAX_CCIP_MINTED();
+        amount = uint128(bound(uint256(amount), 1, cap));
+
+        vm.prank(pool);
+        won.mint(pool, amount);
+        assertEq(won.ccipMintedSupply(), amount);
+
+        vm.prank(pool);
+        won.burn(amount);
+        assertEq(won.ccipMintedSupply(), 0, "burn frees cap");
+
+        // Cap is now fully re-mintable.
+        vm.prank(pool);
+        won.mint(alice, cap);
+        assertEq(won.ccipMintedSupply(), cap);
+    }
 }
