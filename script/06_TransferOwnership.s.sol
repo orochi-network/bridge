@@ -28,8 +28,9 @@ interface ITokenAdminRegistry {
 /// What this script does NOT do:
 ///   - It does NOT renounce the deployer's `DEFAULT_ADMIN_ROLE` on wON. That happens in a
 ///     SEPARATE step AFTER the multisig has confirmed it can act (so the bridge cannot be
-///     orphaned if the multisig setup turns out to be misconfigured). Use the
-///     `renounceDeployerAdmin()` entry point below once you've verified the multisig works.
+///     orphaned if the multisig setup turns out to be misconfigured). Run the
+///     `RenounceDeployerAdmin` contract (its `run()` entry point, defined below in this
+///     file) once you've verified the multisig works.
 ///
 /// Required env vars:
 ///   MULTISIG  — checksummed address of the destination multisig (e.g. Safe).

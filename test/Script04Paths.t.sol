@@ -17,14 +17,15 @@ import {RegisterAdminAndPool} from "../script/04_RegisterAdminAndPool.s.sol";
 
 /// @dev Public test wrapper that exposes the script's internal `_registerAdmin`.
 ///
-///      Note: when the harness invokes `module.registerAdminViaOwner`, the registry sees
-///      msg.sender == harness, NOT broadcaster — so the SUCCESSFUL branches of
-///      `_registerAdmin` cannot be observed through this exposer; the registry rejects
-///      with `CanOnlySelfRegister`. In production the script uses `vm.startBroadcast`
-///      which makes every external call originate from the deployer EOA directly. The
-///      successful paths are tested in this file by calling the registry module directly
-///      with `vm.prank(broadcaster)`; the harness is used only to exercise the failure-
-///      mode dispatch (no admin path matches → `CannotResolveCCIPAdmin` revert).
+///      Note on msg.sender: when the harness invokes the production
+///      `RegistryModuleOwnerCustom`, msg.sender into the module is the harness contract,
+///      not the broadcaster. In production the script wraps the call in `vm.startBroadcast`
+///      which forwards every external call from the deployer EOA. The successful-dispatch
+///      tests below decouple this by swapping in `MockRecordingModule` (records which
+///      function the script chose, with no msg.sender check) — so they test the
+///      dispatch logic, not the module's permission checks. The production module's
+///      msg.sender checks have their own `_RegistryAccepts_` / `_RegistryRejects_`
+///      coverage further down.
 contract RegisterAdminAndPoolHarness is RegisterAdminAndPool {
     function exposeRegisterAdmin(address token, address moduleAddr, address broadcaster) external {
         _registerAdmin(token, moduleAddr, broadcaster);
@@ -50,6 +51,52 @@ contract NoAdminPathToken is ERC20 {
 contract AlwaysOtherCCIPAdmin {
     function getCCIPAdmin() external pure returns (address) {
         return address(0xDEAD);
+    }
+}
+
+contract GetCCIPAdminTokenConfigurable is ERC20 {
+    address public immutable ADMIN;
+
+    constructor(address admin_) ERC20("getCCIPAdmin", "GCA") {
+        ADMIN = admin_;
+    }
+
+    function getCCIPAdmin() external view returns (address) {
+        return ADMIN;
+    }
+}
+
+/// @dev Records the last registration selector invoked, so dispatch tests can assert
+///      script 04 reached the right branch. Has no permission checks — decouples
+///      dispatch verification from the production module's msg.sender requirement.
+contract MockRecordingModule {
+    bytes32 public lastSelector;
+    address public lastToken;
+
+    function registerAdminViaGetCCIPAdmin(address token) external {
+        lastSelector = keccak256("registerAdminViaGetCCIPAdmin");
+        lastToken = token;
+    }
+
+    function registerAdminViaOwner(address token) external {
+        lastSelector = keccak256("registerAdminViaOwner");
+        lastToken = token;
+    }
+
+    function registerAccessControlDefaultAdmin(address token) external {
+        lastSelector = keccak256("registerAccessControlDefaultAdmin");
+        lastToken = token;
+    }
+}
+
+/// @dev Mock module whose v1.6 entrypoint reverts with a structured error — used to
+///      verify that script 04's inner try/catch propagates legitimate v1.6 reverts
+///      rather than swallowing them under `CannotResolveCCIPAdmin`. Round-3 review [7].
+contract MockRevertingModuleV16 {
+    error V16Failed(string reason);
+
+    function registerAccessControlDefaultAdmin(address) external pure {
+        revert V16Failed("token already registered with different admin");
     }
 }
 
@@ -230,5 +277,68 @@ contract Script04PathsTest is Test {
         vm.prank(broadcaster);
         vm.expectRevert(); // CanOnlySelfRegister
         mockModule.registerAccessControlDefaultAdmin(address(token));
+    }
+
+    // ─── Round-3 review [4]: dispatch tests through the harness ─────────────────
+    // These tests verify which selector script 04's `_registerAdmin` calls on the
+    // module for each path's success branch. They use `MockRecordingModule` so
+    // there is no msg.sender check standing between the dispatch and the
+    // observation. The production module's msg.sender requirements are tested
+    // separately by the `_RegistryAccepts_` / `_RegistryRejects_` tests above.
+
+    /// @notice Path 1 success: token exposes `getCCIPAdmin()` returning broadcaster.
+    ///         Script must call `registerAdminViaGetCCIPAdmin(token)`.
+    function test_Dispatch_Path1_GetCCIPAdmin_CallsRegisterAdminViaGetCCIPAdmin() public {
+        GetCCIPAdminTokenConfigurable token = new GetCCIPAdminTokenConfigurable(broadcaster);
+        MockRecordingModule mockModule = new MockRecordingModule();
+
+        harness.exposeRegisterAdmin(address(token), address(mockModule), broadcaster);
+
+        assertEq(mockModule.lastSelector(), keccak256("registerAdminViaGetCCIPAdmin"), "wrong selector dispatched");
+        assertEq(mockModule.lastToken(), address(token), "wrong token passed");
+    }
+
+    /// @notice Path 2 success: token exposes `Ownable.owner()` returning broadcaster
+    ///         (no `getCCIPAdmin()`). Script must call `registerAdminViaOwner(token)`.
+    function test_Dispatch_Path2_Ownable_CallsRegisterAdminViaOwner() public {
+        OwnableOnlyToken token = new OwnableOnlyToken(broadcaster);
+        MockRecordingModule mockModule = new MockRecordingModule();
+
+        harness.exposeRegisterAdmin(address(token), address(mockModule), broadcaster);
+
+        assertEq(mockModule.lastSelector(), keccak256("registerAdminViaOwner"), "wrong selector dispatched");
+        assertEq(mockModule.lastToken(), address(token), "wrong token passed");
+    }
+
+    /// @notice Path 3 success: token exposes `AccessControl.hasRole(0x00, broadcaster)`
+    ///         (no `getCCIPAdmin`, no `Ownable.owner`). Script must call the v1.6
+    ///         `registerAccessControlDefaultAdmin(token)` selector.
+    function test_Dispatch_Path3_AccessControl_CallsRegisterAccessControlDefaultAdmin() public {
+        AccessControlOnlyToken token = new AccessControlOnlyToken(broadcaster);
+        MockRecordingModule mockModule = new MockRecordingModule();
+
+        harness.exposeRegisterAdmin(address(token), address(mockModule), broadcaster);
+
+        assertEq(mockModule.lastSelector(), keccak256("registerAccessControlDefaultAdmin"), "wrong selector dispatched");
+        assertEq(mockModule.lastToken(), address(token), "wrong token passed");
+    }
+
+    /// @notice Path 3 with a structured-revert from the v1.6 entrypoint: script 04 must
+    ///         PROPAGATE the revert rather than swallow it under `CannotResolveCCIPAdmin`.
+    ///         Round-3 review [7] — the inner `catch (bytes memory reason) { … }` only
+    ///         falls through when `reason.length == 0` (the empty-revert signature of a
+    ///         missing selector on a v1.5 registry); any structured revert (token already
+    ///         registered, paused, AccessControl re-check failure) surfaces with its
+    ///         original reason so operators see the real cause.
+    function test_Dispatch_Path3_StructuredRevertPropagates() public {
+        AccessControlOnlyToken token = new AccessControlOnlyToken(broadcaster);
+        MockRevertingModuleV16 mockModule = new MockRevertingModuleV16();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                MockRevertingModuleV16.V16Failed.selector, "token already registered with different admin"
+            )
+        );
+        harness.exposeRegisterAdmin(address(token), address(mockModule), broadcaster);
     }
 }

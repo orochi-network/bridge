@@ -120,6 +120,38 @@ contract WrappedONHandler is Test {
         vm.prank(POOL);
         WON.burn(amount);
     }
+
+    /// @dev Adversarial path (round-3 review [2]): pool burns wON without a matching BSC
+    ///      release — simulates either a buggy/compromised pool that calls `burn` on the
+    ///      wON contract without the BSC side actually releasing, OR a user bridging out
+    ///      deposit-backed wON through CCIP when bscLocked has already been drained (the
+    ///      "deposit→pool-burn cap-bypass" scenario flagged in round-2 review [1]).
+    ///
+    ///      Importantly: `bscLocked` is NOT decremented here, so `ccipMintedSupply`
+    ///      drifts BELOW `bscLocked` and the saturating-decrement branch in
+    ///      `_decrementCcipMinted` becomes fuzzer-reachable. The `invariant_BackingCoversSupply`
+    ///      property must hold under this path because `totalSupply` shrinks while
+    ///      `bscLocked + reserve` does not.
+    ///
+    ///      We deliberately do NOT include an "adversarial-mint" sibling: a pool minting
+    ///      wON without a matching BSC lock CAN break the safety invariant on its own —
+    ///      that's exactly the case the `MAX_CCIP_MINTED` cap exists to bound, and
+    ///      modelling it would test the cap's role rather than the safety invariant's
+    ///      preservation by mechanics. The cap is locked separately via
+    ///      `invariant_CcipMintedSupplyWithinCap`.
+    function adversarialPoolBurn(uint256 actorSeed, uint256 amount) external {
+        address user = _actor(actorSeed);
+        uint256 userBal = WON.balanceOf(user);
+        if (userBal == 0) return;
+        amount = _boundAmt(amount, userBal);
+        vm.prank(user);
+        WON.transfer(POOL, amount);
+        // Note: `bscLocked` deliberately NOT decremented — pool's `_decrementCcipMinted`
+        // saturates at 0 when `amount > ccipMintedSupply`, which is the property under
+        // test here.
+        vm.prank(POOL);
+        WON.burn(amount);
+    }
 }
 
 contract WrappedONInvariantTest is StdInvariant, Test {
@@ -141,12 +173,14 @@ contract WrappedONInvariantTest is StdInvariant, Test {
         handler = new WrappedONHandler(won, onToken, pool);
 
         targetContract(address(handler));
-        // Restrict fuzzer to the handler's four operations.
-        bytes4[] memory selectors = new bytes4[](4);
+        // Restrict fuzzer to the handler's five operations (four honest paths + one
+        // adversarial pool-burn path that walks the cap-bypass scenario).
+        bytes4[] memory selectors = new bytes4[](5);
         selectors[0] = WrappedONHandler.deposit.selector;
         selectors[1] = WrappedONHandler.withdraw.selector;
         selectors[2] = WrappedONHandler.ccipMint.selector;
         selectors[3] = WrappedONHandler.ccipBurn.selector;
+        selectors[4] = WrappedONHandler.adversarialPoolBurn.selector;
         targetSelector(StdInvariant.FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
@@ -163,14 +197,22 @@ contract WrappedONInvariantTest is StdInvariant, Test {
         assertGe(backing, won.totalSupply(), "invariant: BSC lock + ETH reserve < totalSupply");
     }
 
-    /// @notice Under honest CCIP operation (the handler simulates exactly that),
-    ///         `ccipMintedSupply` should equal `bscLocked` at all times. Round-2 review R-14
-    ///         documented this is the actual counter semantic.
-    function invariant_CounterTracksBscLocked() public view {
-        assertEq(
+    /// @notice `ccipMintedSupply` is BOUNDED ABOVE by `bscLocked`. The previous
+    ///         strict-equality form (round-2 review R-14) held only because the honest
+    ///         handler kept both counters in lockstep — making the assertion tautological
+    ///         and unable to walk the saturating-decrement branch (round-3 review [2]).
+    ///         Under the new `adversarialPoolBurn` path the contract's saturating
+    ///         `_decrementCcipMinted` can push `ccipMintedSupply` strictly below
+    ///         `bscLocked`; the bound `ccipMintedSupply <= bscLocked` still holds because
+    ///         every mint increments both counters together and saturating-subtract can
+    ///         only ever shrink the gap further. If a future change ever lets the counter
+    ///         exceed `bscLocked` (i.e. a phantom mint without a matching BSC lock), this
+    ///         invariant flags it.
+    function invariant_CounterBoundedByBscLocked() public view {
+        assertLe(
             won.ccipMintedSupply(),
             handler.bscLocked(),
-            "invariant: ccipMintedSupply should track simulated BSC pool balance"
+            "invariant: ccipMintedSupply exceeds simulated BSC pool balance"
         );
     }
 

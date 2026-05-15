@@ -19,8 +19,11 @@ each finding tracked inline.
 | Low/Nit  | 6 | 5 | 1 (`supportsInterface pure` — no action needed) | 0 |
 | **Original total** | **24** | **19** | **4** | **1** |
 
-PR #19 reviewer follow-ups (R-1 through R-13 below): 11 fixed in code, 2 documented. 50/50
-non-fork tests pass.
+PR #19 reviewer follow-ups (R-1 through R-13 below): 11 fixed in code, 2 documented.
+88/88 non-fork tests pass (round-3 added: 4 Script04 dispatch tests, 1 structured-revert
+propagation test, 2 Script06 guard tests, 3 CCIP-validator spot-checks plus a refactored
+fuzz that runs against the real `RateLimiter` library, and the WrappedONInvariant
+adversarial-pool-burn handler path).
 
 CI status (`feat/ccip-bridge`): Build & test ✓. Slither runs as a non-blocking advisory job
 (`continue-on-error: true`) — its findings are surfaced for triage but do not gate merge.
@@ -154,10 +157,14 @@ Each entry below: file:line — issue — impact — fix — **Status**.
   env is set and asserts (a) multisig holds `DEFAULT_ADMIN_ROLE`, (b) caller
   (deployer) does NOT, and (c) `getCCIPAdmin() == multisig`.
 
-### M-4. Script 07 didn't validate `rate ≤ capacity` and non-zero capacity pre-broadcast
-- **Status: FIXED.** `script/07_UpdateRateLimits.s.sol` now requires
-  `capacity > 0` and `rate <= capacity` for both inbound and outbound BEFORE
-  `vm.startBroadcast`. Typo'd env vars now fail loudly off-chain.
+### M-4. Script 07 didn't validate rate-limit config pre-broadcast
+- **Status: FIXED (superseded by R-21).** `script/07_UpdateRateLimits.s.sol` now runs an
+  off-chain preflight that mirrors CCIP `RateLimiter._validateTokenBucketConfig` exactly:
+  enabled → `rate > 0` AND `rate < capacity` (strict); disabled → `capacity == 0` AND
+  `rate == 0`. Typo'd env vars now fail loudly before `vm.startBroadcast` rather than
+  mid-broadcast inside a Gnosis Safe batch. The original M-4 fix used the weaker
+  `capacity > 0` + non-strict `rate <= capacity` rule, which diverged from CCIP in
+  both directions — see R-21 for the protocol-mirror rewrite.
 
 ### M-5. `Deployments.sol` used relative paths
 - **Status: FIXED.** `path(chainId)` now uses
@@ -218,12 +225,18 @@ Each entry below: file:line — issue — impact — fix — **Status**.
 
 1. ~~**Reserve invariant never directly asserted.**~~ **CLOSED.** `test/WrappedONInvariant.t.sol`
    exercises a stateful handler that drives random sequences of `deposit` / `withdraw` /
-   CCIP `mint` / CCIP `burn` against a real `WrappedON`, with a simulated BSC pool balance,
-   and continuously asserts the audit safety invariant
-   `lockedON_BSC + reserveON_ETH >= totalSupply(wON)` — plus three companion invariants:
-   counter tracks BSC balance, counter stays within `MAX_CCIP_MINTED`, and reserve ≤
-   cumulative deposits. 4 invariants × 256 runs × 500 calls each (= 128k calls per
-   invariant) all pass with zero reverts.
+   CCIP `mint` / CCIP `burn` / `adversarialPoolBurn` against a real `WrappedON`, with a
+   simulated BSC pool balance, and continuously asserts the audit safety invariant
+   `lockedON_BSC + reserveON_ETH >= totalSupply(wON)` plus three companion invariants:
+   `ccipMintedSupply <= bscLocked` (bound, not equality — round-3 review [2]),
+   `ccipMintedSupply <= MAX_CCIP_MINTED`, and `reserveON <= cumulative deposits`. The
+   `adversarialPoolBurn` selector simulates a buggy/compromised pool that burns wON
+   without a matching BSC release — this walks the saturating-decrement branch in
+   `_decrementCcipMinted` (otherwise unreachable when the handler keeps
+   `bscLocked == ccipMintedSupply` in lockstep) and demonstrates that the safety
+   invariant is preserved by the contract's mechanics, not by the handler's bookkeeping.
+   4 invariants × 256 runs × 500 calls each (= 128k calls per invariant) all pass with
+   zero reverts.
 2. ~~**No test for `renounceRole` before multisig accepts.**~~ **CLOSED.**
    `test_E2E_RenounceBeforeMultisigAcceptIsBlocked` in `test/DeploymentE2E.t.sol`
    reproduces the `RenounceDeployerAdmin` script's precondition check (`getCCIPAdmin
@@ -330,7 +343,7 @@ Each entry below: file:line — issue — impact — fix — **Status**.
 - [x] M-7: 2-step `setCCIPAdmin`.
 - [x] M-9: `nonReentrant` + received-amount accounting on wON.
 - [x] All 8 test-coverage gaps closed (see "Test coverage gaps" section above for the
-      per-gap test list; 70 non-fork tests pass + 4 stateful invariants × 128k calls each).
+      per-gap test list; 88 non-fork tests pass + 4 stateful invariants × 128k calls each).
 - [ ] Operational: deploy to Sepolia ⇄ BSC Testnet first, then mainnet.
 - [ ] Operational: fill in `script/Helper.sol` placeholder addresses from
       https://docs.chain.link/ccip/directory before broadcasting on mainnet.
@@ -529,6 +542,118 @@ reviewer's order.
 
 ---
 
+## PR #19 round-3 review follow-ups (brng1151)
+
+A third review pass on commit `8e14688` raised 9 additional items, all of which are
+addressed below (R-22 through R-30).
+
+### R-22. PrecheckHelper required `onToken` on BSC testnet placeholder (round-3 [1])
+- **Where:** `script/PrecheckHelper.s.sol`.
+- **Issue:** Round-2 R-17 broadened the `onToken` precheck from "mainnet only" to "BSC
+  mainnet AND BSC testnet (97)". But `Helper.sol` intentionally encodes
+  `onToken: address(0)` for BSC testnet ("deploy a mock for testing"). Result: every
+  Sepolia / BSC-testnet deploy reverts with `PlaceholderField(97, "onToken")` in the
+  precheck before any work happens. The testnet flow that R-17 was meant to harden
+  became non-functional.
+- **Status: FIXED.** Precheck now requires `onToken` on BSC mainnet (56) only. The
+  testnet flow expects operators to deploy a mock and patch Helper manually before
+  broadcast — surfacing as a clear `MissingAddress` revert in script 05 if they
+  forget, rather than a confused precheck failure on the canonical placeholder.
+
+### R-23. Stateful invariant fuzz did not walk the cap-bypass path (round-3 [2])
+- **Where:** `test/WrappedONInvariant.t.sol`.
+- **Issue:** The handler kept `bscLocked == ccipMintedSupply` in lockstep — making
+  `invariant_CounterTracksBscLocked` tautological and the saturating branch in
+  `_decrementCcipMinted` unreachable. The deposit→pool-burn cap-bypass scenario
+  flagged in round-2 review [1] was the path the handler refused to walk.
+- **Status: FIXED.** New `adversarialPoolBurn(...)` handler selector simulates a
+  buggy/compromised pool that burns wON without a matching BSC release (`bscLocked`
+  unchanged, `WON.burn(amount)` invoked). The saturating-decrement branch is now
+  fuzzer-reachable; `invariant_CounterTracksBscLocked` weakened to
+  `invariant_CounterBoundedByBscLocked` (`ccipMintedSupply <= bscLocked`) which holds
+  under both honest and adversarial-burn paths and is meaningful (not handler-tautological).
+
+### R-24. `MultisigEqualsDeployer` guard had no unit coverage (round-3 [3])
+- **Where:** `script/06_TransferOwnership.s.sol`.
+- **Issue:** Round-2 R-16 added the `if (multisig == msg.sender) revert MultisigEqualsDeployer(addr);`
+  check in both `TransferOwnership.run()` and `RenounceDeployerAdmin.run()`. No test
+  exercised the new revert; a regression dropping the guard would have silently landed.
+- **Status: FIXED.** New `test/Script06Guards.t.sol` directly invokes both scripts
+  with `MULTISIG=$DEPLOYER` set via `vm.setEnv` and asserts the
+  `MultisigEqualsDeployer(addr)` selector fires.
+
+### R-25. Script 04 dispatch had no unit coverage of success paths (round-3 [4])
+- **Where:** `test/Script04Paths.t.sol`.
+- **Issue:** The `_RegistryAccepts_RegisterAdminViaOwner` and
+  `_RegistryAccepts_RegisterAccessControlDefaultAdmin` tests called the registry module
+  DIRECTLY. They locked the call shape of `RegistryModuleOwnerCustom` /
+  `MockRegistryModuleV16` but never went through script 04's `_registerAdmin` dispatch,
+  so paths 1 / 2 / 3 success branches in the script had no observation.
+- **Status: FIXED.** New `MockRecordingModule` records which registration selector the
+  script chose. Three new tests — `test_Dispatch_Path1_GetCCIPAdmin_…`,
+  `test_Dispatch_Path2_Ownable_…`, `test_Dispatch_Path3_AccessControl_…` — exercise
+  the harness's `exposeRegisterAdmin` against the recording mock and assert the
+  correct module function was invoked with the right token argument. The earlier
+  module-direct tests are retained as msg.sender-check coverage for the production
+  module.
+
+### R-26. CLAUDE.md still referenced dead `MAX_SUPPLY` / `SupplyCapExceeded` symbols (round-3 [5])
+- **Where:** `CLAUDE.md` lines 9–11 and 47–49.
+- **Issue:** R-1 renamed `MAX_SUPPLY` → `MAX_CCIP_MINTED` and `SupplyCapExceeded` →
+  `CCIPMintCapExceeded`, and the cap now applies to `mint()` only (not `deposit`).
+  CLAUDE.md still described both old names and the old behaviour — future agents
+  grepping would find nothing.
+- **Status: FIXED.** Both passages rewritten to describe the current
+  `MAX_CCIP_MINTED`/`ccipMintedSupply` mint cap, the uncapped `deposit` path, and
+  cross-reference R-1 + R-14 for the full semantics.
+
+### R-27. Script 06 NatSpec referenced a nonexistent `renounceDeployerAdmin()` function (round-3 [6])
+- **Where:** `script/06_TransferOwnership.s.sol` NatSpec preamble.
+- **Issue:** Docstring said "use the `renounceDeployerAdmin()` entry point below" but
+  the artifact is a separate `RenounceDeployerAdmin` contract with a `run()` entry —
+  operators grepping for the function name found nothing.
+- **Status: FIXED.** NatSpec updated to point at the `RenounceDeployerAdmin` contract's
+  `run()` entry.
+
+### R-28. Script 04 inner `catch` swallowed structured v1.6 reverts (round-3 [7])
+- **Where:** `script/04_RegisterAdminAndPool.s.sol`.
+- **Issue:** The bare `catch { /* v1.6 selector not available */ }` wrapping the v1.6
+  call fell through on ANY revert. A legitimate v1.6 failure (token already registered
+  with a different admin, registry paused, re-check failure on AccessControl) got
+  swallowed and the operator saw the misleading `CannotResolveCCIPAdmin` "no permission
+  to register" diagnostic instead of the actual cause.
+- **Status: FIXED.** Replaced with `catch (bytes memory reason) { if (reason.length != 0)
+  { assembly { revert(add(reason, 0x20), mload(reason)) } } }` so empty reverts (selector
+  absent on a v1.5 registry) fall through to the path-4 diagnostic, but every structured
+  revert propagates to the operator unmodified. New unit test
+  `test_Dispatch_Path3_StructuredRevertPropagates` locks this behaviour against
+  `MockRevertingModuleV16`.
+
+### R-29. SECURITY.md M-4 contradicted R-21 within the same file (round-3 [8])
+- **Where:** `SECURITY.md` M-4.
+- **Issue:** R-21 rewrote the preflight to mirror CCIP's strict rule (`rate > 0` AND
+  `rate < capacity` when enabled; both zero when disabled). M-4's "FIXED" description
+  still claimed the script "now requires `capacity > 0` and `rate <= capacity`" — both
+  weak forms R-21 explicitly removed. M-4 and R-21 disagreed on what the actual fix was.
+- **Status: FIXED.** M-4 reframed as "FIXED (superseded by R-21)" with the strict
+  CCIP-mirroring rule described and the original weak rule called out as the bug
+  R-21 fixed.
+
+### R-30. `testFuzz_PreflightAgreesWithCcip` was a hand-mirror, not a true cross-check (round-3 [9])
+- **Where:** `test/Script07Preflight.t.sol`.
+- **Issue:** The fuzz did not call `RateLimiter._validateTokenBucketConfig`. Its
+  `_callCcipValidate` re-implemented the protocol's rule inline; a misread of the rule
+  would have been baked into both the script preflight AND the "oracle" simultaneously,
+  defeating the cross-check.
+- **Status: FIXED.** New `CcipRateLimiterValidator` contract is a thin external wrapper
+  around `RateLimiter._validateTokenBucketConfig` (callable because it's an `internal
+  pure` library function). The fuzz now runs against the real protocol code; three
+  concrete spot-check tests pin the wrapper's behaviour so a future CCIP version bump
+  shows up as a test-suite divergence rather than silent drift. Assertion strengthened
+  to bidirectional `assertEq(preflightAccepts, ccipAccepts, …)` — the disabled-direction
+  zero-config case (the bug M-4's original rule got wrong) is now covered in both
+  directions.
+
 ---
 
 ## Chainlink CCIP compliance audit
@@ -596,8 +721,10 @@ through the registry's per-pool addressing.
   could fail `_validateTokenBucketConfig` mid-broadcast (the exact mid-broadcast-revert
   failure mode M-4 was meant to prevent), AND the valid disabled-direction
   `(capacity=0, rate=0)` config was incorrectly blocked. Fix: new `_validateBucket`
-  helper that mirrors CCIP's rule exactly; new `test/Script07Preflight.t.sol` (9 tests
-  including a 256-run fuzz that asserts preflight ↔ CCIP equivalence on every input).
+  helper that mirrors CCIP's rule exactly; new `test/Script07Preflight.t.sol` (12 tests)
+  fuzzes script preflight ↔ `RateLimiter._validateTokenBucketConfig` equivalence directly
+  against the protocol code via the `CcipRateLimiterValidator` external wrapper (round-3
+  review [9] — earlier draft compared against a hand-mirror of the rule).
 
 ### Best-practice items (not fixed, operational decision)
 
@@ -618,8 +745,10 @@ through the registry's per-pool addressing.
 
 ## Test suite total
 
-`forge test --no-match-path 'test/fork/**'` → **79 tests pass** (was 70 after closing
-test-coverage gaps; +9 added by the Chainlink-compliance pass for `script/07`
-preflight). Plus 4 stateful invariants × 256 runs × 500 calls each in
-`test/WrappedONInvariant.t.sol` (128k assertions per invariant). Fork tests
-(`test/fork/*`) compile and run against ETH_RPC / BSC_RPC.
+`forge test --no-match-path 'test/fork/**'` → **88 tests pass** (was 79 after the
+Chainlink-compliance pass; +9 added in the round-3 review-follow-ups for Script04
+dispatch coverage, Script06 multisig-guard coverage, and CCIP-validator wrapper
+spot-checks). Plus 4 stateful invariants × 256 runs × 500 calls each in
+`test/WrappedONInvariant.t.sol` (128k assertions per invariant), now including an
+`adversarialPoolBurn` selector that walks the saturating-decrement branch (round-3
+review [2]). Fork tests (`test/fork/*`) compile and run against ETH_RPC / BSC_RPC.

@@ -14,15 +14,31 @@ contract UpdateRateLimitsHarness is UpdateRateLimits {
     }
 }
 
+/// @dev Thin external wrapper around `RateLimiter._validateTokenBucketConfig` (an `internal
+///      pure` function in the vendored CCIP library) so the fuzz cross-check can actually
+///      execute the protocol's check rather than a hand-mirror of it. `mustBeDisabled=false`
+///      matches what `TokenPool.setChainRateLimiterConfig` passes through to the validator
+///      for a routine rate-limit update — see `lib/ccip/.../TokenPool.sol`
+///      `setChainRateLimiterConfig` → `_setRateLimitConfig` → `_validateTokenBucketConfig(_, false)`.
+///      Round-3 review [9]: lifts the fuzz from a hand-mirror to a true behavioural
+///      equivalence test against the on-chain protocol code.
+contract CcipRateLimiterValidator {
+    function validate(RateLimiter.Config calldata cfg) external pure {
+        RateLimiter._validateTokenBucketConfig(cfg, false);
+    }
+}
+
 /// @notice Verifies that `_validateBucket` agrees with CCIP `RateLimiter._validateTokenBucketConfig`
 ///         on every boundary. A mismatch lets an operator broadcast a config that the protocol
 ///         then rejects mid-tx — which is exactly the failure mode SECURITY.md M-4 was
 ///         designed to prevent. This is a Chainlink-compliance regression test.
 contract Script07PreflightTest is Test {
     UpdateRateLimitsHarness internal h;
+    CcipRateLimiterValidator internal ccipValidator;
 
     function setUp() public {
         h = new UpdateRateLimitsHarness();
+        ccipValidator = new CcipRateLimiterValidator();
     }
 
     function _cfg(bool enabled, uint128 cap, uint128 rate) internal pure returns (RateLimiter.Config memory) {
@@ -73,10 +89,14 @@ contract Script07PreflightTest is Test {
         h.exposeValidateBucket(_cfg(false, 0, 1), "INBOUND");
     }
 
-    // ─── Cross-check: any preflight-accepted config is also CCIP-accepted ──────
+    // ─── Cross-check: preflight ↔ actual CCIP `_validateTokenBucketConfig` ────
 
-    /// @dev If our preflight accepts a config, CCIP must also accept it. Fuzz over both
-    ///      enabled and disabled configs to lock this property.
+    /// @dev Fuzz both directions of equivalence against the REAL `RateLimiter` library
+    ///      (via `CcipRateLimiterValidator` — an external wrapper around the internal
+    ///      protocol check). If the script preflight diverges from the protocol — in
+    ///      either direction — this fails. Round-3 review [9]: previously the fuzz
+    ///      compared the script against a hand-rolled re-implementation of the rule,
+    ///      so a shared misread of the protocol would have been invisible.
     function testFuzz_PreflightAgreesWithCcip(bool enabled, uint128 cap, uint128 rate) public {
         RateLimiter.Config memory cfg = _cfg(enabled, cap, rate);
 
@@ -87,29 +107,32 @@ contract Script07PreflightTest is Test {
         }
 
         bool ccipAccepts = true;
-        try this._callCcipValidate(cfg) {}
+        try ccipValidator.validate(cfg) {}
         catch {
             ccipAccepts = false;
         }
 
-        // The key property: when our preflight accepts, CCIP must too. (CCIP-strict and
-        // preflight-strict are now equivalent; this fuzz pins them together.)
-        if (preflightAccepts) {
-            assertTrue(ccipAccepts, "preflight accepted a config CCIP would reject");
-        }
-        if (ccipAccepts) {
-            assertTrue(preflightAccepts, "preflight rejected a config CCIP would accept");
-        }
+        // Equivalence in both directions: every config the preflight accepts must also
+        // pass the protocol's check, AND vice-versa. The disabled-direction half
+        // (capacity=0 + rate=0) is the case M-4's original non-strict rule got wrong.
+        assertEq(preflightAccepts, ccipAccepts, "preflight diverges from RateLimiter._validateTokenBucketConfig");
     }
 
-    function _callCcipValidate(RateLimiter.Config calldata cfg) external pure {
-        // Internal Solidity reflection: we can't call `RateLimiter._validateTokenBucketConfig`
-        // directly (internal). Re-implement the protocol's exact check here so the fuzz
-        // compares the script's preflight against the protocol's published rule.
-        if (cfg.isEnabled) {
-            require(cfg.rate < cfg.capacity && cfg.rate != 0, "ccip-enabled invalid");
-        } else {
-            require(cfg.rate == 0 && cfg.capacity == 0, "ccip-disabled non-zero");
-        }
+    /// @notice Concrete spot-check that the CCIP validator wrapper actually reaches the
+    ///         protocol code. If `RateLimiter._validateTokenBucketConfig` ever shifts
+    ///         its rule (e.g. a CCIP version bump that allows `rate == capacity`), this
+    ///         test forces the change to surface as a fuzz-test divergence on the
+    ///         relevant input rather than passing silently.
+    function test_CcipValidatorRejectsEnabledRateEqualsCapacity() public {
+        vm.expectRevert(); // RateLimiter.InvalidRateLimitRate
+        ccipValidator.validate(_cfg(true, 100 ether, 100 ether));
+    }
+
+    function test_CcipValidatorAcceptsValidEnabledConfig() public view {
+        ccipValidator.validate(_cfg(true, 100 ether, 10 ether));
+    }
+
+    function test_CcipValidatorAcceptsDisabledZeroConfig() public view {
+        ccipValidator.validate(_cfg(false, 0, 0));
     }
 }

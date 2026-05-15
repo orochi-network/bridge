@@ -98,15 +98,29 @@ contract RegisterAdminAndPool is Script, Helper {
         // Path 3: AccessControl.DEFAULT_ADMIN_ROLE (registry 1.6 path).
         // Wrap the v1.6 selector call in its OWN try/catch so an operator running against
         // a registry without `registerAccessControlDefaultAdmin` (e.g. an unexpectedly
-        // v1.5 deployment) falls through to the path-4 diagnostic revert instead of
-        // bubbling up a bare empty revert. See test_Script04PathsTest gap [8] coverage.
+        // v1.5 deployment) falls through to the path-4 diagnostic revert. Catch the
+        // EMPTY revert (selector not in the contract's dispatcher → 0-byte return) only;
+        // any structured revert from a real v1.6 call — token already registered, registry
+        // paused, AccessControl re-check failure, etc. — propagates so the operator sees
+        // the actual reason rather than the misleading `CannotResolveCCIPAdmin` diagnostic
+        // (round-3 review [7]).
         try IAccessControlRead(token).hasRole(0x00, broadcaster) returns (bool has) {
             if (has) {
                 try IRegistryModuleOwnerCustom16(moduleAddr).registerAccessControlDefaultAdmin(token) {
                     return;
-                } catch { /* v1.6 selector not available on this registry */ }
+                } catch (bytes memory reason) {
+                    if (reason.length != 0) {
+                        // Real revert from a v1.6 registry — bubble it up rather than
+                        // misattributing the failure to a missing selector.
+                        assembly {
+                            revert(add(reason, 0x20), mload(reason))
+                        }
+                    }
+                    // Empty revert: selector absent (v1.5 fallthrough). Fall through to
+                    // the path-4 diagnostic.
+                }
             }
-        } catch { /* not supported */ }
+        } catch { /* token does not implement IAccessControlRead */ }
 
         revert CannotResolveCCIPAdmin(
             token,

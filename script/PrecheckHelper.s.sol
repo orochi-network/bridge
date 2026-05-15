@@ -37,12 +37,14 @@ contract PrecheckHelper is Script, Helper {
         _check(chainId, cfg.registryModuleOwnerCustom, "registryModuleOwnerCustom");
         _check(chainId, cfg.linkToken, "linkToken");
 
-        // onToken: required on mainnet, AND on BSC testnet (script 05 reads it as the
-        // remote-token argument; address(0) would fail `_requireSet(remoteToken, …)`).
-        // ETH-side (chainId 1 / 11_155_111) reads `wrappedON` from Deployments, not Helper,
-        // so the Helper `onToken` for those chains can stay zero.
-        bool needsOnToken = chainId == 56 || chainId == 97;
-        if (needsOnToken) _check(chainId, cfg.onToken, "onToken");
+        // onToken: required on BSC mainnet only. Helper hardcodes BSC mainnet to the
+        // canonical address, but BSC testnet (97) is intentionally `address(0)` — no
+        // canonical ON exists there, the operator deploys a mock and patches Helper
+        // before broadcasting (or stubs script 05's remote-token lookup). Forcing a
+        // non-zero address(0) on testnet here makes every Sepolia deploy revert in
+        // precheck (round-3 review [1]). ETH-side (chainId 1 / 11_155_111) reads
+        // `wrappedON` from Deployments JSON, not Helper, so its `onToken` stays zero.
+        if (chainId == 56) _check(chainId, cfg.onToken, "onToken");
     }
 
     function _check(uint256 chainId, address a, string memory field) internal pure {

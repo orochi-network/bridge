@@ -7,7 +7,7 @@ This file is project memory for Claude Code working in this repository. Keep it 
 A Foundry project implementing a **Chainlink CCIP Cross-Chain Token (CCT) bridge** for the Orochi Network **ON** token between Ethereum Mainnet and BNB Smart Chain.
 
 - **BSC side**: stock `LockReleaseTokenPool` against the existing ON token. `acceptLiquidity = false` on construction disables `provideLiquidity`; the operator multisig still has custody of the reserve via `setRebalancer` → `withdrawLiquidity` (Chainlink CCT trust model — see [Trust model](#trust-model-bsc-reserve-custody)).
-- **Ethereum side**: stock `BurnMintTokenPool` against a new **wON** token (this repo's only custom contract). wON has a hard `MAX_SUPPLY` of 100M.
+- **Ethereum side**: stock `BurnMintTokenPool` against a new **wON** token (this repo's only custom contract). The CCIP `mint` path is bounded by `MAX_CCIP_MINTED = 100M` (tracked via `ccipMintedSupply`); `deposit` is uncapped and bounded naturally by ETH-side ON supply.
 - **wON** is also a 1:1 wrapper holding a reserve of native ETH-side ON. `deposit` mints wON 1:1 against deposited ON (received-amount accounting, `nonReentrant`); `withdraw` burns wON and returns ON when the reserve allows.
 
 ## Token addresses (canonical)
@@ -45,7 +45,7 @@ There are TWO mint paths for wON; both produce identical fungible tokens but bac
 
 Documented invariant: `wrapBackedSupply <= ON.balanceOf(WrappedON)`. `withdraw` reverts when `ON.balanceOf(this) < amount`. CCIP-bridged users who want native ETH ON depend on someone else having wrapped — this is an arbitrage layer, not a guaranteed redemption.
 
-**Hard supply cap**: `WrappedON.MAX_SUPPLY = 100_000_000 ether`. Both `deposit` and `mint` revert with `SupplyCapExceeded` if `totalSupply() + amount` would exceed this. The cap matches the canonical ON supply on BSC, which is the absolute upper bound on what the bridge can ever reflect onto Ethereum (audit C-3).
+**CCIP mint cap**: `WrappedON.MAX_CCIP_MINTED = 100_000_000 ether` bounds `ccipMintedSupply` — the counter incremented in `mint(...)` and saturating-decremented in every burn entrypoint. `mint` reverts `CCIPMintCapExceeded(cap, wouldBe)` when `ccipMintedSupply + amount` would exceed the cap; `deposit` is intentionally uncapped (bounded by ETH-side ON supply) so heavy wrap usage cannot starve inbound CCIP messages. The cap matches the canonical ON supply on BSC, which is the absolute upper bound on what the bridge can ever reflect onto Ethereum — see `SECURITY.md` C-3 / R-1 / R-14 for the full reasoning on why the counter is a BSC-pool-balance approximation, not a circulating-CCIP-minted accounting.
 
 ## Trust model: BSC reserve custody
 
@@ -80,7 +80,7 @@ deployments/<chainId>.json        written by scripts via vm.writeJson
 Everything goes through the `Makefile`. The full sequence is documented in `RUNBOOK.md`. Key targets:
 
 - `make install`               — submodule init + patch-pragmas (one-time after clone).
-- `make test`                  — full test suite (79 tests + 4 stateful invariants, no fork).
+- `make test`                  — full test suite (88 tests + 4 stateful invariants, no fork).
 - `make test-unit`             — WrappedON.t.sol unit tests only.
 - `make test-e2e`              — PoolRoundtrip + DeploymentE2E integration tests.
 - `make test-fork ETH_RPC=... BSC_RPC=...` — fork tests against live mainnet (9 tests).
