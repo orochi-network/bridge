@@ -376,6 +376,58 @@ contract DeploymentE2ETest is Test {
         assertEq(ethPool.owner(), multisig);
     }
 
+    // ─── BSC-side ownership handoff (SECURITY.md gap [5]) ────────────────────
+
+    /// @notice Sibling to `test_E2E_OwnershipHandoff` — exercises the BSC pool's
+    ///         Ownable transfer + TokenAdminRegistry transferAdminRole on the BSC side.
+    ///         wON does not exist on BSC, so no DEFAULT_ADMIN_ROLE handoff here — but the
+    ///         two two-step transitions (pool Ownable, registry admin) must both go
+    ///         through correctly, AND the BSC pool's `setRebalancer` / `withdrawLiquidity`
+    ///         path (the Chainlink CCT trust model — SECURITY.md C-1) must move from
+    ///         deployer-controlled to multisig-controlled.
+    function test_E2E_BSCOwnershipHandoff() public {
+        // The BSC pool was deployed by `bscTokenOwner` in setUp (see _run02_deployPools).
+        assertEq(bscPool.owner(), bscTokenOwner, "initial BSC pool owner == bscTokenOwner");
+
+        // BSC registry admin was set to bscTokenOwner in _run04_registerAdminAndPool.
+        assertEq(bscRegistry.getTokenConfig(address(onBsc)).administrator, bscTokenOwner);
+
+        // Begin handoff on BSC side — bscTokenOwner transfers pool ownership + registry admin.
+        vm.startPrank(bscTokenOwner);
+        bscPool.transferOwnership(multisig);
+        bscRegistry.transferAdminRole(address(onBsc), multisig);
+        vm.stopPrank();
+
+        // Mid-state: pool.owner still bscTokenOwner (two-step requires accept).
+        assertEq(bscPool.owner(), bscTokenOwner, "owner unchanged until multisig accepts");
+
+        // BSC token registry: transfer is also two-step in CCIP's TokenAdminRegistry.
+        // Pending administrator is now multisig; current administrator still bscTokenOwner.
+        assertEq(bscRegistry.getTokenConfig(address(onBsc)).pendingAdministrator, multisig);
+        assertEq(bscRegistry.getTokenConfig(address(onBsc)).administrator, bscTokenOwner);
+
+        // Multisig accepts both.
+        vm.startPrank(multisig);
+        bscPool.acceptOwnership();
+        bscRegistry.acceptAdminRole(address(onBsc));
+        vm.stopPrank();
+
+        // Final state: multisig holds pool ownership + registry admin role.
+        assertEq(bscPool.owner(), multisig, "BSC pool ownership == multisig");
+        assertEq(bscRegistry.getTokenConfig(address(onBsc)).administrator, multisig);
+
+        // Trust-model verification (SECURITY.md C-1): after handoff the multisig CAN
+        // call setRebalancer + withdrawLiquidity (designed Chainlink CCT pattern).
+        // Sanity-check: bscTokenOwner cannot, multisig can.
+        vm.prank(bscTokenOwner);
+        vm.expectRevert(); // owner-only
+        bscPool.setRebalancer(bscTokenOwner);
+
+        vm.prank(multisig);
+        bscPool.setRebalancer(multisig);
+        assertEq(bscPool.getRebalancer(), multisig, "rebalancer is settable by new owner");
+    }
+
     // ─── Renounce-before-accept negative test (SECURITY.md gap [2]) ──────────
 
     /// @notice Premature `renounceRole(DEFAULT_ADMIN_ROLE)` before the multisig has

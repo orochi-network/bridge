@@ -248,8 +248,12 @@ Each entry below: file:line — issue — impact — fix — **Status**.
    Side effect: the path-3 invocation is now wrapped in its own try/catch in
    `script/04_RegisterAdminAndPool.s.sol` so an unexpectedly-v1.5 registry produces
    a clear `CannotResolveCCIPAdmin` instead of a bare empty revert.
-5. **BSC pool ownership handoff has zero unit coverage.** `test_E2E_OwnershipHandoff`
-   tests only the ETH-side pool.
+5. ~~**BSC pool ownership handoff has zero unit coverage.**~~ **CLOSED.**
+   `test_E2E_BSCOwnershipHandoff` in `test/DeploymentE2E.t.sol` exercises the BSC side:
+   pool `Ownable` two-step transfer, registry `transferAdminRole` two-step, mid-state
+   assertions (owner unchanged until accept), and the C-1 trust-model verification that
+   after handoff `setRebalancer` is owner-only for the new (multisig) owner — exactly
+   the path the BSC custody-handoff RUNBOOK monitoring is designed around.
 6. **No fuzz tests anywhere.** A minimal `testFuzz_DepositWithdrawRoundtrip(uint128)`
    would catch any 1:1 accounting drift, and a fuzz around `MAX_SUPPLY` would catch
    off-by-one regressions on the cap.
