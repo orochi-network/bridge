@@ -217,12 +217,13 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
 
     // ─── Internal ─────────────────────────────────────────────────────────────
 
-    /// @dev wON is fungible, so once minted we cannot tell whether a burned token originated
-    /// from CCIP `mint` or from `deposit`. We use saturating subtraction: every CCIP-route
-    /// burn frees cap headroom up to the current `ccipMintedSupply`, then is no-op on the
-    /// counter. Net effect over an arbitrary mint/burn sequence: `ccipMintedSupply` is the
-    /// running ceiling on net CCIP-minted wON in circulation, which is what `MAX_CCIP_MINTED`
-    /// is meant to bound.
+    /// @dev Saturating subtract. Every CCIP-route burn here corresponds to a BSC pool
+    /// `release` of the same amount on the other side — so the counter, viewed as the BSC
+    /// pool's expected locked-ON balance, tracks down in lockstep. Saturation is a defensive
+    /// floor: under honest CCIP operation `ccipMintedSupply` never falls below 0 anyway
+    /// (BSC pool balance can't go negative), so the saturation only matters if a buggy or
+    /// compromised pool over-burns. See contract NatSpec + SECURITY.md R-14 for the
+    /// reasoning on why this is NOT a per-token-provenance counter.
     function _decrementCcipMinted(uint256 amount) internal {
         uint256 current = ccipMintedSupply;
         ccipMintedSupply = amount >= current ? 0 : current - amount;
