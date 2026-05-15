@@ -121,8 +121,18 @@ contract Fork_BSC is Test {
         assertEq(abi.decode(bscPool.getRemotePool(ETH_SELECTOR), (address)), fakeRemoteEthPool);
 
         assertFalse(bscPool.canAcceptLiquidity(), "withdrawLiquidity must be permanently disabled");
-        assertTrue(bscPool.getCurrentOutboundRateLimiterState(ETH_SELECTOR).isEnabled);
-        assertTrue(bscPool.getCurrentInboundRateLimiterState(ETH_SELECTOR).isEnabled);
+
+        // SECURITY.md gap [7]: `isEnabled = true` with `rate = 0` silently bricks the
+        // limiter — every transfer would be blocked because the bucket never refills.
+        // Assert both rate and capacity are strictly positive in addition to the enabled flag.
+        RateLimiter.TokenBucket memory out = bscPool.getCurrentOutboundRateLimiterState(ETH_SELECTOR);
+        RateLimiter.TokenBucket memory inb = bscPool.getCurrentInboundRateLimiterState(ETH_SELECTOR);
+        assertTrue(out.isEnabled, "outbound limiter enabled");
+        assertTrue(inb.isEnabled, "inbound limiter enabled");
+        assertGt(out.capacity, 0, "outbound capacity > 0");
+        assertGt(out.rate, 0, "outbound rate > 0");
+        assertGt(inb.capacity, 0, "inbound capacity > 0");
+        assertGt(inb.rate, 0, "inbound rate > 0");
     }
 
     // ─── Bridge direction 1: BSC → ETH (OnRamp locks ON) ────────────────────────

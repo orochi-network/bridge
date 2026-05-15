@@ -261,8 +261,12 @@ Each entry below: file:line — issue — impact — fix — **Status**.
    one wei over reverts — locks the cap arithmetic against off-by-one regressions);
    `testFuzz_CcipMintBurnRoundtripReusesCap` (mint→burn→mint sequence frees cap
    headroom). 256 runs each.
-7. **Fork tests don't assert non-zero `rate` / `capacity`.** An `isEnabled=true`
-   limiter with zero rate silently blocks all transfers.
+7. ~~**Fork tests don't assert non-zero `rate` / `capacity`.**~~ **CLOSED.**
+   `test_Fork_ETH_PoolWiring` and `test_Fork_BSC_PoolWiring` now read the full
+   `RateLimiter.TokenBucket` for both inbound and outbound limiters and assert
+   `capacity > 0` and `rate > 0` in addition to `isEnabled`. An `isEnabled = true`
+   limiter with zero rate would silently brick all transfers (the bucket never
+   refills) — this catches that misconfiguration at fork-test time.
 8. **Script 04's `registerAdminViaOwner` and the new `registerAccessControlDefaultAdmin`
    paths** are not simulated; only the `getCCIPAdmin` branch is.
 

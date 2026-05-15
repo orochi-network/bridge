@@ -107,8 +107,17 @@ contract Fork_ETH is Test {
 
         assertEq(abi.decode(ethPool.getRemotePool(BSC_SELECTOR), (address)), fakeRemoteBscPool);
 
-        assertTrue(ethPool.getCurrentOutboundRateLimiterState(BSC_SELECTOR).isEnabled);
-        assertTrue(ethPool.getCurrentInboundRateLimiterState(BSC_SELECTOR).isEnabled);
+        // SECURITY.md gap [7]: `isEnabled = true` with `rate = 0` silently bricks the
+        // limiter — every transfer would be blocked because the bucket never refills.
+        // Assert both rate and capacity are strictly positive in addition to the enabled flag.
+        RateLimiter.TokenBucket memory out = ethPool.getCurrentOutboundRateLimiterState(BSC_SELECTOR);
+        RateLimiter.TokenBucket memory inb = ethPool.getCurrentInboundRateLimiterState(BSC_SELECTOR);
+        assertTrue(out.isEnabled, "outbound limiter enabled");
+        assertTrue(inb.isEnabled, "inbound limiter enabled");
+        assertGt(out.capacity, 0, "outbound capacity > 0");
+        assertGt(out.rate, 0, "outbound rate > 0");
+        assertGt(inb.capacity, 0, "inbound capacity > 0");
+        assertGt(inb.rate, 0, "inbound rate > 0");
     }
 
     // ─── Bridge direction 1: BSC → ETH (OffRamp mints wON) ───────────────────────
