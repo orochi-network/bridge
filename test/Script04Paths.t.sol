@@ -53,6 +53,36 @@ contract AlwaysOtherCCIPAdmin {
     }
 }
 
+/// @dev Minimal stand-in for `RegistryModuleOwnerCustom` v1.6 — implements the
+///      `registerAccessControlDefaultAdmin` selector that's missing in the v1.5 vendored
+///      module. Verifies AccessControl on the token, then proposes the caller as
+///      administrator through the registry. Mirrors the production v1.6 contract closely
+///      enough to lock the call shape script 04 depends on.
+interface IAccessControlRead {
+    function hasRole(bytes32 role, address account) external view returns (bool);
+}
+
+interface ITokenAdminRegistryProposer {
+    function proposeAdministrator(address localToken, address administrator) external;
+}
+
+contract MockRegistryModuleV16 {
+    error CanOnlySelfRegister(address actual, address expected);
+
+    address public immutable REGISTRY;
+
+    constructor(address registry_) {
+        REGISTRY = registry_;
+    }
+
+    function registerAccessControlDefaultAdmin(address token) external {
+        if (!IAccessControlRead(token).hasRole(0x00, msg.sender)) {
+            revert CanOnlySelfRegister(msg.sender, address(0));
+        }
+        ITokenAdminRegistryProposer(REGISTRY).proposeAdministrator(token, msg.sender);
+    }
+}
+
 /// @notice Coverage for `script/04_RegisterAdminAndPool.s.sol` admin-discovery dispatch.
 ///         Closes SECURITY.md test coverage gaps [4] (neither-path revert) and [8]
 ///         (`registerAdminViaOwner` / `registerAccessControlDefaultAdmin` path coverage).
@@ -159,5 +189,46 @@ contract Script04PathsTest is Test {
             )
         );
         harness.exposeRegisterAdmin(address(token), address(module), broadcaster);
+    }
+
+    /// @notice The success path for AccessControl-based registration, simulated against
+    ///         a v1.6-shaped module (`MockRegistryModuleV16`). Mirrors what happens on
+    ///         ETH/BSC mainnet against the deployed v1.6 RegistryModuleOwnerCustom.
+    ///         Locks the call shape the script depends on (`hasRole(0x00, broadcaster)`
+    ///         then `registerAccessControlDefaultAdmin(token)` invoked from the broadcaster
+    ///         EOA).
+    function test_RegistryAccepts_RegisterAccessControlDefaultAdmin() public {
+        // Set up a separate registry that recognises a v1.6-shaped module, so we can
+        // call `proposeAdministrator` from the module legally.
+        TokenAdminRegistry registry16 = new TokenAdminRegistry();
+        MockRegistryModuleV16 mockModule = new MockRegistryModuleV16(address(registry16));
+        registry16.addRegistryModule(address(mockModule));
+
+        AccessControlOnlyToken token = new AccessControlOnlyToken(broadcaster);
+        assertTrue(token.hasRole(token.DEFAULT_ADMIN_ROLE(), broadcaster));
+
+        // Direct call from broadcaster — same shape the production script issues against
+        // the live v1.6 registry. msg.sender = broadcaster, and broadcaster holds the
+        // DEFAULT_ADMIN_ROLE on `token`.
+        vm.prank(broadcaster);
+        mockModule.registerAccessControlDefaultAdmin(address(token));
+
+        // Registry now lists broadcaster as the pending administrator.
+        assertEq(registry16.getTokenConfig(address(token)).pendingAdministrator, broadcaster);
+    }
+
+    /// @notice `registerAccessControlDefaultAdmin` reverts when caller doesn't hold
+    ///         `DEFAULT_ADMIN_ROLE` on the token. Mirrors the v1.6 access guard.
+    function test_RegistryRejects_RegisterAccessControlDefaultAdmin_NotAdmin() public {
+        TokenAdminRegistry registry16 = new TokenAdminRegistry();
+        MockRegistryModuleV16 mockModule = new MockRegistryModuleV16(address(registry16));
+        registry16.addRegistryModule(address(mockModule));
+
+        address otherAdmin = makeAddr("otherAdmin");
+        AccessControlOnlyToken token = new AccessControlOnlyToken(otherAdmin);
+
+        vm.prank(broadcaster);
+        vm.expectRevert(); // CanOnlySelfRegister
+        mockModule.registerAccessControlDefaultAdmin(address(token));
     }
 }

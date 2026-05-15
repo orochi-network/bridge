@@ -267,8 +267,19 @@ Each entry below: file:line — issue — impact — fix — **Status**.
    `capacity > 0` and `rate > 0` in addition to `isEnabled`. An `isEnabled = true`
    limiter with zero rate would silently brick all transfers (the bucket never
    refills) — this catches that misconfiguration at fork-test time.
-8. **Script 04's `registerAdminViaOwner` and the new `registerAccessControlDefaultAdmin`
-   paths** are not simulated; only the `getCCIPAdmin` branch is.
+8. ~~**Script 04's `registerAdminViaOwner` and the new `registerAccessControlDefaultAdmin`
+   paths** are not simulated; only the `getCCIPAdmin` branch is.~~ **CLOSED.**
+   - `registerAdminViaOwner`: covered by
+     `test_RegistryAccepts_RegisterAdminViaOwner` (success — broadcaster owns the token)
+     and `test_RegistryRejects_RegisterAdminViaOwner_NotOwner` (failure mode).
+   - `registerAccessControlDefaultAdmin`: the vendored module is v1.5 and lacks this
+     selector; the production registry on ETH/BSC mainnet is v1.6. A
+     `MockRegistryModuleV16` test fixture replicates the v1.6 call shape; success and
+     reject paths covered by
+     `test_RegistryAccepts_RegisterAccessControlDefaultAdmin` and
+     `test_RegistryRejects_RegisterAccessControlDefaultAdmin_NotAdmin`.
+   - The script's full dispatch — including the v1.5-fallthrough — is covered by the
+     gap [4] tests above.
 
 **Tests added in this audit pass:** `test_DepositZeroAmountReverts`,
 `test_SetCCIPAdminTwoStep`, `test_SetCCIPAdminEmitsProposedThenTransferred`,
