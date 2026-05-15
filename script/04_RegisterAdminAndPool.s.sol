@@ -38,8 +38,13 @@ interface IRegistryModuleOwnerCustom16 {
 ///   1. `getCCIPAdmin` (matches Chainlink's wrapper convention).
 ///   2. `Ownable.owner` (most common on BSC tokens).
 ///   3. OZ `AccessControl.DEFAULT_ADMIN_ROLE` (registry 1.6 path).
-///   4. Manual fallback: revert with a clear instruction — the token owner must call
-///      `TokenAdminRegistry.proposeAdministrator(token, admin)` manually before this script can finish.
+///   4. Manual fallback: revert with a clear instruction. `TokenAdminRegistry.proposeAdministrator`
+///      is gated to registered registry modules and the registry owner (Chainlink) — operators
+///      cannot call it directly. Recovery requires either (a) the token owner calling
+///      `RegistryModuleOwnerCustom.registerAdminViaOwner(token)` themselves (which is permissionless
+///      for the token's `Ownable.owner`), or (b) coordinating with Chainlink to register the token
+///      out-of-band. After the admin is set, re-run this script with `--skip-register` semantics —
+///      `acceptAdminRole` and `setPool` are idempotent.
 contract RegisterAdminAndPool is Script, Helper {
     error CannotResolveCCIPAdmin(address token, string detail);
 
@@ -100,7 +105,7 @@ contract RegisterAdminAndPool is Script, Helper {
 
         revert CannotResolveCCIPAdmin(
             token,
-            "broadcaster is neither getCCIPAdmin() nor owner() nor AccessControl admin of token; ask token owner to call TokenAdminRegistry.proposeAdministrator(token, broadcaster), then re-run skipping registration."
+            "broadcaster is neither getCCIPAdmin() nor Ownable.owner() nor AccessControl admin of token. Recovery: have the token's Ownable.owner call RegistryModuleOwnerCustom.registerAdminViaOwner(token) (permissionless for the owner), or coordinate with Chainlink to register the admin via the registry. proposeAdministrator on TokenAdminRegistry is NOT operator-callable - it is gated to registered registry modules / Chainlink."
         );
     }
 }

@@ -1,5 +1,5 @@
 .PHONY: help install patch-pragmas build test test-unit test-e2e test-fork fmt fmt-check coverage clean \
-        deploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce renounce-all update-limits
+        precheck-helper deploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce update-limits
 
 # ─── Defaults ──────────────────────────────────────────────────────────────────
 SHELL := /bin/bash
@@ -41,8 +41,13 @@ install:
 # libraries to caret form so they compile with our pinned solc 0.8.34. This is
 # documented in CLAUDE.md and is a working-tree-only patch — it is NOT
 # committed upstream and must be re-applied after every submodule init/update.
+#
+# `sed -i.bak` works on both GNU sed (Linux/CI) and BSD sed (macOS) — GNU
+# accepts both `-i` and `-i.bak`; BSD requires an explicit suffix argument.
+# The `.bak` files are deleted immediately after.
 patch-pragmas:
-	find lib -name "*.sol" -print0 | xargs -0 sed -i 's/^pragma solidity 0\.8\.24;/pragma solidity ^0.8.24;/'
+	find lib -name "*.sol" -print0 | xargs -0 sed -i.bak 's/^pragma solidity 0\.8\.24;/pragma solidity ^0.8.24;/'
+	find lib -name "*.sol.bak" -delete
 
 build:
 	forge build --sizes
@@ -75,8 +80,16 @@ clean:
 	rm -rf broadcast/
 
 # ─── Deployment ─────────────────────────────────────────────────────────────────
+# Asserts that script/Helper.sol has non-placeholder addresses for the target chain
+# (mainnet onToken required; testnet allows a zero onToken since a mock is deployed).
+# Wired as a prerequisite to deploy-eth / deploy-bsc so an operator cannot broadcast
+# against placeholder Helper config. See script/PrecheckHelper.s.sol.
+precheck-helper:
+	@test -n "$(RPC)" || (echo "RPC required"; exit 1)
+	forge script script/PrecheckHelper.s.sol --rpc-url $(RPC)
+
 # Ethereum sequence (Sepolia or mainnet).
-deploy-eth:
+deploy-eth: precheck-helper
 	@test -n "$(RPC)"         || (echo "RPC=sepolia|eth required"; exit 1)
 	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
 	forge script script/01_DeployWrappedON.s.sol      --rpc-url $(RPC) $(DEPLOY_FLAGS)
@@ -86,7 +99,7 @@ deploy-eth:
 	forge script script/05_ApplyChainUpdates.s.sol    --rpc-url $(RPC) $(DEPLOY_FLAGS)
 
 # BSC sequence (testnet or mainnet). Skips 01 and 03 (wON only exists on ETH).
-deploy-bsc:
+deploy-bsc: precheck-helper
 	@test -n "$(RPC)"         || (echo "RPC=bsc_testnet|bsc required"; exit 1)
 	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
 	forge script script/02_DeployPools.s.sol          --rpc-url $(RPC) $(DEPLOY_FLAGS)
@@ -108,8 +121,11 @@ handoff:
 	MULTISIG=$(MULTISIG) forge script script/06_TransferOwnership.s.sol:TransferOwnership \
 	    --rpc-url $(RPC) $(DEPLOY_FLAGS) --sig "run()"
 
-# Atomic two-chain handoff. Both ETH_RPC and BSC_RPC must point at the same operational
-# environment (testnet pair OR mainnet pair) so the same MULTISIG ends up wired on both sides.
+# Two-chain handoff. Sequential, NOT atomic — if the BSC leg fails after the ETH leg
+# succeeds, the bridge is half-handed-off until the operator re-runs the BSC leg. The
+# handoff calls are idempotent so re-running is safe. Both ETH_RPC and BSC_RPC must point
+# at the same operational environment (testnet pair OR mainnet pair) so the same MULTISIG
+# ends up wired on both sides.
 handoff-all:
 	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
 	@test -n "$(ETH_RPC)"     || (echo "ETH_RPC env var required"; exit 1)
@@ -125,10 +141,6 @@ renounce:
 	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
 	MULTISIG=$(MULTISIG) forge script script/06_TransferOwnership.s.sol:RenounceDeployerAdmin \
 	    --rpc-url $(RPC) $(DEPLOY_FLAGS) --sig "run()"
-
-# Renounce on ETH only — wON does not exist on BSC, so this is single-chain by design.
-# We keep a `renounce-all` alias for symmetry with `handoff-all`.
-renounce-all: renounce
 
 update-limits:
 	@test -n "$(RPC)"               || (echo "RPC required"; exit 1)

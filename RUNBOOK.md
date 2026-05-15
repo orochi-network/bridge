@@ -48,7 +48,7 @@ Then `source .env`.
 
 ```bash
 make build
-make test                 # all 26 tests must pass
+make test                 # all 50 non-fork tests must pass
 make fmt-check
 ```
 
@@ -238,5 +238,4 @@ Source the events in `lib/ccip/contracts/src/v0.8/ccip/pools/LockReleaseTokenPoo
 - Deployments JSON: `deployments/<chainId>.json` — written by 01 & 02, read by 03/04/05/06/08.
 - Contracts: `src/WrappedON.sol` (only custom contract).
 - Scripts: `script/01..08_*.s.sol`, `script/Helper.sol`, `script/Deployments.sol`.
-- Tests: `test/WrappedON.t.sol` (unit), `test/PoolRoundtrip.t.sol` (pool wiring), `test/DeploymentE2E.t.sol` (full sequence simulation).
-- Plan of record: `/home/parallels/.claude/plans/orochi-network-token-on-gleaming-cat.md`.
+- Tests: `test/WrappedON.t.sol` (unit), `test/PoolRoundtrip.t.sol` (pool wiring), `test/DeploymentE2E.t.sol` (full sequence simulation), `test/Deployments.t.sol` (deployment-artifact JSON round-trip).

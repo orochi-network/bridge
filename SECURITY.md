@@ -9,7 +9,7 @@ each finding tracked inline.
 
 **Reviewed against:** `lib/ccip @ v2.17.0-ccip1.5.16` (production CCIP 1.5.x ABI).
 
-## Status summary (PR #19, commit 0233f30)
+## Status summary (PR #19, post-review pass)
 
 | Severity | Total | Fixed in code | Accepted (documented) | Partial / operational |
 |---|---:|---:|---:|---:|
@@ -17,10 +17,14 @@ each finding tracked inline.
 | High     | 6 | 4 (H-1, H-3, H-5, H-6) | 1 (H-2) | 1 (H-4) |
 | Medium   | 9 | 8 (M-1, M-2, M-3, M-4, M-5, M-6, M-7, M-9) | 1 (M-8 calibration) | 0 |
 | Low/Nit  | 6 | 5 | 1 (`supportsInterface pure` — no action needed) | 0 |
-| **Total** | **24** | **19** | **4** | **1** |
+| **Original total** | **24** | **19** | **4** | **1** |
 
-CI status (`feat/ccip-bridge`): Build & test ✓, Slither static analysis ✓ (`naming-convention`
-excluded for the deliberate `IERC20 public immutable ON`). 41/41 non-fork tests pass.
+PR #19 reviewer follow-ups (R-1 through R-13 below): 11 fixed in code, 2 documented. 50/50
+non-fork tests pass.
+
+CI status (`feat/ccip-bridge`): Build & test ✓. Slither runs as a non-blocking advisory job
+(`continue-on-error: true`) — its findings are surfaced for triage but do not gate merge.
+Re-enable as a hard gate after resolving the current finding set.
 
 Each entry below: file:line — issue — impact — fix — **Status**.
 
@@ -285,3 +289,106 @@ Each entry below: file:line — issue — impact — fix — **Status**.
       https://docs.chain.link/ccip/directory before broadcasting on mainnet.
 - [ ] Operational: confirm the canonical BSC ON token's CCIP-admin path on a private
       fork before mainnet rollout.
+
+---
+
+## PR #19 review follow-ups
+
+A second pass of automated review on PR #19 raised the items below. Reviewer IDs in
+parentheses link to the originating PR comment.
+
+### R-1. CCIP mint cap collided with deposit path (bao-ninh #1)
+- **Where:** `src/WrappedON.sol`.
+- **Issue:** A single `MAX_SUPPLY = 100M` cap was shared between `deposit()` (deposit-backed)
+  and `mint()` (CCIP-backed). Heavy wrap usage could exhaust the cap and make every inbound
+  CCIP message permanently revert at `releaseOrMint`.
+- **Status: FIXED.** Renamed to `MAX_CCIP_MINTED`; tracked separately via
+  `ccipMintedSupply` (incremented in `mint`, saturating-decremented in all three burn
+  entrypoints so roundtrips free cap headroom). `deposit()` is intentionally uncapped —
+  bounded naturally by ETH-side ON supply. New tests:
+  `test_MintRevertsAtCCIPMintCap`, `test_DepositSucceedsWhenCCIPCapHit`,
+  `test_BurnDecrementsCCIPMintedSupply`, `test_BurnSaturatesCCIPMintedAtZero`,
+  `test_BurnAddressOverloadDecrementsCCIPMinted`, `test_BurnFromDecrementsCCIPMinted`.
+
+### R-2. WrappedON constructor lost two audit-derived guards (brng1151 #1/#5, bao-ninh #5)
+- **Where:** `src/WrappedON.sol` constructor.
+- **Issue:** The previous LayerZero-era contract rejected `_onToken == address(this)`
+  (`SelfReserve`) and `decimals() != 18` (`DecimalsMismatch`). Neither guard carried over
+  into the new constructor, leaving CREATE2-miscalculation and wrong-decimals testnet flows
+  unprotected.
+- **Status: FIXED.** Both reverts restored. New tests
+  `test_ConstructorRevertsOnSelfReserve` and `test_ConstructorRevertsOnDecimalsMismatch`.
+
+### R-3. Script 04 fallback message pointed at a gated registry call (brng1151 #2)
+- **Where:** `script/04_RegisterAdminAndPool.s.sol`.
+- **Issue:** `CannotResolveCCIPAdmin` told operators to call
+  `TokenAdminRegistry.proposeAdministrator`, but that selector is gated to registered
+  registry modules / Chainlink — operators cannot invoke it.
+- **Status: FIXED.** Revert message rewritten to recommend
+  `RegistryModuleOwnerCustom.registerAdminViaOwner` (permissionless for the token's
+  `Ownable.owner`) or coordination with Chainlink to register the admin out-of-band.
+
+### R-4. Script 05 logged `local.chainSelector` instead of `remote.chainSelector` (brng1151 #3)
+- **Where:** `script/05_ApplyChainUpdates.s.sol`.
+- **Status: FIXED.** Log now correctly reports the remote selector. The on-chain wiring
+  was already correct; only the operator-facing log line was wrong.
+
+### R-5. Two contradictory SECURITY.md trackers (brng1151 #3)
+- **Where:** root `SECURITY.md` (post-fix) vs. `docs/SECURITY.md` (pre-fix).
+- **Status: FIXED.** Stale `docs/SECURITY.md` deleted; root `SECURITY.md` is the
+  single authoritative ledger.
+
+### R-6. `Deployments.writeAddress` produced invalid JSON (bao-ninh #2)
+- **Where:** `script/Deployments.sol:38`.
+- **Issue:** `vm.toString(address)` returns a bare hex string without quotes; passing it
+  directly to `vm.writeJson` produces unparseable JSON. The bug was untested.
+- **Status: FIXED.** Address is now wrapped with `"…"` before being passed to `writeJson`.
+  New `test/Deployments.t.sol` round-trips writes through `readAddress` and asserts
+  `parseJsonAddress` succeeds on the produced file.
+
+### R-7. Script 05 was not idempotent (bao-ninh #3)
+- **Where:** `script/05_ApplyChainUpdates.s.sol`.
+- **Issue:** `applyChainUpdates` reverts with `ChainAlreadyExists` when re-run, so a
+  partial-broadcast retry hard-failed.
+- **Status: FIXED.** Script now probes `pool.isSupportedChain(remoteSelector)` before
+  attempting the update; logs and returns cleanly when the wiring already exists.
+
+### R-8. PR description outdated re: `lib/ccip` branch (bao-ninh #4)
+- **Status: ACCEPTED (PR description correction only).** `lib/ccip` is correctly pinned
+  to the released `v2.17.0-ccip1.5.16` tag in `.gitmodules`, `foundry.lock`, and
+  `CLAUDE.md`. The PR description's outdated `ccip-develop` claim has been corrected.
+
+### R-9. `Makefile patch-pragmas` GNU-sed only (bao-ninh #6)
+- **Where:** `Makefile`.
+- **Issue:** `sed -i 's/…/…/'` fails on macOS BSD sed.
+- **Status: FIXED.** Switched to `sed -i.bak` (accepted by both GNU and BSD sed) and
+  delete `*.sol.bak` immediately after.
+
+### R-10. `make handoff-all` overstated as atomic (bao-ninh #7)
+- **Where:** root `SECURITY.md` H-5 wording, `RUNBOOK.md`, `CLAUDE.md`.
+- **Status: FIXED.** Wording softened to "sequential — re-run on partial failure". The
+  second leg has no rollback if the first succeeds; operators must re-run on partial
+  failure (which is safe — handoff steps are idempotent).
+
+### R-11. `MultisigEnvMissing` revert was unreachable (bao-ninh #9)
+- **Where:** `script/06_TransferOwnership.s.sol`.
+- **Issue:** `vm.envAddress("MULTISIG")` itself reverts when the env is unset, so the
+  follow-up `MultisigEnvMissing` check only fired for an explicit `MULTISIG=0x0…0`.
+- **Status: FIXED.** Switched to `vm.envOr("MULTISIG", address(0))` so the manual check
+  catches the unset case with a clear error.
+
+### R-12. Helper placeholders weren't gated by tooling (bao-ninh #12)
+- **Status: FIXED.** New `script/PrecheckHelper.s.sol` asserts mainnet (chainId 1, 56)
+  configs are non-zero. Wired into `make deploy-eth` / `make deploy-bsc` as a hard
+  prerequisite — operators cannot broadcast against placeholder Helper config.
+
+### R-13. Doc/Make hygiene (brng1151 #6 (info), bao-ninh #10/#11/#13/#14)
+- **`script/07_UpdateRateLimits.s.sol`** — NatSpec now spells out that
+  `OUTBOUND_ENABLED` / `INBOUND_ENABLED` accept ONLY the literal strings `true`/`false`.
+- **Test count** — single source of truth: `forge test --no-match-path 'test/fork/**'`
+  reports 50 tests (was 41 pre-review). CLAUDE.md / README.md / RUNBOOK.md updated.
+- **`renounce-all` Make alias removed** — was misleading (handoff-all symmetry was
+  spurious; wON only exists on ETH).
+- **Local-machine plan path removed** from CLAUDE.md and RUNBOOK.md.
+- **`burn(address,uint256)` allowance bypass** (brng1151 #6) — accepted per M-2; the
+  operator-monitoring path on `RoleGranted(BURNER_ROLE,*)` is the documented mitigation.

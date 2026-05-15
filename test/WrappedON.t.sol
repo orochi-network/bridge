@@ -19,6 +19,15 @@ contract MockON is ERC20 {
     }
 }
 
+/// @dev 6-decimal ERC20 used to assert the constructor's decimals guard.
+contract MockON6 is ERC20 {
+    constructor() ERC20("Mock ON 6", "MON6") {}
+
+    function decimals() public pure override returns (uint8) {
+        return 6;
+    }
+}
+
 contract WrappedONTest is Test {
     WrappedON internal won;
     MockON internal on;
@@ -321,31 +330,87 @@ contract WrappedONTest is Test {
         won.acceptCCIPAdmin();
     }
 
-    // ─── Supply cap ───────────────────────────────────────────────────────────
+    // ─── CCIP mint cap ────────────────────────────────────────────────────────
 
-    function test_MintRevertsAtSupplyCap() public {
-        uint256 cap = won.MAX_SUPPLY();
+    function test_MintRevertsAtCCIPMintCap() public {
+        uint256 cap = won.MAX_CCIP_MINTED();
         vm.prank(pool);
         won.mint(alice, cap);
+        assertEq(won.ccipMintedSupply(), cap);
         assertEq(won.totalSupply(), cap);
 
         vm.prank(pool);
-        vm.expectRevert(abi.encodeWithSelector(WrappedON.SupplyCapExceeded.selector, cap, cap + 1));
+        vm.expectRevert(abi.encodeWithSelector(WrappedON.CCIPMintCapExceeded.selector, cap, cap + 1));
         won.mint(alice, 1);
     }
 
-    function test_DepositRevertsAtSupplyCap() public {
-        // Move all 1M mock ON to the cap test: alice holds 1M ON; cap is 100M wON.
-        // To verify the deposit-path cap, pre-mint up to cap via the pool then attempt to deposit 1.
-        uint256 cap = won.MAX_SUPPLY();
+    /// @dev Per PR #19 review (bao-ninh #1), `deposit()` is intentionally NOT subject to the
+    ///      CCIP cap: a fully utilised wrap path must not starve inbound bridge messages.
+    function test_DepositSucceedsWhenCCIPCapHit() public {
+        uint256 cap = won.MAX_CCIP_MINTED();
         vm.prank(pool);
         won.mint(bob, cap);
+        assertEq(won.ccipMintedSupply(), cap);
 
         vm.startPrank(alice);
-        on.approve(address(won), 1);
-        vm.expectRevert(abi.encodeWithSelector(WrappedON.SupplyCapExceeded.selector, cap, cap + 1));
-        won.deposit(1);
+        on.approve(address(won), 100 ether);
+        won.deposit(100 ether); // must NOT revert
         vm.stopPrank();
+
+        assertEq(won.balanceOf(alice), 100 ether);
+        assertEq(won.totalSupply(), cap + 100 ether);
+        assertEq(won.ccipMintedSupply(), cap, "deposit must not move ccipMintedSupply");
+    }
+
+    function test_BurnDecrementsCCIPMintedSupply() public {
+        vm.prank(pool);
+        won.mint(pool, 80 ether);
+        assertEq(won.ccipMintedSupply(), 80 ether);
+
+        vm.prank(pool);
+        won.burn(30 ether);
+        assertEq(won.ccipMintedSupply(), 50 ether, "burn frees cap headroom");
+
+        // Cap should be re-mintable now.
+        vm.prank(pool);
+        won.mint(alice, 30 ether);
+        assertEq(won.ccipMintedSupply(), 80 ether);
+    }
+
+    function test_BurnSaturatesCCIPMintedAtZero() public {
+        // Wrap 100 (no CCIP mint yet).
+        vm.startPrank(alice);
+        on.approve(address(won), 100 ether);
+        won.deposit(100 ether);
+        won.transfer(pool, 100 ether);
+        vm.stopPrank();
+        assertEq(won.ccipMintedSupply(), 0);
+
+        // Pool burns its own 100 wON (via outbound CCIP send of deposit-backed wON).
+        // ccipMintedSupply must NOT underflow — it stays at 0.
+        vm.prank(pool);
+        won.burn(100 ether);
+        assertEq(won.ccipMintedSupply(), 0);
+    }
+
+    function test_BurnAddressOverloadDecrementsCCIPMinted() public {
+        vm.prank(pool);
+        won.mint(alice, 50 ether);
+        vm.prank(pool);
+        won.burn(alice, 20 ether);
+        assertEq(won.ccipMintedSupply(), 30 ether);
+    }
+
+    function test_BurnFromDecrementsCCIPMinted() public {
+        vm.prank(pool);
+        won.mint(alice, 50 ether);
+
+        vm.prank(alice);
+        won.approve(pool, 25 ether);
+
+        vm.prank(pool);
+        won.burnFrom(alice, 25 ether);
+        assertEq(won.ccipMintedSupply(), 25 ether);
     }
 
     // ─── Constructor guards ───────────────────────────────────────────────────
@@ -365,6 +430,24 @@ contract WrappedONTest is Test {
     function test_ConstructorRevertsOnZeroAdmin() public {
         vm.expectRevert(WrappedON.ZeroAddress.selector);
         new WrappedON(IERC20(address(on)), address(0));
+    }
+
+    /// @dev Per PR #19 review (brng1151 #1, bao-ninh #5): constructor must reject the
+    ///      `address(this)` self-reserve case (would make the reserve invariant circular).
+    function test_ConstructorRevertsOnSelfReserve() public {
+        // Compute the next CREATE address — that's where the wON about to be deployed
+        // will live. Pass it as the ON token to trigger the SelfReserve guard.
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        vm.expectRevert(WrappedON.SelfReserve.selector);
+        new WrappedON(IERC20(predicted), admin);
+    }
+
+    /// @dev Per PR #19 review (bao-ninh #5): constructor must reject ON tokens with
+    ///      non-18 decimals (1:1 wrap accounting only holds at matching decimals).
+    function test_ConstructorRevertsOnDecimalsMismatch() public {
+        MockON6 on6 = new MockON6();
+        vm.expectRevert(abi.encodeWithSelector(WrappedON.DecimalsMismatch.selector, 18, 6));
+        new WrappedON(IERC20(address(on6)), admin);
     }
 
     // ─── Metadata ─────────────────────────────────────────────────────────────

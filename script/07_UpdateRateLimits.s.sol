@@ -17,8 +17,10 @@ import {Deployments} from "./Deployments.sol";
 ///   OUTBOUND_RATE      uint128, tokens/sec
 ///   INBOUND_CAPACITY   uint128
 ///   INBOUND_RATE       uint128
-///   OUTBOUND_ENABLED   bool ("true"/"false") — default true
-///   INBOUND_ENABLED    bool — default true
+///   OUTBOUND_ENABLED   bool — accepts ONLY the literal strings "true" or "false".
+///                      Default: true. `1`, `yes`, `on`, etc. cause Foundry to revert
+///                      mid-broadcast — pass an exact string.
+///   INBOUND_ENABLED    bool — same constraint as OUTBOUND_ENABLED. Default: true.
 contract UpdateRateLimits is Script, Helper {
     function run() external {
         NetworkConfig memory local = getConfig(block.chainid);

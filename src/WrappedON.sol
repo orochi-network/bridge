@@ -2,6 +2,7 @@
 pragma solidity 0.8.34;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
@@ -26,9 +27,13 @@ import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/ccip/interfaces/IGetCCIPA
 ///   wrapBackedSupply <= ON.balanceOf(WrappedON)
 /// `withdraw` reverts when the reserve cannot cover the requested amount.
 ///
-/// Supply cap: `MAX_SUPPLY = 100M` matches the canonical ON supply on BSC, which bounds the
-/// maximum wON that can ever be backed by bridged ON. Capping at this value prevents
-/// oversubscription in both mint paths.
+/// Supply cap: `MAX_CCIP_MINTED = 100M` (the canonical ON supply on BSC) is the on-chain
+/// upper bound for the CCIP `mint` path only — it represents the absolute maximum amount
+/// of ON that can ever be locked on the BSC pool and reflected onto Ethereum. The
+/// `deposit` path is NOT subject to this cap because deposit-backed wON is collateralised
+/// by ON already held in this contract's reserve, independently of the BSC reserve. The
+/// two paths are tracked separately so a fully-utilised wrap path cannot starve inbound
+/// CCIP messages (see SECURITY.md C-3 / PR #19 review).
 ///
 /// @dev `IBurnMintERC20` is NOT inherited because it transitively brings the CCIP-vendored
 /// `IERC20` interface, which conflicts with OpenZeppelin's `IERC20` linearization. The
@@ -41,13 +46,19 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
 
-    /// @notice Hard cap on total wON supply. Matches the canonical ON supply on BSC, which is
+    /// @notice Hard cap on CCIP-minted wON. Matches the canonical ON supply on BSC, which is
     ///         the upper bound on ON that can ever be locked on the BSC pool and reflected as
-    ///         wON on Ethereum.
-    uint256 public constant MAX_SUPPLY = 100_000_000 ether;
+    ///         wON on Ethereum. Applies only to the `mint()` path; `deposit()` is bounded
+    ///         naturally by the ETH-side ON supply.
+    uint256 public constant MAX_CCIP_MINTED = 100_000_000 ether;
 
     /// @notice Canonical Orochi Network token on this chain (non-mintable ERC20).
     IERC20 public immutable ON;
+
+    /// @notice Cumulative wON minted via the CCIP `mint()` path. Tracked separately from
+    ///         deposit-backed supply so the cap on bridge-reflected wON does not interfere
+    ///         with the local wrap path.
+    uint256 public ccipMintedSupply;
 
     /// @notice CCIP admin used by `RegistryModuleOwnerCustom.registerAdminViaGetCCIPAdmin`.
     /// @dev Independent from `DEFAULT_ADMIN_ROLE`. Rotation is two-step (propose + accept) to
@@ -65,10 +76,20 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     error OnlyPendingCCIPAdmin();
     error ZeroAddress();
     error ZeroAmount();
-    error SupplyCapExceeded(uint256 cap, uint256 wouldBe);
+    error SelfReserve();
+    error DecimalsMismatch(uint8 expected, uint8 actual);
+    error CCIPMintCapExceeded(uint256 cap, uint256 wouldBe);
 
     constructor(IERC20 onToken, address admin) ERC20("Wrapped Orochi Network", "wON") {
         if (address(onToken) == address(0) || admin == address(0)) revert ZeroAddress();
+        // Defensive: catches CREATE2 salt mistakes and testnet misconfigs where the supplied
+        // ON address would collide with the wON deployment address — making the reserve
+        // invariant `wrapBackedSupply <= ON.balanceOf(this)` circular and meaningless.
+        if (address(onToken) == address(this)) revert SelfReserve();
+        // Defensive: 1:1 wrap accounting only holds when both tokens use the same decimals.
+        // Canonical ON is 18 decimals on both ETH and BSC; reject anything else early.
+        uint8 onDecimals = IERC20Metadata(address(onToken)).decimals();
+        if (onDecimals != decimals()) revert DecimalsMismatch(decimals(), onDecimals);
         ON = onToken;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         s_ccipAdmin = admin;
@@ -87,7 +108,9 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         uint256 before = ON.balanceOf(address(this));
         ON.safeTransferFrom(msg.sender, address(this), amount);
         uint256 received = ON.balanceOf(address(this)) - before;
-        _mintCapped(msg.sender, received);
+        // Deposit is uncapped — bounded naturally by the ETH-side ON supply. Independent of
+        // MAX_CCIP_MINTED so heavy wrap usage cannot starve inbound CCIP messages.
+        _mint(msg.sender, received);
         emit Wrapped(msg.sender, received);
     }
 
@@ -101,24 +124,34 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
 
     // ─── IBurnMintERC20 (pool-only) ───────────────────────────────────────────
 
+    /// @notice CCIP `BurnMintTokenPool.releaseOrMint` entrypoint. Capped at `MAX_CCIP_MINTED`
+    ///         (the canonical BSC ON supply) — the absolute upper bound on what the bridge can
+    ///         ever reflect onto Ethereum. Tracked via `ccipMintedSupply` so the cap is not
+    ///         consumed by deposit-backed wON.
     function mint(address account, uint256 amount) external onlyRole(MINTER_ROLE) {
-        _mintCapped(account, amount);
+        uint256 wouldBe = ccipMintedSupply + amount;
+        if (wouldBe > MAX_CCIP_MINTED) revert CCIPMintCapExceeded(MAX_CCIP_MINTED, wouldBe);
+        ccipMintedSupply = wouldBe;
+        _mint(account, amount);
     }
 
     /// @notice Burns `amount` from `msg.sender`. Used by `BurnMintTokenPool._burn`,
     ///         which transfers user tokens to itself first and then calls `burn(amount)`.
     function burn(uint256 amount) external onlyRole(BURNER_ROLE) {
+        _decrementCcipMinted(amount);
         _burn(msg.sender, amount);
     }
 
     /// @dev Does NOT check allowance — `BURNER_ROLE` must be held exclusively by the audited
     ///      `BurnMintTokenPool`. Matches `IBurnMintERC20` semantics.
     function burn(address account, uint256 amount) external onlyRole(BURNER_ROLE) {
+        _decrementCcipMinted(amount);
         _burn(account, amount);
     }
 
     function burnFrom(address account, uint256 amount) external onlyRole(BURNER_ROLE) {
         _spendAllowance(account, msg.sender, amount);
+        _decrementCcipMinted(amount);
         _burn(account, amount);
     }
 
@@ -158,9 +191,14 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
 
     // ─── Internal ─────────────────────────────────────────────────────────────
 
-    function _mintCapped(address to, uint256 amount) internal {
-        uint256 wouldBe = totalSupply() + amount;
-        if (wouldBe > MAX_SUPPLY) revert SupplyCapExceeded(MAX_SUPPLY, wouldBe);
-        _mint(to, amount);
+    /// @dev wON is fungible, so once minted we cannot tell whether a burned token originated
+    /// from CCIP `mint` or from `deposit`. We use saturating subtraction: every CCIP-route
+    /// burn frees cap headroom up to the current `ccipMintedSupply`, then is no-op on the
+    /// counter. Net effect over an arbitrary mint/burn sequence: `ccipMintedSupply` is the
+    /// running ceiling on net CCIP-minted wON in circulation, which is what `MAX_CCIP_MINTED`
+    /// is meant to bound.
+    function _decrementCcipMinted(uint256 amount) internal {
+        uint256 current = ccipMintedSupply;
+        ccipMintedSupply = amount >= current ? 0 : current - amount;
     }
 }

@@ -28,3 +28,6 @@ coverage/
 
 # Deployments (keep committed; uncomment if managed off-repo)
 # deployments/
+
+# test/Deployments.t.sol writes to these chainIds during the suite — never commit them
+deployments/3133700*.json

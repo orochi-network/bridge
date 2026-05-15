@@ -21,7 +21,6 @@ contract ApplyChainUpdates is Script, Helper {
     uint128 internal constant DEFAULT_RATE = 10 ether;
 
     function run() external {
-        NetworkConfig memory local = getConfig(block.chainid);
         NetworkConfig memory remote = _remoteConfig(block.chainid);
 
         address localPool = Deployments.readAddress(block.chainid, "pool");
@@ -31,6 +30,15 @@ contract ApplyChainUpdates is Script, Helper {
         _requireSet(localPool, "localPool (run script 02 on this chain first)");
         _requireSet(remotePool, "remotePool (run script 02 on the remote chain first)");
         _requireSet(remoteToken, "remoteToken");
+
+        // Idempotency: `applyChainUpdates` reverts with `ChainAlreadyExists(remoteSelector)`
+        // when the remote chain is already wired. Skip cleanly so a partial-broadcast retry
+        // (e.g. script 02 succeeded, script 05 failed mid-way and is being re-run) doesn't
+        // hard-fail the operator. The wiring itself is owner-only, so a no-op here is safe.
+        if (TokenPool(localPool).isSupportedChain(remote.chainSelector)) {
+            console.log("Pool %s is already wired to remote selector %d - skipping", localPool, remote.chainSelector);
+            return;
+        }
 
         TokenPool.ChainUpdate[] memory updates = new TokenPool.ChainUpdate[](1);
         updates[0] = TokenPool.ChainUpdate({
@@ -50,7 +58,9 @@ contract ApplyChainUpdates is Script, Helper {
         TokenPool(localPool).applyChainUpdates(updates);
         vm.stopBroadcast();
 
-        console.log("Linked pool %s (selector %d) -> remote pool %s", localPool, local.chainSelector, remotePool);
+        console.log(
+            "Linked pool %s (remote selector %d) -> remote pool %s", localPool, remote.chainSelector, remotePool
+        );
     }
 
     function _remoteChainId(uint256 chainId) internal pure returns (uint256) {

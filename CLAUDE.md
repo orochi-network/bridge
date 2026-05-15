@@ -80,14 +80,14 @@ deployments/<chainId>.json        written by scripts via vm.writeJson
 Everything goes through the `Makefile`. The full sequence is documented in `RUNBOOK.md`. Key targets:
 
 - `make install`               — submodule init + patch-pragmas (one-time after clone).
-- `make test`                  — full test suite (41 tests, no fork).
+- `make test`                  — full test suite (50 tests, no fork).
 - `make test-unit`             — WrappedON.t.sol unit tests only.
 - `make test-e2e`              — PoolRoundtrip + DeploymentE2E integration tests.
 - `make test-fork ETH_RPC=... BSC_RPC=...` — fork tests against live mainnet (9 tests).
 - `make deploy-eth RPC=...`    — scripts 01→05 on the Ethereum side.
 - `make deploy-bsc RPC=...`    — scripts 02 + 04 + 05 on the BSC side.
 - `make verify-eth/bsc RPC=...` — script 08 view-only verification.
-- `make handoff-all ETH_RPC=... BSC_RPC=... MULTISIG=0x..` — atomic two-chain handoff.
+- `make handoff-all ETH_RPC=... BSC_RPC=... MULTISIG=0x..` — sequential two-chain handoff (re-run safe on partial failure; the second leg has no rollback if the first succeeds).
 - `make renounce RPC=eth MULTISIG=0x..` — final deployer-renounce after multisig accepts everything.
 - `make update-limits ...`      — script 07 rate-limit tuning.
 
@@ -120,6 +120,5 @@ Final step on both chains: transfer pool `Ownable` ownership and wON `DEFAULT_AD
 - `README.md` — operator-facing step-by-step (clone → deploy → handoff → ops).
 - `RUNBOOK.md` — deep dive on each step + trust model + required monitoring.
 - `SECURITY.md` — audit ledger; every finding has a Status (fixed / accepted / operational).
-- Plan: `/home/parallels/.claude/plans/orochi-network-token-on-gleaming-cat.md`
 - Chainlink CCIP CCT docs: https://docs.chain.link/ccip/concepts/cross-chain-token/overview
 - Reference repo: https://github.com/smartcontractkit/ccip-starter-kit-foundry

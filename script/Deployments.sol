@@ -32,9 +32,15 @@ library Deployments {
     /// any key written by an earlier call (or by a prior run, if the file already had keys we
     /// didn't re-serialize). The 3-arg overload patches a single JSON path in-place. We
     /// initialize the file as `{}` on first write so the path-write target exists.
+    ///
+    /// The `serialized` argument must be a fully-formed JSON token. `vm.toString(address)`
+    /// returns a bare hex string (`0x…`) without surrounding quotes — passing that directly
+    /// would write an invalid JSON token into the file. Wrap with quotes so the value is a
+    /// proper JSON string that `vm.parseJsonAddress` can read back. (Per PR #19 review.)
     function writeAddress(uint256 chainId, string memory key, address value) internal {
         string memory file = path(chainId);
         if (!vm.exists(file)) vm.writeFile(file, "{}");
-        vm.writeJson(vm.toString(value), file, string.concat(".", key));
+        string memory quoted = string.concat('"', vm.toString(value), '"');
+        vm.writeJson(quoted, file, string.concat(".", key));
     }
 }

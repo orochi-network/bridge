@@ -37,7 +37,9 @@ contract TransferOwnership is Script, Helper {
     error MultisigEnvMissing();
 
     function run() external {
-        address multisig = vm.envAddress("MULTISIG");
+        // Use envOr so the MissingMULTISIG case yields our own clear error rather than
+        // Foundry's generic "EnvVarNotSet" — which masks the actual operator mistake.
+        address multisig = vm.envOr("MULTISIG", address(0));
         if (multisig == address(0)) revert MultisigEnvMissing();
         _handoff(multisig);
     }
@@ -101,7 +103,9 @@ contract RenounceDeployerAdmin is Script, Helper {
 
         // Multisig MUST be passed in and MUST already hold the role — otherwise the renounce
         // would leave the contract admin-less and permanently unmanageable.
-        address multisig = vm.envAddress("MULTISIG");
+        // Use envOr so the MissingMULTISIG case yields our own clear error rather than
+        // Foundry's generic "EnvVarNotSet" — which masks the actual operator mistake.
+        address multisig = vm.envOr("MULTISIG", address(0));
         if (multisig == address(0)) revert MultisigEnvMissing();
 
         WrappedON won = WrappedON(Deployments.readAddress(block.chainid, "wrappedON"));

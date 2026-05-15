@@ -43,7 +43,7 @@ make build            # forge build --sizes
 ### 3. Run the test suite (no RPC needed)
 
 ```bash
-make test             # 41 tests, no fork
+make test             # 50 tests, no fork
 ```
 
 Targeted subsets:
@@ -135,7 +135,7 @@ After confirming mainnet works end-to-end:
 make handoff-all ETH_RPC=eth BSC_RPC=bsc MULTISIG=0x<safe-address>
 ```
 
-This runs the handoff on both chains atomically. Each invocation:
+This runs the handoff sequentially against ETH then BSC. There is no atomic rollback — if the first leg succeeds and the second fails, the bridge is half-handed-off and you must re-run the second leg. The handoff steps are idempotent (multisig grants are no-ops if already in place; `transferOwnership` and `transferAdminRole` overwrite the pending acceptor), so re-running is safe. Each invocation:
 
 1. `pool.transferOwnership(multisig)` (two-step Ownable — multisig must `acceptOwnership` later).
 2. **ETH only**: grants wON `DEFAULT_ADMIN_ROLE` to the multisig, **proposes** the multisig as new CCIP admin (two-step — multisig must `acceptCCIPAdmin` later).
