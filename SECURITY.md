@@ -529,9 +529,97 @@ reviewer's order.
 
 ---
 
+---
+
+## Chainlink CCIP compliance audit
+
+Cross-checked the repo against `lib/ccip @ v2.17.0-ccip1.5.16` (the pinned CCIP 1.5.x ABI)
+and Chainlink CCT documentation. Pin context: `script/Helper.sol` and `CLAUDE.md` state
+this is deliberate — match the production CCIP 1.5.x ABI on ETH + BSC mainnet. CCIP 1.6.x
+introduces an immutable `localTokenDecimals` ctor arg + 2-arg `applyChainUpdates(removed,
+added)`; the 1.5.x pool deploys via this repo are operationally supported alongside 1.6.x
+through the registry's per-pool addressing.
+
+### Verified compliant
+
+- **`WrappedON` selectors**: `mint(address,uint256)`, `burn(uint256)`, `burn(address,uint256)`,
+  `burnFrom(address,uint256)`, `totalSupply`, `balanceOf`, `transfer`, `allowance`, `approve`,
+  `transferFrom` — match the runtime `IBurnMintERC20` interface that
+  `BurnMintTokenPool._burn` / `BurnMintTokenPoolAbstract.releaseOrMint` invoke. (See contract
+  NatSpec for why `IBurnMintERC20` is not formally inherited — OZ-v5-vs-vendored-v4.8.3
+  `IERC20` linearization conflict.)
+- **`getCCIPAdmin`**: returns `s_ccipAdmin` — matches `IGetCCIPAdmin` exactly.
+  `RegistryModuleOwnerCustom.registerAdminViaGetCCIPAdmin` will resolve correctly.
+- **Pool constructors**: `BurnMintTokenPool(token, allowlist=[], rmnProxy, router)` (4-arg)
+  and `LockReleaseTokenPool(token, allowlist=[], rmnProxy, acceptLiquidity=false, router)`
+  (5-arg) — match the vendored 1.5.x signatures exactly.
+- **`TokenPool.ChainUpdate` struct**: 6 fields (selector, allowed, remotePoolAddress,
+  remoteTokenAddress, outbound limiter, inbound limiter) — match the 1.5.x layout, not the
+  7-field 1.6+ form.
+- **`applyChainUpdates(ChainUpdate[])`**: 1-arg form (not the 2-arg
+  `(removed[], added[])` of 1.6+).
+- **`getRemotePool(uint64) returns (bytes)`**: singular (not the plural `getRemotePools`
+  of 1.6+).
+- **Chain selectors**: ETH Mainnet `5_009_297_550_715_157_269`, BSC Mainnet
+  `11_344_663_589_394_136_015`, Sepolia `16_015_286_601_757_825_753`, BSC Testnet
+  `13_264_668_187_771_770_619` — all match the Chainlink CCIP directory.
+- **Allowlist**: passed as `address[](0)` — open-mode (any sender accepted via Router).
+- **Roles**: `MINTER_ROLE` + `BURNER_ROLE` granted to `BurnMintTokenPool` on ETH; nothing
+  granted on BSC (LockReleaseTokenPool only locks/releases). Order: grant BEFORE registry
+  setPool (script 03 → script 04). Required by Chainlink CCT spec.
+- **Two-step token-admin handoff**: `TokenAdminRegistry.transferAdminRole` + `acceptAdminRole`
+  used end-to-end. Plus our own two-step `setCCIPAdmin` + `acceptCCIPAdmin` on wON.
+- **`setPool` precondition**: `IPoolV1(pool).isSupportedToken(localToken)` is checked by the
+  registry; the vendored `TokenPool.isSupportedToken` returns `token == i_token` which is
+  exactly our wON. Verified.
+- **`acceptLiquidity = false`** on BSC pool. Disables `provideLiquidity`. Does NOT disable
+  `setRebalancer` / `withdrawLiquidity` — this is the Chainlink CCT trust model documented
+  as C-1. Confirmed against `LockReleaseTokenPool.sol` source.
+- **RMN curse plumbing**: `cfg.rmnProxy` wired into pool ctor; `_validateLockOrBurn` runs
+  curse check before any token operation. Negative test: `test_LockOrBurnRevertsWhenRMNCursed`.
+- **Decimals**: 18/18 across ETH + BSC. wON ctor rejects mismatched `decimals()` via
+  `DecimalsMismatch`. CCIP 1.5.x pools do not store `localTokenDecimals` on-chain — operators
+  register 18/18 OFF-CHAIN via the CCIP directory metadata (see RUNBOOK).
+- **`_validateLockOrBurn` / `_validateReleaseOrMint`**: inherited from `TokenPool`, never
+  overridden. Per-chain rate-limit consumption, RMN curse check, chain-supported check, and
+  source-pool address verification all run unchanged.
+
+### Compliance gaps found and fixed
+
+- **`script/07_UpdateRateLimits.s.sol` preflight (`R-21`)**. The CCIP protocol's
+  `RateLimiter._validateTokenBucketConfig` requires:
+  - When `isEnabled = true`: `rate > 0` AND `rate < capacity` (strict).
+  - When `isEnabled = false`: `capacity == 0` AND `rate == 0`.
+
+  The earlier preflight used `rate <= capacity` (non-strict), unconditionally required
+  `capacity > 0`, and didn't reject `rate == 0`. Result: a config the preflight accepted
+  could fail `_validateTokenBucketConfig` mid-broadcast (the exact mid-broadcast-revert
+  failure mode M-4 was meant to prevent), AND the valid disabled-direction
+  `(capacity=0, rate=0)` config was incorrectly blocked. Fix: new `_validateBucket`
+  helper that mirrors CCIP's rule exactly; new `test/Script07Preflight.t.sol` (9 tests
+  including a 256-run fuzz that asserts preflight ↔ CCIP equivalence on every input).
+
+### Best-practice items (not fixed, operational decision)
+
+- **Rate-limit admin role**: `TokenPool` exposes `setRateLimitAdmin(address)` so the owner
+  can delegate `setChainRateLimiterConfig` to a separate hot-key EOA. Chainlink CCT best
+  practice recommends this so the cold-storage multisig isn't needed for routine rate-limit
+  tuning. Currently the bridge does not delegate — multisig holds full owner authority.
+  Operators may want to add a `setRateLimitAdmin(<hot-key>)` step post-handoff; documented
+  in RUNBOOK.
+
+### Operational items (out of scope of this audit)
+
+- BSC ON CCIP-admin path resolution on private fork (H-4) — pre-mainnet probe.
+- `script/Helper.sol` mainnet address placeholders (gated by `make precheck-helper`).
+- Off-chain Chainlink directory registration: 18/18 decimals, CCIP-supported chains.
+
+---
+
 ## Test suite total
 
-`forge test --no-match-path 'test/fork/**'` → **70 tests pass** (was 51 after round-2;
-+19 added closing the 8 coverage gaps). Plus 4 stateful invariants × 256 runs × 500
-calls each in `test/WrappedONInvariant.t.sol` (128k assertions per invariant). Fork
-tests (`test/fork/*`) compile and run against ETH_RPC / BSC_RPC.
+`forge test --no-match-path 'test/fork/**'` → **79 tests pass** (was 70 after closing
+test-coverage gaps; +9 added by the Chainlink-compliance pass for `script/07`
+preflight). Plus 4 stateful invariants × 256 runs × 500 calls each in
+`test/WrappedONInvariant.t.sol` (128k assertions per invariant). Fork tests
+(`test/fork/*`) compile and run against ETH_RPC / BSC_RPC.

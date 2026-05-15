@@ -40,12 +40,19 @@ contract UpdateRateLimits is Script, Helper {
             rate: uint128(vm.envUint("INBOUND_RATE"))
         });
 
-        // Preflight: catch typos before broadcasting. Mid-broadcast reverts inside a Gnosis
-        // Safe batch fail the whole batch with no diagnostic.
-        require(outbound.capacity > 0, "OUTBOUND_CAPACITY must be > 0");
-        require(outbound.rate <= outbound.capacity, "OUTBOUND_RATE must be <= OUTBOUND_CAPACITY");
-        require(inbound.capacity > 0, "INBOUND_CAPACITY must be > 0");
-        require(inbound.rate <= inbound.capacity, "INBOUND_RATE must be <= INBOUND_CAPACITY");
+        // Preflight: mirror CCIP `RateLimiter._validateTokenBucketConfig` exactly so any
+        // mistake fails off-chain rather than mid-broadcast inside a Gnosis Safe batch.
+        //
+        //   isEnabled=true  : rate > 0 AND rate < capacity (strict)
+        //   isEnabled=false : capacity == 0 AND rate == 0
+        //
+        // Earlier preflight (`capacity > 0` always, `rate <= capacity` non-strict, no
+        // `rate > 0` check, no disabled-case handling) was inconsistent with the protocol
+        // on both ends — it would let `rate == capacity` and `rate == 0` slip through, and
+        // it would block the valid disabled-state (capacity=0, rate=0). Aligned with CCIP
+        // 1.5.x validation per Chainlink compliance audit.
+        _validateBucket(outbound, "OUTBOUND");
+        _validateBucket(inbound, "INBOUND");
 
         vm.startBroadcast();
         TokenPool(localPool).setChainRateLimiterConfig(remoteSelector, outbound, inbound);
@@ -54,6 +61,16 @@ contract UpdateRateLimits is Script, Helper {
         console.log("Pool %s (chain %d) -> remote selector %d", localPool, local.chainSelector, remoteSelector);
         console.log("  outbound: enabled=%s cap=%d rate=%d", outbound.isEnabled, outbound.capacity, outbound.rate);
         console.log("  inbound:  enabled=%s cap=%d rate=%d", inbound.isEnabled, inbound.capacity, inbound.rate);
+    }
+
+    function _validateBucket(RateLimiter.Config memory cfg, string memory label) internal pure {
+        if (cfg.isEnabled) {
+            require(cfg.rate > 0, string.concat(label, "_RATE must be > 0 when enabled"));
+            require(cfg.rate < cfg.capacity, string.concat(label, "_RATE must be < ", label, "_CAPACITY (strict)"));
+        } else {
+            require(cfg.capacity == 0, string.concat(label, "_CAPACITY must be 0 when disabled"));
+            require(cfg.rate == 0, string.concat(label, "_RATE must be 0 when disabled"));
+        }
     }
 
     function _remoteSelector(uint256 chainId) internal pure returns (uint64) {

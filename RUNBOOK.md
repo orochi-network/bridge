@@ -48,7 +48,7 @@ Then `source .env`.
 
 ```bash
 make build
-make test                 # all 70 non-fork tests + 4 invariants must pass
+make test                 # all 79 non-fork tests + 4 invariants must pass
 make fmt-check
 ```
 
@@ -190,6 +190,21 @@ make update-limits RPC=eth \
 ```
 
 (All values in wei. Above = 200,000 cap, 0.02 ON/sec rate.) Caller must be the pool owner (the multisig) or the rate-limit admin. From the multisig, queue the equivalent `setChainRateLimiterConfig` call.
+
+**CCIP validation rules** (mirror these — the preflight in script 07 enforces them so a mid-broadcast revert is impossible):
+- `isEnabled = true` requires `rate > 0` AND `rate < capacity` (strict — `rate == capacity` is rejected).
+- `isEnabled = false` requires `capacity == 0` AND `rate == 0` (the only valid disabled-state).
+
+### 4.1.1 Optional: delegate rate-limit admin
+
+Chainlink CCT best practice (per https://docs.chain.link/ccip/concepts/best-practices/evm) is to limit privileges by assigning specific roles like the `rateLimitAdmin` rather than full owner access. `TokenPool.setRateLimitAdmin(addr)` (`onlyOwner`) designates a separate address that can call `setChainRateLimiterConfig` without being the pool owner. Operators may want to do this once post-handoff so a hot-key EOA can tune rate limits without going through the cold-storage multisig each time:
+
+```solidity
+// Multisig action:
+pool.setRateLimitAdmin(<hot-key-address>);
+```
+
+Pool ownership and reserve custody (BSC `setRebalancer`) remain with the multisig. Only rate-limit config delegation moves to the hot key.
 
 ### 4.2 Responding to an RMN curse
 
