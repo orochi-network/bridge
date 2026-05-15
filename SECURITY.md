@@ -329,8 +329,8 @@ Each entry below: file:line — issue — impact — fix — **Status**.
 - [x] M-6: `lib/ccip` pinned as a git submodule (already shipped in PR #19).
 - [x] M-7: 2-step `setCCIPAdmin`.
 - [x] M-9: `nonReentrant` + received-amount accounting on wON.
-- [ ] Add the 8 open test-coverage items above — at minimum #1 (reserve invariant
-      fuzz) and #2 (renounce-before-accept negative test).
+- [x] All 8 test-coverage gaps closed (see "Test coverage gaps" section above for the
+      per-gap test list; 70 non-fork tests pass + 4 stateful invariants × 128k calls each).
 - [ ] Operational: deploy to Sepolia ⇄ BSC Testnet first, then mainnet.
 - [ ] Operational: fill in `script/Helper.sol` placeholder addresses from
       https://docs.chain.link/ccip/directory before broadcasting on mainnet.
@@ -529,7 +529,9 @@ reviewer's order.
 
 ---
 
-## Test suite total (post round-2)
+## Test suite total
 
-`forge test --no-match-path 'test/fork/**'` → 51 tests pass (added
-`test_ConstructorRevertsOnUnreadableDecimals`).
+`forge test --no-match-path 'test/fork/**'` → **70 tests pass** (was 51 after round-2;
++19 added closing the 8 coverage gaps). Plus 4 stateful invariants × 256 runs × 500
+calls each in `test/WrappedONInvariant.t.sol` (128k assertions per invariant). Fork
+tests (`test/fork/*`) compile and run against ETH_RPC / BSC_RPC.

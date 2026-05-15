@@ -80,7 +80,7 @@ deployments/<chainId>.json        written by scripts via vm.writeJson
 Everything goes through the `Makefile`. The full sequence is documented in `RUNBOOK.md`. Key targets:
 
 - `make install`               — submodule init + patch-pragmas (one-time after clone).
-- `make test`                  — full test suite (51 tests, no fork).
+- `make test`                  — full test suite (70 tests + 4 stateful invariants, no fork).
 - `make test-unit`             — WrappedON.t.sol unit tests only.
 - `make test-e2e`              — PoolRoundtrip + DeploymentE2E integration tests.
 - `make test-fork ETH_RPC=... BSC_RPC=...` — fork tests against live mainnet (9 tests).
@@ -113,7 +113,7 @@ Final step on both chains: transfer pool `Ownable` ownership and wON `DEFAULT_AD
 
 - BSC ON token CCIP-admin hook: confirm whether `0x0e4F6209eD984b21EDEA43acE6e09559eD051D48` exposes `getCCIPAdmin`, is `Ownable`, or uses OZ `AccessControl.DEFAULT_ADMIN_ROLE`. `script/04_RegisterAdminAndPool.s.sol` probes all three paths (with the AccessControl path routing through a local interface for the 1.6.0 registry on prod), then reverts with a clear instruction if none match. Resolve on a private fork before mainnet rollout (audit H-4).
 - **CCIP infrastructure addresses in `script/Helper.sol` are intentionally `address(0)` placeholders.** Fill them in from https://docs.chain.link/ccip/directory before broadcasting. Scripts call `_requireSet` on every address they consume.
-- Test coverage gaps (priority order in `SECURITY.md`): reserve-invariant fuzz; renounce-before-multisig-accept negative test; rate-limit bucket exhaustion test; both BSC-side ownership-handoff coverage and `registerAdminViaOwner` / `registerAccessControlDefaultAdmin` script-04 coverage.
+- ~~Test coverage gaps~~ — **closed**. All 8 gaps tracked in `SECURITY.md` "Test coverage gaps" are now covered (reserve-invariant stateful fuzz, renounce-before-accept negative, rate-limit exhaustion/refill, script 04 admin-dispatch on all four paths, BSC-side ownership handoff, property fuzz on deposit + cap boundary, fork tests assert non-zero rate/capacity, AccessControl v1.6 success path via `MockRegistryModuleV16`).
 
 ## Reference
 
