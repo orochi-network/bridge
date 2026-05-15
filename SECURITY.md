@@ -216,9 +216,14 @@ Each entry below: file:line — issue — impact — fix — **Status**.
 
 ## Test coverage gaps (priority order — open follow-ups)
 
-1. **Reserve invariant never directly asserted.** No test reads `wrapBackedSupply`
-   (which is not a state variable today) and checks against `ON.balanceOf(WrappedON)`
-   after mixed deposit/mint/withdraw/burn sequences.
+1. ~~**Reserve invariant never directly asserted.**~~ **CLOSED.** `test/WrappedONInvariant.t.sol`
+   exercises a stateful handler that drives random sequences of `deposit` / `withdraw` /
+   CCIP `mint` / CCIP `burn` against a real `WrappedON`, with a simulated BSC pool balance,
+   and continuously asserts the audit safety invariant
+   `lockedON_BSC + reserveON_ETH >= totalSupply(wON)` — plus three companion invariants:
+   counter tracks BSC balance, counter stays within `MAX_CCIP_MINTED`, and reserve ≤
+   cumulative deposits. 4 invariants × 256 runs × 500 calls each (= 128k calls per
+   invariant) all pass with zero reverts.
 2. **No test for `renounceRole` before multisig accepts.** Now caught at runtime by
    `RenounceDeployerAdmin` (H-1 fix), but still worth a negative test.
 3. **No rate-limit bucket-exhaustion test.** Limits are configured but never driven
