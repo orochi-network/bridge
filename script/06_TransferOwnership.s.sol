@@ -35,12 +35,18 @@ interface ITokenAdminRegistry {
 ///   MULTISIG  — checksummed address of the destination multisig (e.g. Safe).
 contract TransferOwnership is Script, Helper {
     error MultisigEnvMissing();
+    error MultisigEqualsDeployer(address addr);
 
     function run() external {
         // Use envOr so the MissingMULTISIG case yields our own clear error rather than
         // Foundry's generic "EnvVarNotSet" — which masks the actual operator mistake.
         address multisig = vm.envOr("MULTISIG", address(0));
         if (multisig == address(0)) revert MultisigEnvMissing();
+        // Guard against an operator setting MULTISIG=$DEPLOYER (typo or env collision).
+        // Without this, every "handoff" call targets the deployer EOA — and
+        // `RenounceDeployerAdmin` would then happily renounce while a perceived "multisig"
+        // (the deployer) still holds the role, orphaning the contract. Round-2 review [3].
+        if (multisig == msg.sender) revert MultisigEqualsDeployer(multisig);
         _handoff(multisig);
     }
 
@@ -97,6 +103,7 @@ contract TransferOwnership is Script, Helper {
 ///         + registry admin role on both chains. ETH side only — wON does not exist on BSC.
 contract RenounceDeployerAdmin is Script, Helper {
     error MultisigEnvMissing();
+    error MultisigEqualsDeployer(address addr);
 
     function run() external {
         if (block.chainid != 1 && block.chainid != 11_155_111) revert UnsupportedChain(block.chainid);
@@ -107,6 +114,9 @@ contract RenounceDeployerAdmin is Script, Helper {
         // Foundry's generic "EnvVarNotSet" — which masks the actual operator mistake.
         address multisig = vm.envOr("MULTISIG", address(0));
         if (multisig == address(0)) revert MultisigEnvMissing();
+        // See TransferOwnership.run: if MULTISIG == deployer the role-holder check is
+        // satisfied vacuously and renounce orphans the contract. Round-2 review [3].
+        if (multisig == msg.sender) revert MultisigEqualsDeployer(multisig);
 
         WrappedON won = WrappedON(Deployments.readAddress(block.chainid, "wrappedON"));
         bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();

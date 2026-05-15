@@ -48,7 +48,7 @@ Then `source .env`.
 
 ```bash
 make build
-make test                 # all 50 non-fork tests must pass
+make test                 # all 51 non-fork tests must pass
 make fmt-check
 ```
 

@@ -28,6 +28,35 @@ contract MockON6 is ERC20 {
     }
 }
 
+/// @dev Bare IERC20 implementation with no `decimals()` selector. Used to exercise the
+///      ctor's try/catch fallback (round-2 review [8]). Only the methods the wON ctor
+///      actually invokes are stubbed.
+contract NoDecimalsToken {
+    function totalSupply() external pure returns (uint256) {
+        return 0;
+    }
+
+    function balanceOf(address) external pure returns (uint256) {
+        return 0;
+    }
+
+    function transfer(address, uint256) external pure returns (bool) {
+        return false;
+    }
+
+    function allowance(address, address) external pure returns (uint256) {
+        return 0;
+    }
+
+    function approve(address, uint256) external pure returns (bool) {
+        return false;
+    }
+
+    function transferFrom(address, address, uint256) external pure returns (bool) {
+        return false;
+    }
+}
+
 contract WrappedONTest is Test {
     WrappedON internal won;
     MockON internal on;
@@ -448,6 +477,14 @@ contract WrappedONTest is Test {
         MockON6 on6 = new MockON6();
         vm.expectRevert(abi.encodeWithSelector(WrappedON.DecimalsMismatch.selector, 18, 6));
         new WrappedON(IERC20(address(on6)), admin);
+    }
+
+    /// @dev Per PR #19 round-2 review [8]: a token without `decimals()` must yield a clear
+    ///      `DecimalsUnreadable` error, not a low-level ABI-decode revert.
+    function test_ConstructorRevertsOnUnreadableDecimals() public {
+        NoDecimalsToken noDec = new NoDecimalsToken();
+        vm.expectRevert(WrappedON.DecimalsUnreadable.selector);
+        new WrappedON(IERC20(address(noDec)), admin);
     }
 
     // ─── Metadata ─────────────────────────────────────────────────────────────

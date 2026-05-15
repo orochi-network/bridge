@@ -36,7 +36,20 @@ contract ApplyChainUpdates is Script, Helper {
         // (e.g. script 02 succeeded, script 05 failed mid-way and is being re-run) doesn't
         // hard-fail the operator. The wiring itself is owner-only, so a no-op here is safe.
         if (TokenPool(localPool).isSupportedChain(remote.chainSelector)) {
-            console.log("Pool %s is already wired to remote selector %d - skipping", localPool, remote.chainSelector);
+            // Round-2 review [6]: detect stale wiring — a remote pool redeploy will leave
+            // the local pool pointed at the old (dead) address until we re-wire. Revert
+            // with a clear instruction rather than silently skipping.
+            bytes memory wiredRemote = TokenPool(localPool).getRemotePool(remote.chainSelector);
+            bytes memory expectedRemote = abi.encode(remotePool);
+            require(
+                keccak256(wiredRemote) == keccak256(expectedRemote),
+                "stale remote pool wiring: local pool points at a different remotePool than deployments JSON. Owner must remove the chain via applyChainUpdates(removed) and re-run, or call setRemotePool directly."
+            );
+            console.log(
+                "Pool %s already wired to remote selector %d - skipping (rate-limit changes are NOT applied here; use `make update-limits`)",
+                localPool,
+                remote.chainSelector
+            );
             return;
         }
 

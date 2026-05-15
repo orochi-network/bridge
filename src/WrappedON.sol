@@ -27,13 +27,25 @@ import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/ccip/interfaces/IGetCCIPA
 ///   wrapBackedSupply <= ON.balanceOf(WrappedON)
 /// `withdraw` reverts when the reserve cannot cover the requested amount.
 ///
-/// Supply cap: `MAX_CCIP_MINTED = 100M` (the canonical ON supply on BSC) is the on-chain
-/// upper bound for the CCIP `mint` path only — it represents the absolute maximum amount
-/// of ON that can ever be locked on the BSC pool and reflected onto Ethereum. The
-/// `deposit` path is NOT subject to this cap because deposit-backed wON is collateralised
-/// by ON already held in this contract's reserve, independently of the BSC reserve. The
-/// two paths are tracked separately so a fully-utilised wrap path cannot starve inbound
-/// CCIP messages (see SECURITY.md C-3 / PR #19 review).
+/// Supply cap: `MAX_CCIP_MINTED = 100M` bounds the `ccipMintedSupply` counter, which
+/// approximates the BSC pool's expected locked-ON balance — every CCIP `mint` on this
+/// contract is paired with a `lock` of the same amount on the BSC pool, and every CCIP
+/// `burn` here is paired with a `release` there. The counter is therefore a defense-in-
+/// depth check against a compromised or buggy pool minting wON without a matching BSC
+/// lock; it does NOT bound `totalSupply()`, which can also grow via the `deposit()` path.
+///
+/// The cap is intentionally NOT a circulating-CCIP-minted ceiling — wON is fungible by
+/// design, so once minted there is no on-chain way to tell whether a token came from
+/// `deposit` or `mint`. Saturating-subtract on burn handles the case where deposit-backed
+/// wON is bridged out (no corresponding BSC release was made via that wON specifically,
+/// but the pool's lock/release accounting still nets out).
+///
+/// Safety invariant (preserved by mechanics, not by the counter alone):
+///   `lockedON_BSC + reserveON_ETH >= totalSupply(wON)`
+/// CCIP guarantees every mint here is paired with a lock on BSC, and every burn here is
+/// paired with a release on BSC. `deposit` adds to both `totalSupply` and `reserveON_ETH`
+/// in lockstep; `withdraw` subtracts from both. See SECURITY.md C-3 + R-1 + R-14 for the
+/// full reasoning.
 ///
 /// @dev `IBurnMintERC20` is NOT inherited because it transitively brings the CCIP-vendored
 /// `IERC20` interface, which conflicts with OpenZeppelin's `IERC20` linearization. The
@@ -46,18 +58,20 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
 
-    /// @notice Hard cap on CCIP-minted wON. Matches the canonical ON supply on BSC, which is
-    ///         the upper bound on ON that can ever be locked on the BSC pool and reflected as
-    ///         wON on Ethereum. Applies only to the `mint()` path; `deposit()` is bounded
-    ///         naturally by the ETH-side ON supply.
+    /// @notice Hard cap on `ccipMintedSupply`. Matches the canonical ON supply on BSC, which
+    ///         is the absolute upper bound on ON that can ever be locked on the BSC pool.
     uint256 public constant MAX_CCIP_MINTED = 100_000_000 ether;
 
     /// @notice Canonical Orochi Network token on this chain (non-mintable ERC20).
     IERC20 public immutable ON;
 
-    /// @notice Cumulative wON minted via the CCIP `mint()` path. Tracked separately from
-    ///         deposit-backed supply so the cap on bridge-reflected wON does not interfere
-    ///         with the local wrap path.
+    /// @notice Approximates the BSC pool's expected locked-ON balance. Incremented by every
+    ///         CCIP `mint()`, saturating-decremented by every CCIP burn. Under honest CCIP
+    ///         operation `ccipMintedSupply == lockedON_BSC` at all times; under a hypothetical
+    ///         CCIP-side bug (mint without lock) the cap at 100M still bounds the damage.
+    ///         The counter does NOT track deposit-backed wON — see contract NatSpec for the
+    ///         full reasoning on why a circulating-CCIP-minted accounting is not viable on a
+    ///         fungible token, and why the safety invariant is preserved by mechanics anyway.
     uint256 public ccipMintedSupply;
 
     /// @notice CCIP admin used by `RegistryModuleOwnerCustom.registerAdminViaGetCCIPAdmin`.
@@ -79,6 +93,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     error SelfReserve();
     error DecimalsMismatch(uint8 expected, uint8 actual);
     error CCIPMintCapExceeded(uint256 cap, uint256 wouldBe);
+    error DecimalsUnreadable();
 
     constructor(IERC20 onToken, address admin) ERC20("Wrapped Orochi Network", "wON") {
         if (address(onToken) == address(0) || admin == address(0)) revert ZeroAddress();
@@ -87,9 +102,14 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         // invariant `wrapBackedSupply <= ON.balanceOf(this)` circular and meaningless.
         if (address(onToken) == address(this)) revert SelfReserve();
         // Defensive: 1:1 wrap accounting only holds when both tokens use the same decimals.
-        // Canonical ON is 18 decimals on both ETH and BSC; reject anything else early.
-        uint8 onDecimals = IERC20Metadata(address(onToken)).decimals();
-        if (onDecimals != decimals()) revert DecimalsMismatch(decimals(), onDecimals);
+        // Canonical ON is 18 decimals on both ETH and BSC; reject anything else early. Wrap
+        // in try/catch so a non-conformant `onToken` (no `decimals()`) reverts with a clear
+        // diagnostic instead of a low-level ABI-decode error (round-2 review [8]).
+        try IERC20Metadata(address(onToken)).decimals() returns (uint8 onDecimals) {
+            if (onDecimals != decimals()) revert DecimalsMismatch(decimals(), onDecimals);
+        } catch {
+            revert DecimalsUnreadable();
+        }
         ON = onToken;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         s_ccipAdmin = admin;
@@ -114,6 +134,12 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         emit Wrapped(msg.sender, received);
     }
 
+    /// @dev Does NOT decrement `ccipMintedSupply`. The counter approximates the BSC pool's
+    /// locked-ON balance, which is unaffected by withdraws — `withdraw` only moves ETH-side
+    /// reserve, never triggers a BSC release. Decrementing here would desync the counter
+    /// from BSC pool balance and would not improve any safety property. The cost is that a
+    /// CCIP-minted holder can consume the deposit reserve (intended: arbitrage-layer
+    /// design, SECURITY.md C-1). Round-2 review [2].
     function withdraw(uint256 amount) external nonReentrant {
         uint256 reserve = ON.balanceOf(address(this));
         if (reserve < amount) revert InsufficientReserve(amount, reserve);

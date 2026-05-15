@@ -297,18 +297,21 @@ Each entry below: file:line — issue — impact — fix — **Status**.
 A second pass of automated review on PR #19 raised the items below. Reviewer IDs in
 parentheses link to the originating PR comment.
 
-### R-1. CCIP mint cap collided with deposit path (bao-ninh #1)
+### R-1. CCIP mint cap collided with deposit path (bao-ninh round-1 [1])
 - **Where:** `src/WrappedON.sol`.
 - **Issue:** A single `MAX_SUPPLY = 100M` cap was shared between `deposit()` (deposit-backed)
   and `mint()` (CCIP-backed). Heavy wrap usage could exhaust the cap and make every inbound
   CCIP message permanently revert at `releaseOrMint`.
-- **Status: FIXED.** Renamed to `MAX_CCIP_MINTED`; tracked separately via
-  `ccipMintedSupply` (incremented in `mint`, saturating-decremented in all three burn
-  entrypoints so roundtrips free cap headroom). `deposit()` is intentionally uncapped —
+- **Status: FIXED.** Renamed to `MAX_CCIP_MINTED`; tracked via `ccipMintedSupply` (incremented
+  in `mint`, saturating-decremented in all three burn entrypoints). `deposit()` is uncapped —
   bounded naturally by ETH-side ON supply. New tests:
   `test_MintRevertsAtCCIPMintCap`, `test_DepositSucceedsWhenCCIPCapHit`,
   `test_BurnDecrementsCCIPMintedSupply`, `test_BurnSaturatesCCIPMintedAtZero`,
   `test_BurnAddressOverloadDecrementsCCIPMinted`, `test_BurnFromDecrementsCCIPMinted`.
+- **Round-2 follow-up — see R-14 below.** brng1151's round-2 review correctly flagged that
+  the original R-1 description framed the counter as "running ceiling on net CCIP-minted
+  wON in circulation", which is impossible to enforce on a fungible token. Counter semantics
+  re-documented as BSC-pool-balance approximation; safety property preserved by mechanics.
 
 ### R-2. WrappedON constructor lost two audit-derived guards (brng1151 #1/#5, bao-ninh #5)
 - **Where:** `src/WrappedON.sol` constructor.
@@ -390,5 +393,96 @@ parentheses link to the originating PR comment.
 - **`renounce-all` Make alias removed** — was misleading (handoff-all symmetry was
   spurious; wON only exists on ETH).
 - **Local-machine plan path removed** from CLAUDE.md and RUNBOOK.md.
-- **`burn(address,uint256)` allowance bypass** (brng1151 #6) — accepted per M-2; the
-  operator-monitoring path on `RoleGranted(BURNER_ROLE,*)` is the documented mitigation.
+- **`burn(address,uint256)` allowance bypass** (brng1151 round-1 [6]) — accepted per M-2;
+  the operator-monitoring path on `RoleGranted(BURNER_ROLE,*)` is the documented mitigation.
+
+---
+
+## PR #19 round-2 review follow-ups (brng1151)
+
+A second review pass on commit `4b94dbe` raised 8 additional items. Numbered to match the
+reviewer's order.
+
+### R-14. Cap semantics re-documented (round-2 [1])
+- **Where:** `src/WrappedON.sol` contract NatSpec + `ccipMintedSupply` NatSpec.
+- **Issue:** R-1's disposition described `ccipMintedSupply` as "running ceiling on net
+  CCIP-minted wON in circulation". On a fungible token that semantic is impossible — once
+  minted, deposit-backed and CCIP-backed wON are indistinguishable, so saturating-decrement
+  on burn can drain the counter from a deposit-backed bridge-out, mis-stating the
+  CCIP-circulating count.
+- **Re-framing.** The counter actually approximates the BSC pool's expected locked-ON
+  balance: every CCIP `mint` on this contract is paired with a `lock` of the same amount on
+  the BSC pool (and every CCIP `burn` here with a `release` there). With saturating subtract
+  the counter equals `lockedON_BSC` under honest CCIP operation. The cap at 100M (BSC supply)
+  is a defense-in-depth bound against a compromised CCIP pool minting without a matching
+  BSC lock.
+- **Safety invariant** (preserved by mechanics, NOT by the counter):
+  `lockedON_BSC + reserveON_ETH >= totalSupply(wON)`. CCIP guarantees mint-lock pairing;
+  `deposit`/`withdraw` adjust both `totalSupply` and `reserveON_ETH` in lockstep. The
+  scenario reviewer raised (Bob CCIP-mints 50M, Alice deposits 50M and bridges to BSC,
+  Charlie CCIP-mints 100M → totalSupply=150M) satisfies the invariant because the released
+  BSC ON ended up in Alice's hands on BSC, and the 50M deposit reserve still backs Bob's
+  unbridged wON.
+- **Status: FIXED (semantics + docs).** Contract NatSpec and `ccipMintedSupply` field
+  comment rewritten. Implementation unchanged — the behavior was correct under the
+  re-framed semantics.
+
+### R-15. `withdraw` does not decrement `ccipMintedSupply` (round-2 [2])
+- **Where:** `src/WrappedON.sol:withdraw`.
+- **Status: ACCEPTED (intentional).** `withdraw` does not trigger a BSC release — it only
+  moves ETH-side reserve. Decrementing the counter would desync it from BSC pool balance.
+  The cost (a CCIP-minted holder can consume the deposit reserve) is intended per C-1's
+  arbitrage-layer design. Inline comment added.
+
+### R-16. `MULTISIG == deployer` guard in handoff (round-2 [3])
+- **Where:** `script/06_TransferOwnership.s.sol`.
+- **Issue:** Setting `MULTISIG=$DEPLOYER` silently targets the deployer EOA on every
+  handoff call, and `RenounceDeployerAdmin`'s "multisig has role" check is satisfied
+  vacuously (because deployer == multisig == admin holder), permanently orphaning the
+  contract on renounce.
+- **Status: FIXED.** Both `TransferOwnership.run()` and `RenounceDeployerAdmin.run()` now
+  revert with `MultisigEqualsDeployer(addr)` when `multisig == msg.sender`.
+
+### R-17. PrecheckHelper covers remote chain + onToken consistency (round-2 [4])
+- **Where:** `script/PrecheckHelper.s.sol`.
+- **Issue:** (a) only checked the local chain's Helper config — `deploy-eth` would miss
+  BSC placeholders until script 05's BSC-side wiring step. (b) onToken testnet exemption
+  was asymmetric with script 05, which `_requireSet`s the remote token even on testnet.
+- **Status: FIXED.** Precheck now walks both `block.chainid` and `_remoteChainId(block.chainid)`
+  (uses pure `getConfig`, no cross-chain RPC). onToken check now applies on BSC mainnet AND
+  BSC testnet (97); ETH-side reads `wrappedON` from Deployments JSON so Helper.onToken can
+  remain zero on chainId 1 / 11_155_111.
+
+### R-18. Script 05 re-run signals (round-2 [5][6])
+- **Where:** `script/05_ApplyChainUpdates.s.sol`.
+- **Issue:** [5] Operators re-running script 05 after editing `DEFAULT_CAPACITY` / `DEFAULT_RATE`
+  expected re-application, but the idempotency probe skips silently. [6] If the remote pool
+  was redeployed, the idempotency probe sees `isSupportedChain == true` and leaves the local
+  pool wired to the stale (dead) remote pool address.
+- **Status: FIXED.** [5] Skip-log now explicitly directs operators to `make update-limits`
+  for rate-limit changes. [6] Idempotent path now reads `getRemotePool(remoteSelector)` and
+  reverts with a clear "stale remote pool wiring" message if it differs from the deployments
+  JSON; operator must `applyChainUpdates(removed)` and re-run.
+
+### R-19. Corrupt deployment JSON is undocumented (round-2 [7])
+- **Where:** `script/Deployments.sol`.
+- **Status: ACCEPTED (documented).** A killed prior broadcast can leave a corrupt JSON
+  file. The helper only seeds when the file is missing; a corrupt file makes the next
+  `vm.parseJsonAddress` fail with a clear-enough error. Recovery: delete the file and
+  re-run. Inline NatSpec now documents this.
+
+### R-20. Opaque `decimals()` revert (round-2 [8])
+- **Where:** `src/WrappedON.sol` constructor.
+- **Issue:** Calling `IERC20Metadata(onToken).decimals()` on a bare-`IERC20` test mock
+  produced a low-level ABI-decode revert instead of the audit's intended
+  `DecimalsMismatch` error.
+- **Status: FIXED.** `decimals()` call wrapped in try/catch; reverts with new
+  `DecimalsUnreadable()` error on a non-conformant token. New test
+  `test_ConstructorRevertsOnUnreadableDecimals`.
+
+---
+
+## Test suite total (post round-2)
+
+`forge test --no-match-path 'test/fork/**'` → 51 tests pass (added
+`test_ConstructorRevertsOnUnreadableDecimals`).

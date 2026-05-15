@@ -37,6 +37,13 @@ library Deployments {
     /// returns a bare hex string (`0x…`) without surrounding quotes — passing that directly
     /// would write an invalid JSON token into the file. Wrap with quotes so the value is a
     /// proper JSON string that `vm.parseJsonAddress` can read back. (Per PR #19 review.)
+    ///
+    /// Known limitation (round-2 review [7]): if a prior `forge script` broadcast was killed
+    /// mid-write, the JSON file may be left corrupt (truncated / partially written). This
+    /// helper only seeds the file when it is missing — not when it is present-but-invalid.
+    /// Recovery: delete `deployments/<chainId>.json` and re-run the deploy script. The
+    /// scripts that read this file (`readAddress`) will surface a `vm.parseJsonAddress`
+    /// error on a corrupt file, so the operator gets a clear signal at the next step.
     function writeAddress(uint256 chainId, string memory key, address value) internal {
         string memory file = path(chainId);
         if (!vm.exists(file)) vm.writeFile(file, "{}");

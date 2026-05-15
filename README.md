@@ -43,7 +43,7 @@ make build            # forge build --sizes
 ### 3. Run the test suite (no RPC needed)
 
 ```bash
-make test             # 50 tests, no fork
+make test             # 51 tests, no fork
 ```
 
 Targeted subsets:
