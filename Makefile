@@ -4,7 +4,6 @@
 # ─── Defaults ──────────────────────────────────────────────────────────────────
 SHELL := /bin/bash
 DEPLOY_FLAGS := --broadcast --verify --private-key $(DEPLOYER_PK)
-DRYRUN_FLAGS := --sender $(DEPLOYER_ADDR)
 
 help:
 	@echo "Common targets:"

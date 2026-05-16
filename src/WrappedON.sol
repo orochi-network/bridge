@@ -23,9 +23,11 @@ import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/ccip/interfaces/IGetCCIPA
 ///   2. `mint(...)` (MINTER_ROLE) — CCIP pool mints when value arrives from BSC; backing is ON
 ///      locked on the BSC LockReleaseTokenPool, not on this contract.
 ///
-/// Invariant (documented, not enforced on-chain):
-///   wrapBackedSupply <= ON.balanceOf(WrappedON)
-/// `withdraw` reverts when the reserve cannot cover the requested amount.
+/// Wrap-reserve invariant (preserved by mechanics, NOT tracked as on-chain state):
+///   {wON minted via `deposit` and still circulating} <= ON.balanceOf(WrappedON)
+/// There is no `wrapBackedSupply` storage variable — the term is conceptual. Enforcement
+/// is by `withdraw` reverting when `ON.balanceOf(this) < amount`, plus the received-amount
+/// accounting in `deposit` that adds to the reserve and `totalSupply` in lockstep.
 ///
 /// Supply cap: `MAX_CCIP_MINTED = 100M` bounds the `ccipMintedSupply` counter, which
 /// approximates the BSC pool's expected locked-ON balance — every CCIP `mint` on this
@@ -98,8 +100,9 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     constructor(IERC20 onToken, address admin) ERC20("Wrapped Orochi Network", "wON") {
         if (address(onToken) == address(0) || admin == address(0)) revert ZeroAddress();
         // Defensive: catches CREATE2 salt mistakes and testnet misconfigs where the supplied
-        // ON address would collide with the wON deployment address — making the reserve
-        // invariant `wrapBackedSupply <= ON.balanceOf(this)` circular and meaningless.
+        // ON address would collide with the wON deployment address — the wrap-reserve
+        // invariant (deposit-backed wON <= ON.balanceOf(this)) would become circular and
+        // meaningless because the contract's own ERC20 balance would double-count.
         if (address(onToken) == address(this)) revert SelfReserve();
         // Defensive: 1:1 wrap accounting only holds when both tokens use the same decimals.
         // Canonical ON is 18 decimals on both ETH and BSC; reject anything else early. Wrap

@@ -1,6 +1,6 @@
 # Production Deployment Runbook — ON Bridge
 
-This walks the deploy + handoff sequence end to end. Run on **testnet first** (Sepolia ⇄ BSC Testnet), then mainnet. Each step is idempotent — re-running a script that already executed will either fast-fail with a clear error (`AlreadyRegistered`, `MissingAddress`, etc.) or no-op.
+This walks the deploy + handoff sequence end to end. Run on **testnet first** (Sepolia ⇄ BSC Testnet), then mainnet. Most steps are idempotent — scripts 03 (role grants), 04 (registry), 05 (chain wiring), and 06 (handoff + renounce) either no-op or fast-fail when re-run. Scripts 01 and 02 are also idempotent **on a chain that already has a `deployments/<chainId>.json` entry for the artifact**: they skip + log rather than re-deploying. To force a redeploy, delete the corresponding entry from `deployments/<chainId>.json`.
 
 ---
 
@@ -43,6 +43,8 @@ BSCSCAN_API_KEY=...
 ```
 
 Then `source .env`.
+
+**Key-handling note:** the Makefile passes `--private-key $(DEPLOYER_PK)` on the command line, which means the key is visible in `ps aux` and shell history while the broadcast is running. For mainnet broadcasts prefer Foundry's encrypted keystore (`cast wallet import deployer --interactive`, then run scripts with `--account deployer` instead of `--private-key`). The deployer EOA holds critical authority throughout the handoff window — see SECURITY.md H-2.
 
 ### 0.4 Build & test locally
 

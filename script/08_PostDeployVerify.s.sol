@@ -25,6 +25,7 @@ contract PostDeployVerify is Script, Helper {
     error RemotePoolNotLinked(uint64 selector, address expectedRemotePool);
     error RemoteTokenMismatch(uint64 selector, address expected, address actual);
     error RateLimitDisabled(string direction);
+    error RateLimitMisconfigured(string direction, uint128 capacity, uint128 rate);
     error RoleMissing(string role, address account);
     error RoleNotRenounced(string role, address account);
     error PoolOwnershipNotHandedOff(address pool, address owner, address expectedMultisig);
@@ -115,12 +116,27 @@ contract PostDeployVerify is Script, Helper {
 
     function _checkRateLimits(address pool, uint64 remoteSelector) internal view {
         RateLimiter.TokenBucket memory outbound = TokenPool(pool).getCurrentOutboundRateLimiterState(remoteSelector);
-        if (!outbound.isEnabled) revert RateLimitDisabled("outbound");
+        _assertEnabledAndConfigured("outbound", outbound);
         RateLimiter.TokenBucket memory inbound = TokenPool(pool).getCurrentInboundRateLimiterState(remoteSelector);
-        if (!inbound.isEnabled) revert RateLimitDisabled("inbound");
+        _assertEnabledAndConfigured("inbound", inbound);
 
         console.log("[ok] outbound rate limit: cap=%d rate=%d", outbound.capacity, outbound.rate);
         console.log("[ok] inbound  rate limit: cap=%d rate=%d", inbound.capacity, inbound.rate);
+    }
+
+    /// @dev An `isEnabled=true` bucket with `rate == 0` or `capacity == 0` silently bricks
+    ///      all transfers in that direction — the bucket never refills, so every transfer
+    ///      hits `TokenMaxCapacityExceeded`. CCIP's own `_validateTokenBucketConfig` would
+    ///      have rejected such a config at write time, but a future protocol change OR a
+    ///      stuck state from an aborted broadcast could leave it on-chain. Mirror the
+    ///      fork-test gap [7] check (`assertGt(rate, 0)` / `assertGt(capacity, 0)`) here so
+    ///      `make verify-*` catches the misconfiguration BEFORE the first user transfer.
+    ///      Round-3 review [3].
+    function _assertEnabledAndConfigured(string memory direction, RateLimiter.TokenBucket memory bucket) internal pure {
+        if (!bucket.isEnabled) revert RateLimitDisabled(direction);
+        if (bucket.rate == 0 || bucket.capacity == 0) {
+            revert RateLimitMisconfigured(direction, bucket.capacity, bucket.rate);
+        }
     }
 
     function _checkWonRoles(WrappedON won, address pool) internal view {

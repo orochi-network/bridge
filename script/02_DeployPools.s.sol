@@ -15,12 +15,24 @@ import {Deployments} from "./Deployments.sol";
 /// @notice Chain-dispatched pool deployment.
 ///         - Ethereum (chainid 1 / 11155111): deploys BurnMintTokenPool against wON.
 ///         - BSC      (chainid 56 / 97):      deploys LockReleaseTokenPool against ON.
+///
+/// Idempotent: if `deployments/<chainId>.json` already records a `pool` entry, the
+/// script skips + logs rather than deploying a new pool (which would overwrite the
+/// JSON and orphan the previous pool from subsequent scripts). To force a redeploy,
+/// delete the `pool` entry from the JSON file. Round-3 review [6].
 contract DeployPools is Script, Helper {
     function run() external returns (address pool) {
         NetworkConfig memory cfg = getConfig(block.chainid);
 
         _requireSet(cfg.router, "router");
         _requireSet(cfg.rmnProxy, "rmnProxy");
+
+        address existing = Deployments.tryReadAddress(block.chainid, "pool");
+        if (existing != address(0)) {
+            console.log("Pool already deployed at:", existing);
+            console.log("Skipping. Delete the `pool` entry in deployments/<chainId>.json to redeploy.");
+            return existing;
+        }
 
         if (block.chainid == 1 || block.chainid == 11_155_111) {
             address won = Deployments.readAddress(block.chainid, "wrappedON");

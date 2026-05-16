@@ -82,6 +82,7 @@ contract RegisterAdminAndPool is Script, Helper {
         // Path 1: getCCIPAdmin (wON, or any token implementing IGetCCIPAdmin).
         try IGetCCIPAdmin(token).getCCIPAdmin() returns (address ccipAdmin) {
             if (ccipAdmin == broadcaster) {
+                console.log("[path 1] registerAdminViaGetCCIPAdmin -- token %s, admin %s", token, broadcaster);
                 module.registerAdminViaGetCCIPAdmin(token);
                 return;
             }
@@ -90,6 +91,7 @@ contract RegisterAdminAndPool is Script, Helper {
         // Path 2: Ownable.owner (common on many BSC tokens).
         try IOwnable(token).owner() returns (address tokenOwner) {
             if (tokenOwner == broadcaster) {
+                console.log("[path 2] registerAdminViaOwner -- token %s, owner %s", token, broadcaster);
                 module.registerAdminViaOwner(token);
                 return;
             }
@@ -107,17 +109,27 @@ contract RegisterAdminAndPool is Script, Helper {
         try IAccessControlRead(token).hasRole(0x00, broadcaster) returns (bool has) {
             if (has) {
                 try IRegistryModuleOwnerCustom16(moduleAddr).registerAccessControlDefaultAdmin(token) {
+                    console.log("[path 3] registerAccessControlDefaultAdmin -- token %s, admin %s", token, broadcaster);
                     return;
                 } catch (bytes memory reason) {
+                    // Heuristic: an EMPTY revert (`reason.length == 0`) is how Solidity
+                    // surfaces a call to a function selector that isn't in the contract's
+                    // dispatcher — which is what we get from an unexpectedly-v1.5 registry
+                    // that doesn't have `registerAccessControlDefaultAdmin`. This is the
+                    // ONLY case we fall through on. Any structured revert — `Error(string)`,
+                    // custom errors, `Panic(uint256)` — has a non-zero `reason` and is
+                    // bubbled up so the operator sees the actual cause (e.g. token already
+                    // registered with a different admin, registry paused).
+                    //
+                    // Caveat: this heuristic also matches a module that explicitly does a
+                    // plain `revert();` with no reason. The deployed v1.6 module doesn't do
+                    // that; a future version that did would silently fall through to the
+                    // path-4 `CannotResolveCCIPAdmin` diagnostic. Round-3 review [5].
                     if (reason.length != 0) {
-                        // Real revert from a v1.6 registry — bubble it up rather than
-                        // misattributing the failure to a missing selector.
                         assembly {
                             revert(add(reason, 0x20), mload(reason))
                         }
                     }
-                    // Empty revert: selector absent (v1.5 fallthrough). Fall through to
-                    // the path-4 diagnostic.
                 }
             }
         } catch { /* token does not implement IAccessControlRead */ }

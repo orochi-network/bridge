@@ -40,9 +40,12 @@ contract ApplyChainUpdates is Script, Helper {
             // the local pool pointed at the old (dead) address until we re-wire. Revert
             // with a clear instruction rather than silently skipping.
             bytes memory wiredRemote = TokenPool(localPool).getRemotePool(remote.chainSelector);
-            bytes memory expectedRemote = abi.encode(remotePool);
+            // `abi.encode(address)` produces exactly 32 bytes (left-padded), and the
+            // pool's `getRemotePool` returns the same shape. Compare directly as bytes32
+            // rather than hashing both sides — same intent, cheaper, and clearer about
+            // the assumed shape (round-3 review [10]).
             require(
-                keccak256(wiredRemote) == keccak256(expectedRemote),
+                wiredRemote.length == 32 && bytes32(wiredRemote) == bytes32(uint256(uint160(remotePool))),
                 "stale remote pool wiring: local pool points at a different remotePool than deployments JSON. Owner must remove the chain via applyChainUpdates(removed) and re-run, or call setRemotePool directly."
             );
             console.log(

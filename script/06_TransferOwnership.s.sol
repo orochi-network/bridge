@@ -122,10 +122,31 @@ contract RenounceDeployerAdmin is Script, Helper {
         WrappedON won = WrappedON(Deployments.readAddress(block.chainid, "wrappedON"));
         bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
         address deployer = msg.sender;
+        NetworkConfig memory cfg = getConfig(block.chainid);
 
         require(won.hasRole(adminRole, deployer), "deployer does not hold admin role");
         require(won.hasRole(adminRole, multisig), "multisig does NOT hold admin role yet");
         require(won.getCCIPAdmin() == multisig, "wON ccipAdmin not yet accepted by multisig");
+
+        // Block the renounce until the pool and registry handoffs on THIS chain have
+        // fully accepted into the multisig. wON itself is unaffected by either handoff
+        // (it owns its own AccessControl admin path), but completing the renounce while
+        // pool ownership or registry admin is mid-flight leaves the bridge in a known-
+        // confusing half-handed-off state where the multisig has token admin but not the
+        // pool it points at. Force the operator to complete handoff before renounce.
+        // Round-3 review [4].
+        address pool = Deployments.readAddress(block.chainid, "pool");
+        require(pool != address(0), "pool address not recorded in deployments JSON");
+        (bool poolOk, bytes memory poolData) = pool.staticcall(abi.encodeWithSignature("owner()"));
+        require(poolOk && poolData.length == 32, "pool.owner() call failed");
+        require(
+            abi.decode(poolData, (address)) == multisig,
+            "pool ownership NOT accepted by multisig (call acceptOwnership first)"
+        );
+        require(
+            _registryAdministrator(cfg.tokenAdminRegistry, address(won)) == multisig,
+            "registry adminRole NOT accepted by multisig (call acceptAdminRole first)"
+        );
 
         vm.startBroadcast();
         won.renounceRole(adminRole, deployer);
@@ -133,5 +154,14 @@ contract RenounceDeployerAdmin is Script, Helper {
 
         require(!won.hasRole(adminRole, deployer), "renounce failed: deployer still has role");
         console.log("Deployer", deployer, "renounced DEFAULT_ADMIN_ROLE on wON", address(won));
+    }
+
+    function _registryAdministrator(address registry, address token) internal view returns (address) {
+        // TokenAdminRegistry.getTokenConfig returns a struct whose `administrator` field is
+        // at offset 0. Calling via low-level staticcall + abi.decode avoids importing the
+        // registry's struct ABI here.
+        (bool ok, bytes memory data) = registry.staticcall(abi.encodeWithSignature("getTokenConfig(address)", token));
+        require(ok && data.length >= 32, "registry.getTokenConfig() call failed");
+        return abi.decode(data, (address));
     }
 }

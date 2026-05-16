@@ -25,6 +25,18 @@ library Deployments {
         return vm.parseJsonAddress(json, string.concat(".", key));
     }
 
+    /// @notice Like `readAddress` but returns `address(0)` if the deployment file is missing
+    ///         OR the key is absent. Used by scripts 01 / 02 to skip re-deploying an artifact
+    ///         that already has an entry on this chain (round-3 review [6]).
+    function tryReadAddress(uint256 chainId, string memory key) internal view returns (address) {
+        string memory file = path(chainId);
+        if (!vm.exists(file)) return address(0);
+        string memory json = vm.readFile(file);
+        string memory jsonPath = string.concat(".", key);
+        if (!vm.keyExistsJson(json, jsonPath)) return address(0);
+        return vm.parseJsonAddress(json, jsonPath);
+    }
+
     /// @notice Writes a single key into the deployment JSON without clobbering existing keys.
     ///
     /// The 2-arg `vm.writeJson(serialized, file)` overload rebuilds the entire object from the

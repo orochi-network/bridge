@@ -67,15 +67,22 @@ Each entry below: file:line — issue — impact — fix — **Status**.
   file, "$.key")` overload that patches a single JSON path without touching the rest of
   the object. The file is initialized to `{}` on first write so the path target exists.
 
-### C-3. No global supply cap on wON
+### C-3. No supply cap on the CCIP-mint path
 - **Where:** `src/WrappedON.sol`.
 - **Issue:** wON had two independent mint paths (`deposit`-backed and CCIP-`mint`) with
   no enforced ceiling. The implicit safety invariant `lockedON_BSC + reserveON_ETH ≥
   totalSupply(wON)` was not encoded.
-- **Status: FIXED.** Hard cap `MAX_SUPPLY = 100_000_000 ether` enforced via a single
-  `_mintCapped` helper that both `deposit` and `mint` route through. Reverts
-  `SupplyCapExceeded(cap, wouldBe)`. 100M = canonical ON supply on BSC = the absolute
-  upper bound on what the bridge can ever reflect onto Ethereum.
+- **Status: FIXED (superseded by R-1 + R-14).** A `MAX_CCIP_MINTED = 100_000_000 ether`
+  cap is now enforced on the CCIP-mint path via the `ccipMintedSupply` counter
+  (incremented in `mint`, saturating-decremented in every burn entrypoint). `mint`
+  reverts `CCIPMintCapExceeded(cap, wouldBe)`. The `deposit` path is intentionally
+  uncapped — bounded naturally by ETH-side ON supply — so heavy wrap usage cannot
+  starve inbound CCIP messages (this was the round-1 framing's mistake; see R-1).
+  Under the re-framed semantics (R-14) the counter approximates the BSC pool's
+  expected locked-ON balance, and the cap bounds the damage of a compromised CCIP
+  pool minting wON without a matching BSC lock. The safety invariant
+  `lockedON_BSC + reserveON_ETH >= totalSupply(wON)` is preserved by mechanics
+  (CCIP mint↔BSC lock pairing + deposit↔reserve lockstep), not by a totalSupply cap.
 
 ---
 
@@ -653,6 +660,123 @@ addressed below (R-22 through R-30).
   to bidirectional `assertEq(preflightAccepts, ccipAccepts, …)` — the disabled-direction
   zero-config case (the bug M-4's original rule got wrong) is now covered in both
   directions.
+
+---
+
+## PR #19 round-3 review follow-ups (bao-ninh)
+
+A third review pass on commit `908ab22` from bao-ninh-orochi raised 11 additional items
+(3 doc/script gaps, 6 minors, 2 nits). All addressed below (R-31 through R-41).
+
+### R-31. SECURITY.md C-3 still described the superseded MAX_SUPPLY fix (bao-ninh round-3 [1])
+- **Where:** `SECURITY.md` C-3 status paragraph.
+- **Issue:** C-3 said *"Hard cap `MAX_SUPPLY = 100_000_000 ether` enforced via a single
+  `_mintCapped` helper that both `deposit` and `mint` route through. Reverts
+  `SupplyCapExceeded`"* — the round-1 framing. R-1 + R-14 rescoped this to
+  `MAX_CCIP_MINTED` (CCIP-mint path only) with `CCIPMintCapExceeded`. R-26 updated
+  CLAUDE.md but C-3 itself was untouched.
+- **Status: FIXED.** C-3 reframed as "FIXED (superseded by R-1 + R-14)" with the current
+  per-path cap semantics described inline and cross-referenced.
+
+### R-32. README.md still claimed wON totalSupply ≤ 100M (bao-ninh round-3 [2])
+- **Where:** `README.md` L12 supply table and L234 security narrative.
+- **Issue:** Same pattern as R-26 / R-31 — supply table read `≤ 100M` and the security
+  TL;DR claimed *"hard-capped at 100M ether across both mint paths"*. Neither holds:
+  `totalSupply` can grow up to `MAX_CCIP_MINTED + (ETH-side ON deposited)`; only
+  `ccipMintedSupply` is capped.
+- **Status: FIXED.** Supply table now reads `CCIP-mint ≤ 100M; deposit-backed uncapped`.
+  Security TL;DR rewritten to explain the cap is on the CCIP-mint path, the deposit
+  path is naturally bounded, and the safety invariant is preserved by mechanics.
+
+### R-33. Script 08 _checkRateLimits only asserted isEnabled (bao-ninh round-3 [3])
+- **Where:** `script/08_PostDeployVerify.s.sol`.
+- **Issue:** The fork tests already assert `rate > 0` / `capacity > 0` (gap [7]), but
+  the view-only verification script that operators actually run after a real deploy
+  (`make verify-eth/bsc`) only checked `isEnabled`. An `isEnabled = true` bucket with
+  `rate = 0` silently bricks transfers (the bucket never refills) — `make verify-*`
+  would pass and the misconfig would only surface at the first user transaction.
+- **Status: FIXED.** New `_assertEnabledAndConfigured` helper checks `isEnabled` AND
+  `rate > 0` AND `capacity > 0`. New `RateLimitMisconfigured(direction, capacity, rate)`
+  error distinguishes "disabled" from "enabled-but-bricked" so operators get a clear
+  diagnostic.
+
+### R-34. RenounceDeployerAdmin didn't gate on pool/registry handoff completion (bao-ninh round-3 [4])
+- **Where:** `script/06_TransferOwnership.s.sol` (`RenounceDeployerAdmin`).
+- **Issue:** Pre-renounce checks confirmed the wON role handoff, but an operator could
+  still call renounce while pool `acceptOwnership` or registry `acceptAdminRole` was
+  pending — leaving the bridge in a half-handed-off state (multisig has token admin
+  but doesn't own the pool it points at).
+- **Status: FIXED.** Two new `require`s before the renounce: (a)
+  `pool.owner() == multisig` (pool ownership accepted), (b)
+  `registry.getTokenConfig(token).administrator == multisig` (registry admin accepted).
+  Both via low-level staticcall to avoid importing the registry struct ABI; the
+  administrator field is at offset 0 of `TokenConfig`. Clear diagnostic messages on
+  failure: *"pool ownership NOT accepted by multisig (call acceptOwnership first)"* /
+  *"registry adminRole NOT accepted by multisig (call acceptAdminRole first)"*.
+
+### R-35. Script 04 path-3 empty-revert heuristic NatSpec (bao-ninh round-3 [5])
+- **Where:** `script/04_RegisterAdminAndPool.s.sol`.
+- **Issue:** The `if (reason.length != 0)` heuristic that decides whether to propagate
+  vs fall through is correct against any structured revert (custom errors, `Error(string)`,
+  `Panic(uint256)`), but matches a plain `revert();` (empty-reason explicit revert) under
+  the same case as a missing-selector. The deployed v1.6 module doesn't do that; a
+  future version that did would silently fall through to the misleading path-4 diagnostic.
+- **Status: FIXED (in-code comment).** Documented the heuristic as "selector-absent ↔
+  empty revert" rather than "any zero-length return". Behaviour unchanged; comment
+  flags the caveat for future maintainers.
+
+### R-36. Scripts 01 + 02 weren't idempotent — RUNBOOK overstated (bao-ninh round-3 [6])
+- **Where:** `script/01_DeployWrappedON.s.sol`, `script/02_DeployPools.s.sol`,
+  `RUNBOOK.md` opening paragraph.
+- **Issue:** Re-running script 01 or 02 deploys a NEW artifact and overwrites the
+  `deployments/<chainId>.json` entry, breaking every downstream script that reads it
+  (script 03 happens to be idempotent via OZ `_grantRole`'s built-in no-op; scripts
+  04 and 05 already have idempotency probes from R-7 / R-18). RUNBOOK opened with
+  *"Each step is idempotent"* — false for 01 and 02.
+- **Status: FIXED.** Both scripts now probe `Deployments.tryReadAddress` before
+  deploying: if the artifact is already recorded, log + skip rather than re-deploy.
+  New `Deployments.tryReadAddress` returns `address(0)` when the file is missing OR
+  the key is absent (uses `vm.keyExistsJson`). RUNBOOK preamble rewritten to describe
+  per-script idempotency accurately, including the "delete the JSON entry to force
+  redeploy" recovery path.
+
+### R-37. RUNBOOK didn't mention keystore as the preferred deployer-key option (bao-ninh round-3 [7])
+- **Where:** `RUNBOOK.md` §0.3.
+- **Issue:** Makefile passes `--private-key $(DEPLOYER_PK)` on the command line, which
+  surfaces the key in `ps aux` and shell history during the broadcast window. Foundry
+  supports `--account <keystore>` (encrypted, interactive password prompt). Given the
+  deployer EOA holds critical authority throughout the handoff window (H-2), this
+  should be the documented default for mainnet.
+- **Status: FIXED.** RUNBOOK §0.3 now has a "Key-handling note" paragraph explaining
+  the keystore option (`cast wallet import deployer --interactive`, then
+  `--account deployer`) and cross-references H-2.
+
+### R-38. Dead `DRYRUN_FLAGS` Makefile variable (bao-ninh round-3 [8])
+- **Where:** `Makefile`.
+- **Status: FIXED.** Removed.
+
+### R-39. `wrapBackedSupply` NatSpec read as if tracked state (bao-ninh round-3 [9])
+- **Where:** `src/WrappedON.sol` contract NatSpec + ctor comment, `CLAUDE.md`
+  "Reserve invariant" section.
+- **Issue:** `wrapBackedSupply` is a conceptual term, not an on-chain storage variable.
+  Both files used the phrasing as if it were tracked state (`wrapBackedSupply <= …`),
+  which a reader could grep for and find nothing.
+- **Status: FIXED.** Both passages rewritten to make explicit that `wrapBackedSupply`
+  is conceptual, the invariant is preserved by mechanics (`withdraw` revert when
+  reserve insufficient + received-amount accounting in `deposit`), and there is no
+  storage variable of that name.
+
+### R-40. Script 05 keccak256 compare nit (bao-ninh round-3 [10])
+- **Where:** `script/05_ApplyChainUpdates.s.sol`.
+- **Status: FIXED (nit).** Replaced `keccak256(wiredRemote) == keccak256(expectedRemote)`
+  with `wiredRemote.length == 32 && bytes32(wiredRemote) == bytes32(uint256(uint160(remotePool)))`.
+  Same intent; cheaper, and the assumed 32-byte shape is now explicit.
+
+### R-41. Script 04 didn't log which discovery path it took (bao-ninh round-3 [11])
+- **Where:** `script/04_RegisterAdminAndPool.s.sol`.
+- **Status: FIXED (nit).** Each of the three success branches now emits a `[path N]`
+  console line before returning, so post-deploy broadcast log forensics show which
+  registration mechanism actually matched.
 
 ---
 
