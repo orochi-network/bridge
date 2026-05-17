@@ -19,11 +19,15 @@ each finding tracked inline.
 | Low/Nit  | 6 | 5 | 1 (`supportsInterface pure` — no action needed) | 0 |
 | **Original total** | **24** | **19** | **4** | **1** |
 
-PR #19 reviewer follow-ups (R-1 through R-13 below): 11 fixed in code, 2 documented.
-88/88 non-fork tests pass (round-3 added: 4 Script04 dispatch tests, 1 structured-revert
-propagation test, 2 Script06 guard tests, 3 CCIP-validator spot-checks plus a refactored
-fuzz that runs against the real `RateLimiter` library, and the WrappedONInvariant
-adversarial-pool-burn handler path).
+PR #19 reviewer follow-ups span R-1 through R-41 (round 1: R-1..R-13; round 2: R-14..R-20;
+round 3 brng1151: R-22..R-30; round 3 bao-ninh: R-31..R-41). All findings either fixed in
+code or accepted with documented rationale. The current head also adds round-4 test
+coverage and idempotency follow-ups (R-42 onwards — see the relevant section below).
+Non-fork tests pass (round-3 added: 4 Script04 dispatch tests including a structured-revert
+propagation test, 2 Script06 guard tests, 3 CCIP-validator spot-checks; the
+`testFuzz_PreflightAgreesWithCcip` fuzz was also refactored to run against the real
+`RateLimiter` library, and the WrappedONInvariant test gained an adversarial-pool-burn
+handler path).
 
 CI status (`feat/ccip-bridge`): Build & test ✓. Slither runs as a non-blocking advisory job
 (`continue-on-error: true`) — its findings are surfaced for triage but do not gate merge.
@@ -350,7 +354,7 @@ Each entry below: file:line — issue — impact — fix — **Status**.
 - [x] M-7: 2-step `setCCIPAdmin`.
 - [x] M-9: `nonReentrant` + received-amount accounting on wON.
 - [x] All 8 test-coverage gaps closed (see "Test coverage gaps" section above for the
-      per-gap test list; 88 non-fork tests pass + 4 stateful invariants × 128k calls each).
+      per-gap test list; 99 non-fork tests pass + 4 stateful invariants × 128k calls each).
 - [ ] Operational: deploy to Sepolia ⇄ BSC Testnet first, then mainnet.
 - [ ] Operational: fill in `script/Helper.sol` placeholder addresses from
       https://docs.chain.link/ccip/directory before broadcasting on mainnet.
@@ -780,6 +784,98 @@ A third review pass on commit `908ab22` from bao-ninh-orochi raised 11 additiona
 
 ---
 
+## PR #19 round-4 review follow-ups (brng1151)
+
+A fourth review pass on commit `b213dd50` from brng1151 raised 7 additional items
+(3 high-confidence test/code gaps, 4 lower-confidence). All addressed below
+(R-42 through R-48).
+
+### R-42. R-34 pre-renounce guards had no test coverage (round-4 [1])
+- **Where:** `script/06_TransferOwnership.s.sol` (`RenounceDeployerAdmin`),
+  `test/Script06Renounce.t.sol`.
+- **Issue:** The R-34 mapping table claimed `test_E2E_OwnershipHandoff` covered the new
+  pool + registry checks. It didn't — that test calls `won.renounceRole(adminRole,
+  deployer)` directly via `vm.prank`, bypassing `RenounceDeployerAdmin.run()` entirely.
+  A regression dropping any of the new checks would silently land.
+- **Status: FIXED.** Refactored the precondition logic out of `run()` into an internal
+  `_assertReadyToRenounce(won, multisig, deployer, pool, registry)` with dependencies
+  passed in. New `test/Script06Renounce.t.sol` exposes the helper via a harness and
+  drives all 7 branches: happy path, deployer-lacks-role, multisig-lacks-role,
+  ccipAdmin-not-accepted, pool-address-missing, pool-owner-not-multisig,
+  registry-admin-not-multisig. The refactor keeps `run()`'s external behaviour
+  identical.
+
+### R-43. TransferOwnership had no idempotency probes (round-4 [2])
+- **Where:** `script/06_TransferOwnership.s.sol` (`TransferOwnership`).
+- **Issue:** RUNBOOK preamble claimed script 06 either no-ops or fast-fails on re-run,
+  but `TransferOwnership.run()` unconditionally re-invoked every sub-step. Re-running
+  after a successful broadcast would revert deep inside `pool.transferOwnership` (with
+  a generic OZ `OwnableUnauthorizedAccount`) or, worse, re-propose the pending CCIP
+  admin while the deployer still held it.
+- **Status: FIXED.** Each sub-step (pool ownership, wON admin grant, wON ccipAdmin,
+  registry admin transfer) now probes current state and skips with a clear log line
+  if it's already at multisig OR already pending to multisig. Re-runs after a partial
+  broadcast continue cleanly with only the missing steps; re-runs after a full
+  broadcast log "already done" and return. New `ITokenAdminRegistryRead` interface
+  added for the registry probe.
+
+### R-44. Script 08 `_assertEnabledAndConfigured` had no test (round-4 [3])
+- **Where:** `script/08_PostDeployVerify.s.sol`, `test/Script08Verify.t.sol`.
+- **Issue:** R-33 added `RateLimitMisconfigured(direction, capacity, rate)` and the
+  `isEnabled + rate>0 + capacity>0` check, but nothing in `test/` exercised script 08's
+  new branch. Grep for `_assertEnabledAndConfigured` or `RateLimitMisconfigured`
+  outside the script returned zero.
+- **Status: FIXED.** New `test/Script08Verify.t.sol` exposes the helper via
+  `PostDeployVerifyHarness` and drives all four cases: enabled-and-configured (happy
+  path), disabled (`RateLimitDisabled`), enabled-with-zero-rate
+  (`RateLimitMisconfigured`), enabled-with-zero-capacity (`RateLimitMisconfigured`).
+  The zero-rate case is the "silently bricked" misconfig the R-33 fix was built to
+  surface — now locked against regression.
+
+### R-45. `Deployments.readAddress` made the friendly pool-missing message dead (round-4 [4])
+- **Where:** `script/06_TransferOwnership.s.sol` (`RenounceDeployerAdmin`).
+- **Issue:** R-34 used `Deployments.readAddress(...)` for the pool lookup, then a
+  `require(pool != address(0), "pool address not recorded in deployments JSON")`. But
+  `readAddress` reverts on a missing key with a low-level `vm.parseJsonAddress` error.
+  Operators following R-36's "delete the JSON entry to force redeploy" recovery path
+  would never see the friendly message.
+- **Status: FIXED.** Switched the pool lookup to `Deployments.tryReadAddress(...)`
+  which returns `address(0)` on missing key OR missing file, so the friendly diagnostic
+  actually fires.
+
+### R-46. SECURITY.md headline summary only mentioned R-1..R-13 (round-4 [5])
+- **Where:** `SECURITY.md` headline `Status summary` block.
+- **Status: FIXED.** Headline rewritten to reflect the full R-1..R-41 (now R-48) span,
+  organised by review round with brief notes on dispositions.
+
+### R-47. SECURITY.md test-count math contradicted itemization (round-4 [6])
+- **Where:** `SECURITY.md` headline + footer.
+- **Issue:** Headline itemized `4+1+2+3 = 10` round-3 additions; footer reported
+  `+9 added`. The discrepancy was a double-count — "1 structured-revert propagation
+  test" is one of the 4 dispatch tests, not a separate fifth test.
+- **Status: FIXED.** Itemization corrected to "4 dispatch tests (including a
+  structured-revert propagation test)" so the count matches; total now updated to
+  99 (was 88) with the round-4 additions itemized.
+
+### R-48. Script 04 dispatch tests bypass `run()` (round-4 [7])
+- **Where:** `test/Script04Paths.t.sol`.
+- **Issue:** `test_Dispatch_Path*` tests call `harness.exposeRegisterAdmin(...)` (an
+  external wrapper around the script's internal `_registerAdmin`). A regression
+  stripping `vm.startBroadcast` / `vm.stopBroadcast` from `run()` would still let
+  every dispatch test pass.
+- **Status: ACCEPTED (documented limitation).** A run()-level test would require
+  controlling `Helper.getConfig()` outputs (currently hardcoded to mainnet/testnet
+  addresses), writing a `deployments/<chainId>.json` fixture for the pool entry,
+  AND setting `block.chainid` to a Helper-recognised value with non-placeholder
+  CCIP addresses. The closest existing path is the `DeploymentE2E._run04_registerAdminAndPool`
+  reproduction, which also bypasses `run()`. The broadcast wrap is conventional
+  Foundry script boilerplate; its absence would surface immediately on any real
+  deploy attempt (no broadcast happens, no transactions sent). The dispatch tests
+  provide regression protection for the per-path selector logic, which is the
+  load-bearing piece.
+
+---
+
 ## Chainlink CCIP compliance audit
 
 Cross-checked the repo against `lib/ccip @ v2.17.0-ccip1.5.16` (the pinned CCIP 1.5.x ABI)
@@ -869,10 +965,17 @@ through the registry's per-pool addressing.
 
 ## Test suite total
 
-`forge test --no-match-path 'test/fork/**'` → **88 tests pass** (was 79 after the
-Chainlink-compliance pass; +9 added in the round-3 review-follow-ups for Script04
-dispatch coverage, Script06 multisig-guard coverage, and CCIP-validator wrapper
-spot-checks). Plus 4 stateful invariants × 256 runs × 500 calls each in
-`test/WrappedONInvariant.t.sol` (128k assertions per invariant), now including an
-`adversarialPoolBurn` selector that walks the saturating-decrement branch (round-3
-review [2]). Fork tests (`test/fork/*`) compile and run against ETH_RPC / BSC_RPC.
+`forge test --no-match-path 'test/fork/**'` → **99 tests pass**. Round growth:
+- 79 after Chainlink-compliance pass.
+- +9 in round-3 brng1151 follow-ups: 4 Script04 dispatch tests (including a
+  structured-revert propagation test), 2 Script06 multisig-guard tests, 3 CCIP-validator
+  wrapper spot-checks. (Earlier note in this document itemized 4+1+2+3=10; that
+  double-counted the structured-revert test under "dispatch" AND "structured-revert".)
+- +11 in round-4 brng1151 follow-ups: 7 Script06 renounce-precondition tests
+  (`test/Script06Renounce.t.sol`), 4 Script08 rate-limit verifier tests
+  (`test/Script08Verify.t.sol`).
+
+Plus 4 stateful invariants × 256 runs × 500 calls each in `test/WrappedONInvariant.t.sol`
+(128k assertions per invariant), including an `adversarialPoolBurn` selector that walks
+the saturating-decrement branch (round-3 review [2]). Fork tests (`test/fork/*`) compile
+and run against ETH_RPC / BSC_RPC.

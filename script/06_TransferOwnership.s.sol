@@ -17,6 +17,14 @@ interface ITokenAdminRegistry {
     function transferAdminRole(address localToken, address newAdmin) external;
 }
 
+interface ITokenAdminRegistryRead {
+    // 96-byte static struct {administrator, pendingAdministrator, tokenPool}.
+    function getTokenConfig(address localToken)
+        external
+        view
+        returns (address administrator, address pendingAdministrator, address tokenPool);
+}
+
 /// @notice Begins the ownership handoff from the deployer EOA to the operations multisig.
 ///
 /// What this script does (single broadcaster = current deployer/admin):
@@ -51,6 +59,12 @@ contract TransferOwnership is Script, Helper {
         _handoff(multisig);
     }
 
+    /// @dev Each sub-step is individually idempotent (round-4 review [2]). The RUNBOOK
+    ///      preamble promises script 06 either no-ops or fast-fails on re-run; without
+    ///      these per-step probes, a re-run after the initial broadcast would either
+    ///      re-propose the pending CCIP admin (`setCCIPAdmin` succeeds while the deployer
+    ///      still holds it) or revert deep inside `pool.transferOwnership` /
+    ///      `registry.transferAdminRole` with a generic `OwnableUnauthorizedAccount`.
     function _handoff(address multisig) internal {
         NetworkConfig memory cfg = getConfig(block.chainid);
         _requireSet(cfg.tokenAdminRegistry, "tokenAdminRegistry");
@@ -63,9 +77,17 @@ contract TransferOwnership is Script, Helper {
 
         vm.startBroadcast();
 
-        ITokenPoolOwnable(pool).transferOwnership(multisig);
-        console.log("Pool ownership transfer initiated:", pool, "->", multisig);
-        console.log("   (multisig must call acceptOwnership)");
+        // ── Pool ownership ──
+        ITokenPoolOwnable poolIface = ITokenPoolOwnable(pool);
+        if (poolIface.owner() == multisig) {
+            console.log("Pool ownership already held by multisig - skipping transferOwnership.");
+        } else if (poolIface.pendingOwner() == multisig) {
+            console.log("Pool ownership transfer already initiated - skipping (multisig must acceptOwnership).");
+        } else {
+            poolIface.transferOwnership(multisig);
+            console.log("Pool ownership transfer initiated:", pool, "->", multisig);
+            console.log("   (multisig must call acceptOwnership)");
+        }
 
         // After acceptOwnership, the multisig holds custody of the locked-ON reserve via
         // setRebalancer/withdrawLiquidity — see SECURITY.md C-1 for the trust model.
@@ -73,21 +95,47 @@ contract TransferOwnership is Script, Helper {
         if (block.chainid == 1 || block.chainid == 11_155_111) {
             WrappedON won = WrappedON(token);
             bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
-            won.grantRole(adminRole, multisig);
-            console.log("wON DEFAULT_ADMIN_ROLE granted to:", multisig);
+
+            // OZ AccessControl.grantRole is already a no-op when the role is held, but
+            // logging the difference helps re-run forensics.
+            if (won.hasRole(adminRole, multisig)) {
+                console.log("wON DEFAULT_ADMIN_ROLE already held by multisig - skipping grant.");
+            } else {
+                won.grantRole(adminRole, multisig);
+                console.log("wON DEFAULT_ADMIN_ROLE granted to:", multisig);
+            }
 
             // Two-step CCIP admin handoff (see WrappedON M-7): propose now; multisig must
             // call `acceptCCIPAdmin` to take possession. Keeps a typo'd MULTISIG from
             // permanently stranding the role.
-            won.setCCIPAdmin(multisig);
-            require(won.pendingCCIPAdmin() == multisig, "wON pendingCCIPAdmin != multisig");
-            console.log("wON CCIP admin proposed to:      ", multisig);
-            console.log("   (multisig must call acceptCCIPAdmin)");
+            //
+            // Re-run safety: once the multisig has called `acceptCCIPAdmin`, the deployer
+            // is no longer the ccipAdmin and `setCCIPAdmin` would revert `OnlyCCIPAdmin`.
+            // Skip cleanly in that case. Also skip if the proposal is already pending to
+            // the multisig (no need to re-write the same value).
+            if (won.getCCIPAdmin() == multisig) {
+                console.log("wON CCIP admin already accepted by multisig - skipping setCCIPAdmin.");
+            } else if (won.pendingCCIPAdmin() == multisig) {
+                console.log("wON CCIP admin already proposed to multisig - skipping (multisig must acceptCCIPAdmin).");
+            } else {
+                won.setCCIPAdmin(multisig);
+                require(won.pendingCCIPAdmin() == multisig, "wON pendingCCIPAdmin != multisig");
+                console.log("wON CCIP admin proposed to:      ", multisig);
+                console.log("   (multisig must call acceptCCIPAdmin)");
+            }
         }
 
-        ITokenAdminRegistry(cfg.tokenAdminRegistry).transferAdminRole(token, multisig);
-        console.log("Registry admin role transfer initiated:", token, "->", multisig);
-        console.log("   (multisig must call acceptAdminRole)");
+        // ── Registry admin role ──
+        (address regAdmin, address regPending,) = ITokenAdminRegistryRead(cfg.tokenAdminRegistry).getTokenConfig(token);
+        if (regAdmin == multisig) {
+            console.log("Registry admin role already held by multisig - skipping transferAdminRole.");
+        } else if (regPending == multisig) {
+            console.log("Registry admin role transfer already initiated - skipping (multisig must acceptAdminRole).");
+        } else {
+            ITokenAdminRegistry(cfg.tokenAdminRegistry).transferAdminRole(token, multisig);
+            console.log("Registry admin role transfer initiated:", token, "->", multisig);
+            console.log("   (multisig must call acceptAdminRole)");
+        }
 
         vm.stopBroadcast();
 
@@ -124,6 +172,36 @@ contract RenounceDeployerAdmin is Script, Helper {
         address deployer = msg.sender;
         NetworkConfig memory cfg = getConfig(block.chainid);
 
+        // Use `tryReadAddress` so a deleted/missing `pool` entry surfaces with our own
+        // diagnostic rather than a low-level `vm.parseJsonAddress` revert — R-36's
+        // "delete the JSON entry to force redeploy" recovery path explicitly invites
+        // operators to remove the entry, so the friendly message must actually fire
+        // (round-4 review [4]).
+        address pool = Deployments.tryReadAddress(block.chainid, "pool");
+
+        _assertReadyToRenounce(won, multisig, deployer, pool, cfg.tokenAdminRegistry);
+
+        vm.startBroadcast();
+        won.renounceRole(adminRole, deployer);
+        vm.stopBroadcast();
+
+        require(!won.hasRole(adminRole, deployer), "renounce failed: deployer still has role");
+        console.log("Deployer", deployer, "renounced DEFAULT_ADMIN_ROLE on wON", address(won));
+    }
+
+    /// @dev All pre-broadcast safety checks for the renounce step. Factored out of `run()`
+    ///      with dependencies passed in so tests can drive each branch without writing a
+    ///      `deployments/<chainId>.json` fixture (round-4 review [1]).
+    ///
+    ///      Order matters: cheap on-contract reads first, low-level staticcalls last,
+    ///      so an operator with the most common mistake (multisig hasn't accepted the
+    ///      wON role grant) sees a precise message rather than a generic
+    ///      pool/registry-not-handed-off error.
+    function _assertReadyToRenounce(WrappedON won, address multisig, address deployer, address pool, address registry)
+        internal
+        view
+    {
+        bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
         require(won.hasRole(adminRole, deployer), "deployer does not hold admin role");
         require(won.hasRole(adminRole, multisig), "multisig does NOT hold admin role yet");
         require(won.getCCIPAdmin() == multisig, "wON ccipAdmin not yet accepted by multisig");
@@ -135,7 +213,6 @@ contract RenounceDeployerAdmin is Script, Helper {
         // confusing half-handed-off state where the multisig has token admin but not the
         // pool it points at. Force the operator to complete handoff before renounce.
         // Round-3 review [4].
-        address pool = Deployments.readAddress(block.chainid, "pool");
         require(pool != address(0), "pool address not recorded in deployments JSON");
         (bool poolOk, bytes memory poolData) = pool.staticcall(abi.encodeWithSignature("owner()"));
         require(poolOk && poolData.length == 32, "pool.owner() call failed");
@@ -144,16 +221,9 @@ contract RenounceDeployerAdmin is Script, Helper {
             "pool ownership NOT accepted by multisig (call acceptOwnership first)"
         );
         require(
-            _registryAdministrator(cfg.tokenAdminRegistry, address(won)) == multisig,
+            _registryAdministrator(registry, address(won)) == multisig,
             "registry adminRole NOT accepted by multisig (call acceptAdminRole first)"
         );
-
-        vm.startBroadcast();
-        won.renounceRole(adminRole, deployer);
-        vm.stopBroadcast();
-
-        require(!won.hasRole(adminRole, deployer), "renounce failed: deployer still has role");
-        console.log("Deployer", deployer, "renounced DEFAULT_ADMIN_ROLE on wON", address(won));
     }
 
     function _registryAdministrator(address registry, address token) internal view returns (address) {
