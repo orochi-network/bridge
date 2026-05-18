@@ -19,15 +19,33 @@ each finding tracked inline.
 | Low/Nit  | 6 | 5 | 1 (`supportsInterface pure` — no action needed) | 0 |
 | **Original total** | **24** | **19** | **4** | **1** |
 
-PR #19 reviewer follow-ups span R-1 through R-41 (round 1: R-1..R-13; round 2: R-14..R-20;
-round 3 brng1151: R-22..R-30; round 3 bao-ninh: R-31..R-41). All findings either fixed in
-code or accepted with documented rationale. The current head also adds round-4 test
-coverage and idempotency follow-ups (R-42 onwards — see the relevant section below).
-Non-fork tests pass (round-3 added: 4 Script04 dispatch tests including a structured-revert
-propagation test, 2 Script06 guard tests, 3 CCIP-validator spot-checks; the
-`testFuzz_PreflightAgreesWithCcip` fuzz was also refactored to run against the real
-`RateLimiter` library, and the WrappedONInvariant test gained an adversarial-pool-burn
-handler path).
+PR #19 reviewer follow-ups span R-1 through R-49. All findings either fixed in code or
+accepted with documented rationale. Per-round breakdown:
+
+- **Round 1** (R-1..R-13): mostly code fixes for the initial brng1151 + bao-ninh review
+  passes; everything except R-8 (PR description correction) and R-13 (a Make/doc grab-bag
+  with several "accepted" sub-items) landed in code.
+- **Round 2** (R-14..R-20): brng1151 round 2; semantic re-framing of the CCIP-mint cap
+  (R-14, R-15) plus a multisig-equals-deployer handoff guard (R-16) and four script /
+  doc consistency fixes (R-17..R-20).
+- **R-21** (Chainlink CCIP compliance audit): rewrote script 07's rate-limit preflight to
+  exactly mirror the protocol's `_validateTokenBucketConfig`; supersedes M-4.
+- **Round 3 brng1151** (R-22..R-30): script 04 dispatch + structured-revert coverage,
+  WrappedONInvariant adversarial-burn handler, CCIP-validator wrapper, ledger
+  consistency fixes.
+- **Round 3 bao-ninh** (R-31..R-41): C-3 / README catch-up to the R-14 reframing,
+  script 08 rate-limit-misconfigured detector, RenounceDeployerAdmin pool/registry
+  guards, scripts 01/02 idempotency probes, RUNBOOK keystore note, several nits.
+- **Round 4 brng1151** (R-42..R-48): test coverage for the R-34 pre-renounce guards
+  (helper extraction + 7-branch test suite), TransferOwnership idempotency probes,
+  Script08 verifier tests, `tryReadAddress` consistency, headline + math fixes,
+  Script04 `run()` limitation documented.
+- **Round 5 brng1151 + bao-ninh** (R-49..R-55): TransferOwnership pendingOwner() bug
+  fix, R-21 backfill, Script06Renounce/Script08Verify run() limitation extended from
+  R-48, `tryReadAddress` switch in TransferOwnership, headline rewrite, test-count
+  doc fixes.
+
+Non-fork tests: **99 total** (95 unit/integration + 4 stateful invariants).
 
 CI status (`feat/ccip-bridge`): Build & test ✓. Slither runs as a non-blocking advisory job
 (`continue-on-error: true`) — its findings are surfaced for triage but do not gate merge.
@@ -551,6 +569,23 @@ reviewer's order.
   `DecimalsUnreadable()` error on a non-conformant token. New test
   `test_ConstructorRevertsOnUnreadableDecimals`.
 
+### R-21. Script 07 preflight diverged from CCIP `_validateTokenBucketConfig` (Chainlink compliance audit)
+- **Where:** `script/07_UpdateRateLimits.s.sol`.
+- **Issue:** The original M-4 preflight (added in PR #19's first round) used
+  `capacity > 0` always, non-strict `rate <= capacity`, did not reject `rate == 0`,
+  and had no disabled-case handling. The CCIP protocol's
+  `RateLimiter._validateTokenBucketConfig` actually requires: when `isEnabled = true`,
+  `rate > 0` AND `rate < capacity` (strict); when `isEnabled = false`,
+  `capacity == 0` AND `rate == 0`. Result on both ends: a config the preflight accepted
+  could fail `_validateTokenBucketConfig` mid-broadcast (the exact failure mode M-4 was
+  meant to prevent), AND the valid disabled-direction `(capacity=0, rate=0)` config was
+  incorrectly blocked.
+- **Status: FIXED.** Rewrote `_validateBucket` to mirror CCIP's rule exactly. New
+  `test/Script07Preflight.t.sol` covers each branch (12 tests including a fuzz that
+  asserts preflight ↔ CCIP equivalence on every input — see R-30 for the round-3
+  improvement that lifted the fuzz from a hand-mirror to a real cross-check against
+  `RateLimiter._validateTokenBucketConfig`). Supersedes M-4.
+
 ---
 
 ## PR #19 round-3 review follow-ups (brng1151)
@@ -873,6 +908,101 @@ A fourth review pass on commit `b213dd50` from brng1151 raised 7 additional item
   deploy attempt (no broadcast happens, no transactions sent). The dispatch tests
   provide regression protection for the per-path selector logic, which is the
   load-bearing piece.
+
+---
+
+## PR #19 round-5 review follow-ups
+
+A fifth review pass on commit `9a412d2` raised 7 items (6 from brng1151, 1 from
+bao-ninh). Item 1 was a real correctness bug introduced by R-43; the rest were
+ledger/doc/test-rigor gaps. All addressed below (R-49 through R-55).
+
+### R-49. R-43's `pendingOwner()` probe doesn't exist on CCIP TokenPool (round-5 brng1151 [1])
+- **Where:** `script/06_TransferOwnership.s.sol` (`TransferOwnership._handoff`).
+- **Issue:** R-43's pool-ownership idempotency probe checked `pool.pendingOwner() == multisig`.
+  CCIP `TokenPool` inherits `OwnerIsCreator → ConfirmedOwner → ConfirmedOwnerWithProposal`,
+  where `s_pendingOwner` is `private` and only `owner()` / `transferOwnership` /
+  `acceptOwnership` are exposed. The typed-interface call to `pendingOwner()` on a real
+  pool would revert with empty returndata (missing selector) — strictly worse than the
+  pre-R-43 behaviour, which would at least re-broadcast and surface `OwnableUnauthorizedAccount`
+  in the post-acceptance case. The SECURITY.md R-43 claim that re-runs "continue cleanly
+  after a partial broadcast" was false.
+- **Status: FIXED.** Removed `pendingOwner()` from the `ITokenPoolOwnable` interface and
+  dropped the `pendingOwner == multisig` branch in `_handoff`. Probe now: if
+  `pool.owner() == multisig`, skip (post-accept state); else re-broadcast
+  `transferOwnership(multisig)`. Re-broadcasting from the deployer while the deployer is
+  still owner is harmless (overwrites `s_pendingOwner` with the same value); after
+  multisig accepts, the deployer is no longer owner and the `owner == multisig` branch
+  handles the skip cleanly.
+
+### R-50. Missing R-21 entry referenced by M-4 / R-29 (round-5 brng1151 [2])
+- **Where:** `SECURITY.md`.
+- **Issue:** M-4's "FIXED (superseded by R-21)" status, R-29's text ("R-21 rewrote the
+  preflight to mirror CCIP's strict rule"), and the trust-model section all referenced
+  R-21 as load-bearing. The ledger jumped directly from R-20 to R-22; R-21 had no entry.
+- **Status: FIXED.** Backfilled R-21 between the round-2 follow-ups and round-3 brng1151
+  follow-ups, attributed to the Chainlink CCIP compliance audit (which is where the
+  preflight rewrite originated; the Chainlink-compliance section near the end of this
+  document already described the fix in detail).
+
+### R-51. R-42 / R-44 tests reintroduce R-48's `run()`-bypass pattern (round-5 brng1151 [3])
+- **Where:** `test/Script06Renounce.t.sol`, `test/Script08Verify.t.sol`.
+- **Issue:** All 7 `Script06Renounce` tests call `harness.exposeAssertReadyToRenounce(...)`
+  and all 4 `Script08Verify` tests call `h.exposeAssert(...)`. A regression that deleted
+  the helper call from `RenounceDeployerAdmin.run()`, swapped its argument order, or
+  swapped the `"outbound"`/`"inbound"` direction strings in `PostDeployVerify._checkRateLimits`
+  would pass every test. R-48 explicitly accepted this pattern for Script04 with
+  documented reasoning; R-42 / R-44 should be held to the same standard.
+- **Status: ACCEPTED (R-48 reasoning extends).** Both `RenounceDeployerAdmin.run()` and
+  `PostDeployVerify.run()` read `Helper.getConfig(block.chainid)` whose addresses are
+  hardcoded placeholders (`address(0)`) for testnet/mainnet alike — exactly the
+  Helper-injection limitation documented under R-48. A run()-level test would require
+  the same refactor (Helper inversion of control) the team scoped out of this PR.
+  Mitigation: the harness exposers call the same internal function the script calls,
+  with the same signature, so an argument-order or string-direction regression in the
+  helper itself is caught by these tests. A regression that bypasses the helper
+  entirely (deleting the call from `run()`) is what's uncovered — the same blind
+  spot as R-48. Tracked here so future work can address all three scripts together
+  under one Helper-injection refactor.
+
+### R-52. R-43 + R-45 paired fix only mirrored half (round-5 brng1151 [4])
+- **Where:** `script/06_TransferOwnership.s.sol` (`TransferOwnership._handoff`).
+- **Issue:** R-45 switched `RenounceDeployerAdmin`'s pool lookup to `Deployments.tryReadAddress`
+  so a deleted JSON entry surfaces a friendly diagnostic. `_handoff` still used
+  `Deployments.readAddress(...)` for both `pool` and `wrappedON`, so an operator who
+  followed R-36's "delete the JSON entry to force redeploy" recovery path got a cryptic
+  `vm.parseJsonAddress` revert when re-running `make handoff`.
+- **Status: FIXED.** Both lookups in `_handoff` switched to `tryReadAddress` with explicit
+  `require(addr != address(0), …)` messages naming the script the operator needs to re-run
+  first.
+
+### R-53. R-46 status overstated the headline rewrite (round-5 brng1151 [5])
+- **Where:** `SECURITY.md` headline `Status summary` block.
+- **Issue:** R-46's status said "headline rewritten… organised by review round with brief
+  notes on dispositions", but the actual headline integrated R-1..R-41 and then tacked
+  R-42 onwards on as a single addendum line. The per-round disposition notes R-46
+  promised for R-42..R-48 were not written.
+- **Status: FIXED.** Headline rewritten with one bullet per round (R-1..R-13, R-14..R-20,
+  R-21, R-22..R-30, R-31..R-41, R-42..R-48, R-49..R-55) and a brief disposition note for
+  each. Test-count summary line moved to the bottom of the same block.
+
+### R-54. CLAUDE.md self-contradicting test counts (round-5 brng1151 [6])
+- **Where:** `CLAUDE.md` L83 vs L99.
+- **Issue:** L83 (this round's update) said "99 tests + 4 stateful invariants"; L99 still
+  read "41 mock-based tests (no RPC needed)". Same file, same scope (non-fork).
+- **Status: FIXED.** L99 updated to "99 mock-based tests"; both lines now also fix R-55.
+
+### R-55. "99 tests + 4 stateful invariants" double-counts the invariants (round-5 bao-ninh)
+- **Where:** `CLAUDE.md`, `README.md`, `RUNBOOK.md` test-count lines.
+- **Issue:** The 4 `invariant_*` functions in `test/WrappedONInvariant.t.sol` are PART of
+  the 99 tests that `forge test` reports — they are not 4 additional tests on top
+  (verified: `grep -c "function (test|testFuzz)_" test/*.t.sol` = 95;
+  `grep -c "function invariant_" test/*.t.sol` = 4; 95 + 4 = 99).
+- **Status: FIXED.** All three operator-doc references rewritten to "99 tests (95
+  unit/integration + 4 stateful invariants)" so the breakdown is explicit and the sum is
+  unambiguous. `SECURITY.md` was already correct (it says "99 tests pass" then "Plus 4
+  stateful invariants × 256 runs × 500 calls each", where "Plus" qualifies the iteration
+  depth, not the test count).
 
 ---
 

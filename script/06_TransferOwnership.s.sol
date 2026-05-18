@@ -10,7 +10,6 @@ import {Deployments} from "./Deployments.sol";
 interface ITokenPoolOwnable {
     function transferOwnership(address to) external;
     function owner() external view returns (address);
-    function pendingOwner() external view returns (address);
 }
 
 interface ITokenAdminRegistry {
@@ -69,23 +68,38 @@ contract TransferOwnership is Script, Helper {
         NetworkConfig memory cfg = getConfig(block.chainid);
         _requireSet(cfg.tokenAdminRegistry, "tokenAdminRegistry");
 
-        address pool = Deployments.readAddress(block.chainid, "pool");
-        address token = (block.chainid == 1 || block.chainid == 11_155_111)
-            ? Deployments.readAddress(block.chainid, "wrappedON")
-            : cfg.onToken;
+        // Round-5 review [4]: mirror R-45's `tryReadAddress` switch here so an operator
+        // who follows R-36's "delete the JSON entry to force redeploy" recovery path
+        // sees a friendly diagnostic instead of a low-level `vm.parseJsonAddress` revert.
+        address pool = Deployments.tryReadAddress(block.chainid, "pool");
+        require(pool != address(0), "pool address not recorded in deployments JSON (run script 02 first)");
+        address token;
+        if (block.chainid == 1 || block.chainid == 11_155_111) {
+            token = Deployments.tryReadAddress(block.chainid, "wrappedON");
+            require(token != address(0), "wrappedON address not recorded in deployments JSON (run script 01 first)");
+        } else {
+            token = cfg.onToken;
+        }
         _requireSet(token, "token");
 
         vm.startBroadcast();
 
         // ── Pool ownership ──
+        // CCIP `TokenPool` inherits `ConfirmedOwnerWithProposal`, where `s_pendingOwner`
+        // is `private` — no public `pendingOwner()` getter exists. So we cannot probe
+        // the proposed state through a typed interface. Instead: skip ONLY when the
+        // multisig already owns the pool (post-acceptance state); otherwise re-broadcast
+        // `transferOwnership(multisig)`. Calling `transferOwnership` from the deployer
+        // while the deployer is still the owner just overwrites `s_pendingOwner` with the
+        // same address — harmless and idempotent (round-5 review [1]). After the multisig
+        // accepts, the deployer is no longer owner and a re-run hits the
+        // `owner == multisig` branch above and skips cleanly.
         ITokenPoolOwnable poolIface = ITokenPoolOwnable(pool);
         if (poolIface.owner() == multisig) {
             console.log("Pool ownership already held by multisig - skipping transferOwnership.");
-        } else if (poolIface.pendingOwner() == multisig) {
-            console.log("Pool ownership transfer already initiated - skipping (multisig must acceptOwnership).");
         } else {
             poolIface.transferOwnership(multisig);
-            console.log("Pool ownership transfer initiated:", pool, "->", multisig);
+            console.log("Pool ownership transfer initiated (or re-broadcast):", pool, "->", multisig);
             console.log("   (multisig must call acceptOwnership)");
         }
 

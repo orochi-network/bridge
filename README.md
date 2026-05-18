@@ -43,7 +43,7 @@ make build            # forge build --sizes
 ### 3. Run the test suite (no RPC needed)
 
 ```bash
-make test             # 99 tests + 4 stateful invariants, no fork
+make test             # 99 tests, no fork (95 unit/integration + 4 stateful invariants)
 ```
 
 Targeted subsets:
