@@ -62,7 +62,7 @@ Then `source .env`.
 
 ```bash
 make build
-make test                 # all 103 non-fork tests (99 unit/integration + 4 stateful invariants) must pass
+make test                 # all 102 non-fork tests (98 unit/integration + 4 stateful invariants) must pass
 make fmt-check
 ```
 

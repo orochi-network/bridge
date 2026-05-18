@@ -77,7 +77,6 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     error SelfReserve();
     error DecimalsMismatch(uint8 expected, uint8 actual);
     error CCIPMintCapExceeded(uint256 cap, uint256 wouldBe);
-    error DecimalsUnreadable();
     error InvalidCCIPAdmin();
 
     /// @notice Deploys wON wired to canonical ON and a bootstrap `admin`.
@@ -88,13 +87,10 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         if (address(onToken) == address(0) || admin == address(0)) revert ZeroAddress();
         // Self-reserve would make the wrap invariant circular (own ERC20 balance double-counts).
         if (address(onToken) == address(this)) revert SelfReserve();
-        // 1:1 wrap accounting requires matching decimals. try/catch turns a non-conformant
-        // token into `DecimalsUnreadable` instead of a low-level ABI-decode revert (R-20).
-        try IERC20Metadata(address(onToken)).decimals() returns (uint8 onDecimals) {
-            if (onDecimals != decimals()) revert DecimalsMismatch(decimals(), onDecimals);
-        } catch {
-            revert DecimalsUnreadable();
-        }
+        // 1:1 wrap accounting requires matching decimals. Canonical ON is a standard ERC20Metadata
+        // on both chains; rejects mis-wired testnet tokens.
+        uint8 onDecimals = IERC20Metadata(address(onToken)).decimals();
+        if (onDecimals != decimals()) revert DecimalsMismatch(decimals(), onDecimals);
         ON = onToken;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         s_ccipAdmin = admin;

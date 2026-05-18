@@ -50,7 +50,7 @@ accepted with documented rationale, or addressed via operational guidance in
   `deposit(0)`'s `ZeroAmount` guard, `supportsInterface` mutability narrowed back to
   `view` to keep the inheritance chain extensible.
 
-Non-fork tests: **103 total** (99 unit/integration + 4 stateful invariants).
+Non-fork tests: **102 total** (98 unit/integration + 4 stateful invariants).
 
 CI status (`feat/ccip-bridge`): Build & test ✓. Slither runs as a non-blocking advisory job
 (`continue-on-error: true`) — its findings are surfaced for triage but do not gate merge.
@@ -299,7 +299,7 @@ Each entry below: file:line — issue — impact — fix — **Status**.
 - [x] M-7: 2-step `setCCIPAdmin`.
 - [x] M-9: `nonReentrant` + received-amount accounting on wON.
 - [x] All 8 test-coverage gaps closed (see "Test coverage gaps" section above for the
-      per-gap test list; 99 non-fork tests pass + 4 stateful invariants × 128k calls each).
+      per-gap test list; 98 non-fork tests pass + 4 stateful invariants × 128k calls each).
 - [ ] Operator action: deploy to Sepolia ⇄ BSC Testnet first (RUNBOOK §1), then mainnet
       (RUNBOOK §2).
 - [ ] Operator action: fill in `script/Helper.sol` placeholder addresses from
@@ -395,7 +395,7 @@ reviewer's order.
   re-run. Inline NatSpec now documents this.
 
 ### R-20. Opaque `decimals()` revert (round-2 [8])
-**Status: FIXED.** Calling `IERC20Metadata(onToken).decimals()` on a bare-`IERC20` test mock produced a low-level ABI-decode revert instead of the audit's intended `DecimalsMismatch` error. In `src/WrappedON.sol` constructor the call is now wrapped in try/catch and reverts with a new `DecimalsUnreadable()` error on a non-conformant token. New test `test_ConstructorRevertsOnUnreadableDecimals`.
+**Status: REVERTED (over-engineering for a test-mock symptom).** R-20 originally wrapped the ctor's `IERC20Metadata(onToken).decimals()` call in try/catch and added a `DecimalsUnreadable` error. The original symptom was a low-level ABI-decode revert from a bare-`IERC20` *test* mock; canonical ON on both chains is a fully-conformant `IERC20Metadata` so the catch branch was unreachable in production. The try/catch + extra error + `NoDecimalsToken` mock + `test_ConstructorRevertsOnUnreadableDecimals` were all removed; the ctor now calls `decimals()` directly and only retains the `DecimalsMismatch` guard against a wrong-decimals testnet wiring.
 
 ### R-21. Script 07 preflight diverged from CCIP `_validateTokenBucketConfig` (Chainlink compliance audit)
 **Status: FIXED (supersedes M-4).** The original M-4 preflight in `script/07_UpdateRateLimits.s.sol` used `capacity > 0` always, non-strict `rate <= capacity`, did not reject `rate == 0`, and had no disabled-case handling — so configs the preflight accepted could fail `_validateTokenBucketConfig` mid-broadcast, AND the valid disabled-direction `(capacity=0, rate=0)` config was incorrectly blocked. Rewrote `_validateBucket` to mirror CCIP's rule exactly: enabled → `rate > 0` AND `rate < capacity` (strict); disabled → both zero. New `test/Script07Preflight.t.sol` covers each branch (12 tests including a fuzz that asserts preflight ↔ CCIP equivalence on every input — R-30 lifted this fuzz from a hand-mirror to a real cross-check against `RateLimiter._validateTokenBucketConfig`).
@@ -663,7 +663,7 @@ through the registry's per-pool addressing.
 
 ## Test suite total
 
-`forge test --no-match-path 'test/fork/**'` → **103 tests pass**. Round growth:
+`forge test --no-match-path 'test/fork/**'` → **102 tests pass**. Round growth:
 - 79 after Chainlink-compliance pass.
 - +9 in round-3 brng1151 follow-ups: 4 Script04 dispatch tests (including a
   structured-revert propagation test), 2 Script06 multisig-guard tests, 3 CCIP-validator
@@ -672,6 +672,9 @@ through the registry's per-pool addressing.
 - +11 in round-4 brng1151 follow-ups: 7 Script06 renounce-precondition tests
   (`test/Script06Renounce.t.sol`), 4 Script08 rate-limit verifier tests
   (`test/Script08Verify.t.sol`).
+- −1 from removing `test_ConstructorRevertsOnUnreadableDecimals` together with the
+  R-20 try/catch + `NoDecimalsToken` mock (unreachable in production — canonical ON
+  is a conformant `IERC20Metadata` on both chains).
 - +4 in round-6 multi-agent review (R-56..R-58): 3 negative/positive tests for
   `setCCIPAdmin` guards (`SelfProposal`, `ContractSelf`, `MayReProposePending`) and 1
   for `withdraw(0)` (`WithdrawRevertsOnZero`).
