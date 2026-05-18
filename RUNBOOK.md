@@ -20,13 +20,25 @@ Chain selectors are already committed and should not need changes.
 
 ### 0.2 Confirm the BSC ON token admin path
 
-The deployer needs to be able to register as admin for the canonical ON on BSC (`0x0e4F6209eD984b21EDEA43acE6e09559eD051D48`). Three possibilities, in order:
+The deployer needs to be able to register as admin for the canonical ON on BSC (`0x0e4F6209eD984b21EDEA43acE6e09559eD051D48`). `script/04_RegisterAdminAndPool.s.sol` probes four paths in order:
 
 1. `IGetCCIPAdmin.getCCIPAdmin()` returns the deployer — script auto-uses `registerAdminViaGetCCIPAdmin`.
 2. `Ownable.owner()` returns the deployer — script auto-uses `registerAdminViaOwner`.
-3. Neither — the **current** ON token owner must call `TokenAdminRegistry.proposeAdministrator(token, deployer)` from their wallet, then re-run script 04, which will succeed at `acceptAdminRole` / `setPool`.
+3. OZ `AccessControl.hasRole(DEFAULT_ADMIN_ROLE, deployer)` on the v1.6 registry path — script auto-uses `registerAccessControlDefaultAdmin`.
+4. None of the above — the script reverts with a `CannotResolveCCIPAdmin` diagnostic. Recovery requires either (a) the token's `Ownable.owner` calling `RegistryModuleOwnerCustom.registerAdminViaOwner(token)` themselves, or (b) coordinating with Chainlink to register the admin out-of-band. After admin is set, re-run script 04 — `acceptAdminRole` and `setPool` are idempotent.
 
-Check ahead of time which path applies.
+**Required: validate the path on a BSC mainnet fork BEFORE broadcasting (audit H-4).** The MEV / front-running window on `TokenAdminRegistry.proposeAdministrator` is closed if you already know the path resolves to a permissionless on-chain branch (1, 2, or 3); it stays open if recovery has to go through path 4. Procedure:
+
+```bash
+# 1. Start a BSC mainnet fork pinned to a recent block
+anvil --fork-url $BSC_RPC --port 8545 &
+
+# 2. Simulate scripts 02 + 04 against the fork
+make deploy-bsc RPC=http://127.0.0.1:8545
+# (or run forge script directly with --rpc-url http://127.0.0.1:8545 and no --broadcast)
+```
+
+Observe the `[path N]` log line from script 04 (R-41) to confirm which branch matched. If the script reverts with `CannotResolveCCIPAdmin`, coordinate path-4 recovery with the ON token owner / Chainlink *before* touching mainnet — do not broadcast script 04 hoping it works.
 
 ### 0.3 Environment
 
@@ -139,7 +151,12 @@ Each per-chain invocation:
 - (ETH only) Grants wON `DEFAULT_ADMIN_ROLE` to the multisig and proposes the new CCIP admin (two-step — multisig must call `acceptCCIPAdmin`).
 - Calls `TokenAdminRegistry.transferAdminRole(token, multisig)` (two-step).
 
-**Monitor while the handoff is in flight.** During the grant→accept→renounce window, the deployer EOA still holds `MINTER_ROLE`/`BURNER_ROLE` admin authority (audit H-2). Watch for unexpected `RoleGranted` events on wON — see [Trust model](#trust-model-bsc-reserve-custody).
+**Minimize the handoff window (audit H-2).** Between the grant in 3.1 and the deployer renounce in 3.4, the deployer EOA still holds wON `DEFAULT_ADMIN_ROLE` — and therefore admin authority over `MINTER_ROLE` / `BURNER_ROLE`. A compromised deployer key in this window can grant `MINTER_ROLE` to an attacker EOA and mint unbacked wON. To reduce exposure:
+
+1. Have the multisig signers staged and ready before running `make handoff-all`.
+2. Queue the 3.2 accept transactions in the Safe UI immediately after 3.1 completes.
+3. Run `make renounce` (3.4) as soon as 3.2 + 3.3 confirm. Aim for hours, not days, between grant and renounce.
+4. **Monitor while the handoff is in flight.** Watch for unexpected `RoleGranted(MINTER_ROLE, *)` / `RoleGranted(BURNER_ROLE, *)` events on wON whose grantee is not the BurnMintTokenPool — page on-call on any match. See [Trust model](#trust-model-bsc-reserve-custody) for the full monitoring table.
 
 ### 3.2 Multisig accepts (from the Safe UI / SDK)
 

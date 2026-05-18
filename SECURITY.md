@@ -11,16 +11,17 @@ each finding tracked inline.
 
 ## Status summary (PR #19, post-review pass)
 
-| Severity | Total | Fixed in code | Accepted (documented) | Partial / operational |
+| Severity | Total | Fixed in code | Accepted (documented) | Operational (documented) |
 |---|---:|---:|---:|---:|
 | Critical | 3 | 2 (C-2, C-3) | 1 (C-1) | 0 |
-| High     | 6 | 4 (H-1, H-3, H-5, H-6) | 1 (H-2) | 1 (H-4) |
+| High     | 6 | 4 (H-1, H-3, H-5, H-6) | 0 | 2 (H-2 §3.1, H-4 §0.2) |
 | Medium   | 9 | 8 (M-1, M-2, M-3, M-4, M-5, M-6, M-7, M-9) | 1 (M-8 calibration) | 0 |
 | Low/Nit  | 6 | 6 (incl. `supportsInterface` now `view` per R-58) | 0 | 0 |
-| **Original total** | **24** | **20** | **3** | **1** |
+| **Original total** | **24** | **20** | **2** | **2** |
 
-PR #19 reviewer follow-ups span R-1 through R-58. All findings either fixed in code or
-accepted with documented rationale. Per-round breakdown:
+PR #19 reviewer follow-ups span R-1 through R-58. All findings either fixed in code,
+accepted with documented rationale, or addressed via operational guidance in
+`RUNBOOK.md`. Per-round breakdown:
 
 - **Round 1** (R-1..R-13): mostly code fixes for the initial brng1151 + bao-ninh review
   passes; everything except R-8 (PR description correction) and R-13 (a Make/doc grab-bag
@@ -98,27 +99,36 @@ Each entry below: file:line — issue — impact — fix — **Status**.
 
 ### H-2. Deployer retains mint authority during the handoff window
 - **Where:** `script/06_TransferOwnership.s.sol`.
-- **Status: ACCEPTED (operational mitigation).** The two-step grant → multisig accept →
-  deployer renounce window is operator-controlled and unbounded. Mitigations:
-  - RUNBOOK.md prescribes back-to-back execution and event monitoring on
-    `RoleGranted(MINTER_ROLE, *)` / `RoleGranted(BURNER_ROLE, *)` during the window.
+- **Status: FIXED (operational — RUNBOOK §3.1).** The two-step grant → multisig accept →
+  deployer renounce window is intrinsic to OpenZeppelin AccessControl + two-step Ownable
+  and cannot be made atomic without forking those primitives. Mitigations now fully
+  documented:
+  - RUNBOOK §3.1 prescribes the explicit "minimize the handoff window" procedure:
+    multisig signers staged before `make handoff-all`, 3.2 accepts queued immediately
+    after, `make renounce` run as soon as 3.2 + 3.3 confirm (hours, not days).
+  - RUNBOOK §3.1 + "Trust model" monitoring table mandate paging on
+    `RoleGranted(MINTER_ROLE, *)` / `RoleGranted(BURNER_ROLE, *)` whose grantee is not
+    the pool, throughout the grant→renounce window.
   - `script/08_PostDeployVerify.s.sol` `_checkDeployerRenounced` flags the case where
-    handoff is incomplete (M-3 fix).
+    handoff is incomplete (M-3 fix), so `make verify-eth` detects a stalled handoff.
 
 ### H-3. Missing `_requireSet` guards on critical infrastructure addresses
 **Status: FIXED.** Added guards across scripts 02 (`cfg.router`, `cfg.rmnProxy`, ETH-side `wrappedON`), 04 (`cfg.registryModuleOwnerCustom`, `cfg.tokenAdminRegistry`, `token`, `pool`), 05 (`localPool`, `remotePool`, `remoteToken`), and 07 (`localPool`). Stale Helper configurations now fail fast with a clear `MissingAddress(<what>)` revert.
 
 ### H-4. Cross-chain front-running of `proposeAdministrator` on BSC ON token
 - **Where:** `script/04_RegisterAdminAndPool.s.sol`.
-- **Status: PARTIAL FIX + OPERATIONAL.**
-  - **Fixed in code:** added a post-registration assertion in script 04 that
+- **Status: FIXED (code + operational — RUNBOOK §0.2).**
+  - **Fixed in code:** post-registration assertion in script 04 that
     `TokenAdminRegistry.getPool(token) == ourPool` immediately after `setPool`. If a
     front-runner registered a hostile pool first, `setPool` will revert (caller is not
-    the registered admin) and our assertion catches any partial state.
-  - **Operational:** the BSC ON token's admin path must be resolved on a private fork
-    BEFORE mainnet broadcast (see Known-open-items in CLAUDE.md). If the canonical ON
-    on BSC implements `getCCIPAdmin`, that admin should be a trusted address ahead of
-    deployment; if it does not, the token owner pre-calls `proposeAdministrator`.
+    the registered admin) and our assertion catches any partial state. Script 04 also
+    emits `[path N]` log lines (R-41) so the actual registration branch is recorded.
+  - **Operational (now documented):** RUNBOOK §0.2 mandates fork-based path validation
+    before mainnet broadcast — operators spin up an `anvil --fork-url $BSC_RPC` node,
+    re-run `make deploy-bsc` against it, and observe which `[path N]` matches. The MEV
+    window on `proposeAdministrator` is closed if the path resolves to a permissionless
+    on-chain branch (1, 2, or 3); a path-4 fallthrough means recovery must be coordinated
+    with the ON token owner / Chainlink *before* mainnet, never reactively.
 
 ### H-5. `make handoff` is single-chain — no enforcement that BOTH chains were handed off
 **Status: FIXED.** New `make handoff-all ETH_RPC=… BSC_RPC=… MULTISIG=…` target runs the handoff sequentially against both chains with the same MULTISIG. Single-chain `make handoff` retained for ops convenience but the runbook now references the multi-chain target. Renounce remains single-chain (wON only exists on ETH).
@@ -277,8 +287,8 @@ Each entry below: file:line — issue — impact — fix — **Status**.
 - [x] C-3: global supply cap (100M) on wON.
 - [x] H-1: multisig role pre-check before deployer renounces.
 - [x] H-3: `_requireSet` calls across scripts 02 / 04 / 05 / 07.
-- [x] H-4: post-registration assertion in script 04. Operational task remains:
-      resolve BSC ON admin path on a private fork before mainnet.
+- [x] H-4: post-registration assertion in script 04 + RUNBOOK §0.2 mandates fork-based
+      path validation before mainnet broadcast.
 - [x] H-5: `make handoff-all` Makefile target.
 - [x] H-6: `pendingOwner()` probe in script 08.
 - [x] M-1: third registration path in script 04.
@@ -290,11 +300,18 @@ Each entry below: file:line — issue — impact — fix — **Status**.
 - [x] M-9: `nonReentrant` + received-amount accounting on wON.
 - [x] All 8 test-coverage gaps closed (see "Test coverage gaps" section above for the
       per-gap test list; 99 non-fork tests pass + 4 stateful invariants × 128k calls each).
-- [ ] Operational: deploy to Sepolia ⇄ BSC Testnet first, then mainnet.
-- [ ] Operational: fill in `script/Helper.sol` placeholder addresses from
-      https://docs.chain.link/ccip/directory before broadcasting on mainnet.
-- [ ] Operational: confirm the canonical BSC ON token's CCIP-admin path on a private
-      fork before mainnet rollout.
+- [ ] Operator action: deploy to Sepolia ⇄ BSC Testnet first (RUNBOOK §1), then mainnet
+      (RUNBOOK §2).
+- [ ] Operator action: fill in `script/Helper.sol` placeholder addresses from
+      https://docs.chain.link/ccip/directory before broadcasting on mainnet (RUNBOOK §0.1;
+      gated by `make precheck-helper` per R-12).
+- [ ] Operator action: confirm the canonical BSC ON token's CCIP-admin path on a BSC
+      fork before mainnet rollout (RUNBOOK §0.2; `anvil --fork-url $BSC_RPC` + observe
+      `[path N]` log from script 04).
+
+(The three items above are tracking checkboxes for pre-broadcast operator work — the
+documentation that drives them is complete; they get ticked when an operator executes
+each step.)
 
 ---
 
