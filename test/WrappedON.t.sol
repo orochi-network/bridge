@@ -170,6 +170,19 @@ contract WrappedONTest is Test {
         vm.stopPrank();
     }
 
+    /// @notice `withdraw(0)` must revert (mirrors `deposit(0)`). Without this guard a zero
+    ///         call would emit `Unwrapped(_, 0)` plus two zero-value ERC20 `Transfer`
+    ///         events and otherwise no-op — polluting indexers and breaking symmetry with
+    ///         the deposit path. Round-6 review (R-57).
+    function test_WithdrawRevertsOnZero() public {
+        vm.startPrank(alice);
+        on.approve(address(won), 10 ether);
+        won.deposit(10 ether);
+        vm.expectRevert(WrappedON.ZeroAmount.selector);
+        won.withdraw(0);
+        vm.stopPrank();
+    }
+
     function test_WithdrawRevertsOnPartialReserve() public {
         // Wrap 30 native ON → reserve = 30, wrap-backed supply = 30.
         vm.startPrank(alice);
@@ -347,6 +360,38 @@ contract WrappedONTest is Test {
         vm.prank(admin);
         vm.expectRevert(WrappedON.ZeroAddress.selector);
         won.setCCIPAdmin(address(0));
+    }
+
+    /// @notice Self-proposal would emit `Proposed(admin, admin)` and silently clobber any
+    ///         in-flight pending proposal, forcing an extra recovery transaction. Round-6
+    ///         review (R-56). The guard fires before the pending slot is written.
+    function test_SetCCIPAdminRevertsOnSelfProposal() public {
+        vm.prank(admin);
+        vm.expectRevert(WrappedON.InvalidCCIPAdmin.selector);
+        won.setCCIPAdmin(admin);
+    }
+
+    /// @notice Proposing the contract itself would write an unreachable address into
+    ///         `s_pendingCcipAdmin` (no external caller can be `address(this)`),
+    ///         soft-locking the role until the current admin overwrites. Round-6 review
+    ///         (R-56).
+    function test_SetCCIPAdminRevertsOnContractSelf() public {
+        vm.prank(admin);
+        vm.expectRevert(WrappedON.InvalidCCIPAdmin.selector);
+        won.setCCIPAdmin(address(won));
+    }
+
+    /// @notice Pending-proposal idempotency: re-proposing the same pending admin from the
+    ///         current admin is allowed (different from self-proposal); it overwrites the
+    ///         pending slot with the same value — harmless and consistent with the existing
+    ///         "current admin may overwrite pending" semantics.
+    function test_SetCCIPAdminMayReProposePending() public {
+        address newAdmin = makeAddr("newAdmin");
+        vm.startPrank(admin);
+        won.setCCIPAdmin(newAdmin);
+        won.setCCIPAdmin(newAdmin); // must not revert
+        vm.stopPrank();
+        assertEq(won.pendingCCIPAdmin(), newAdmin);
     }
 
     function test_AcceptCCIPAdminRevertsForNonPending() public {

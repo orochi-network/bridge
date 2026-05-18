@@ -33,7 +33,7 @@ A Foundry project implementing a **Chainlink CCIP Cross-Chain Token (CCT) bridge
 - **Only one custom contract**: `src/WrappedON.sol`. Keep it small. New custom contracts require justification.
 - **Decimals**: ON and wON are both 18. CCIP 1.5.x pools do not store `localTokenDecimals`; off-chain registration in the CCIP directory records 18/18 for both.
 - **Roles on wON**: `MINTER_ROLE` and `BURNER_ROLE` go ONLY to the `BurnMintTokenPool` on Ethereum. `DEFAULT_ADMIN_ROLE` starts on deployer, then transfers to the ops multisig after wiring.
-- **CCIP admin handoff is two-step**: `setCCIPAdmin(addr)` proposes; the proposed address must call `acceptCCIPAdmin()` to take effect. Same for `Ownable` ownership on pools and `TokenAdminRegistry` admin roles.
+- **CCIP admin handoff is two-step**: `setCCIPAdmin(addr)` proposes; the proposed address must call `acceptCCIPAdmin()` to take effect. The proposal target is validated on-chain — rejects `address(0)` (`ZeroAddress`), self-proposal `newAdmin == s_ccipAdmin`, and `newAdmin == address(this)` (both via `InvalidCCIPAdmin`) — so scripts can't accidentally clobber an in-flight pending or write an unreachable address. Same handoff shape for `Ownable` ownership on pools and `TokenAdminRegistry` admin roles.
 - **No upgrades**: contracts are non-upgradeable by design. Migration path = redeploy + re-register in `TokenAdminRegistry` + `applyChainUpdates`.
 
 ## Reserve invariant (wON)
@@ -80,7 +80,7 @@ deployments/<chainId>.json        written by scripts via vm.writeJson
 Everything goes through the `Makefile`. The full sequence is documented in `RUNBOOK.md`. Key targets:
 
 - `make install`               — submodule init + patch-pragmas (one-time after clone).
-- `make test`                  — full test suite, no fork: 99 tests total (95 unit/integration + 4 stateful invariants).
+- `make test`                  — full test suite, no fork: 103 tests total (99 unit/integration + 4 stateful invariants).
 - `make test-unit`             — WrappedON.t.sol unit tests only.
 - `make test-e2e`              — PoolRoundtrip + DeploymentE2E integration tests.
 - `make test-fork ETH_RPC=... BSC_RPC=...` — fork tests against live mainnet (9 tests).
@@ -96,7 +96,7 @@ Everything goes through the `Makefile`. The full sequence is documented in `RUNB
 ```bash
 make install                                             # submodules + patch-pragmas
 forge build
-forge test -vvv --no-match-path "test/fork/**"          # 99 mock-based tests (no RPC needed)
+forge test -vvv --no-match-path "test/fork/**"          # 103 mock-based tests (no RPC needed)
 make test-fork ETH_RPC=<url> BSC_RPC=<url>              # 9 mainnet fork tests
 make test-unit                                           # WrappedON.t.sol only
 make test-e2e                                            # PoolRoundtrip + DeploymentE2E only
