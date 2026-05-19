@@ -71,7 +71,7 @@ Then `source .env`.
 
 ```bash
 make build
-make test                 # all 102 non-fork tests (98 unit/integration + 4 stateful invariants) must pass
+make test                 # all 111 non-fork tests (107 unit/integration + 4 stateful invariants) must pass
 make fmt-check
 ```
 
@@ -232,6 +232,15 @@ Then calls `won.renounceRole(DEFAULT_ADMIN_ROLE, deployer)`. After this point, o
 ### 4.1 Updating rate limits
 
 ```bash
+# Pre-handoff (deployer still owns the pool):
+make update-limits RPC=eth \
+    OUTBOUND_CAPACITY=200000000000000000000000 \
+    OUTBOUND_RATE=20000000000000000 \
+    INBOUND_CAPACITY=200000000000000000000000 \
+    INBOUND_RATE=20000000000000000
+
+# Post-handoff (delegated rateLimitAdmin via §4.1.1, or any non-DEPLOYER_PK key):
+CALLER_FLAGS='--account ratelimit-admin' \
 make update-limits RPC=eth \
     OUTBOUND_CAPACITY=200000000000000000000000 \
     OUTBOUND_RATE=20000000000000000 \
@@ -239,7 +248,7 @@ make update-limits RPC=eth \
     INBOUND_RATE=20000000000000000
 ```
 
-(All values in wei. Above = 200,000 cap, 0.02 ON/sec rate.) Caller must be the pool owner (the multisig) or the rate-limit admin. From the multisig, queue the equivalent `setChainRateLimiterConfig` call.
+(All values in wei. Above = 200,000 cap, 0.02 ON/sec rate.) Caller must be the pool owner (the multisig) or the rate-limit admin. SECURITY: OPS-2 — `make update-limits` falls back to `DEPLOYER_PK` only when `CALLER_FLAGS` is unset; after handoff that key is unauthorised on the pool and the transaction would revert. Either set `CALLER_FLAGS` to a delegated credential (preferred) or queue the equivalent `setChainRateLimiterConfig` call from the multisig directly.
 
 **CCIP validation rules** (mirror these — the preflight in script 07 enforces them so a mid-broadcast revert is impossible):
 - `isEnabled = true` requires `rate > 0` AND `rate < capacity` (strict — `rate == capacity` is rejected).

@@ -43,7 +43,7 @@ make build            # forge build --sizes
 ### 3. Run the test suite (no RPC needed)
 
 ```bash
-make test             # 102 tests, no fork (98 unit/integration + 4 stateful invariants)
+make test             # 111 tests, no fork (107 unit/integration + 4 stateful invariants)
 ```
 
 Targeted subsets:
@@ -174,8 +174,12 @@ The script pre-asserts that the multisig already holds `DEFAULT_ADMIN_ROLE` AND 
 
 ### 11. Post-launch operations
 
-- **Update rate limits** (multisig only):
+- **Update rate limits** (multisig or delegated `rateLimitAdmin`):
   ```bash
+  # Post-handoff, set CALLER_FLAGS to a Foundry credential authorised on the pool
+  # (e.g. an encrypted keystore for the delegated rateLimitAdmin). DEPLOYER_PK is no
+  # longer authorised once ownership has moved to the multisig.
+  CALLER_FLAGS='--account ratelimit-admin' \
   OUTBOUND_CAPACITY=200000000000000000000000 OUTBOUND_RATE=20000000000000000 \
   INBOUND_CAPACITY=200000000000000000000000  INBOUND_RATE=20000000000000000  \
   make update-limits RPC=eth
@@ -236,6 +240,10 @@ Trust-model TL;DR:
 
 - The BSC pool's owner (the ops multisig) has custody of the locked-ON reserve via Chainlink's standard `setRebalancer` / `withdrawLiquidity` flow. This is the documented Chainlink CCT pattern; subclassing to disable it was considered and rejected.
 - wON's CCIP-mint path is hard-capped at 100M ether (the BSC ON canonical supply, the absolute upper bound on what the bridge can ever reflect onto Ethereum). The `deposit` wrap path is intentionally uncapped — bounded naturally by the ETH-side ON supply — so heavy wrap usage cannot starve inbound CCIP messages. The safety invariant `lockedON_BSC + reserveON_ETH >= totalSupply(wON)` is preserved by mechanics (CCIP mint ↔ BSC lock pairing; deposit ↔ reserve lockstep), not by a `totalSupply` cap.
-- `setCCIPAdmin` on wON is two-step (propose + accept).
+- `setCCIPAdmin` on wON is two-step (propose + accept). Overwriting an in-flight proposal emits `CCIPAdminProposalCancelled(prev)` so any party with a queued `acceptCCIPAdmin` tx gets a clear signal.
+- CCIP entrypoints emit named events for indexer-friendly auditing: `CCIPMinted(account, amount, ccipMintedSupply)` from inbound mints and `CCIPBurned(account, amount, ccipMintedSupply)` from all three burn overloads.
 
-For incident response, see [`RUNBOOK.md`](RUNBOOK.md#4-post-launch-operations).
+See [`SECURITY.md`](SECURITY.md) for the full security review with per-finding status, the
+disclosure policy (`security@orochi.network`), and the identifier-prefix convention
+(`WON-`, `DEP-`, `CCIP-`, `TEST-`, `OPS-`). For incident response, see
+[`RUNBOOK.md`](RUNBOOK.md#4-post-launch-operations).

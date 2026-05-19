@@ -65,9 +65,15 @@ script/05_ApplyChainUpdates.s.sol both chains — wires remote pool + rate limit
 script/06_TransferOwnership.s.sol both chains — handoff to multisig (TransferOwnership + RenounceDeployerAdmin contracts)
 script/07_UpdateRateLimits.s.sol  ops — adjust setChainRateLimiterConfig (env-driven)
 script/08_PostDeployVerify.s.sol  view-only — programmatic check of all wiring
-test/WrappedON.t.sol              unit tests
-test/PoolRoundtrip.t.sol          pool wiring + lockOrBurn/releaseOrMint
+test/WrappedON.t.sol              unit tests (incl. WON-1/4/5/7 + reentrancy TEST-8)
+test/WrappedONInvariant.t.sol     4 stateful invariants over 7 handler actions
+test/PoolRoundtrip.t.sol          pool wiring + lockOrBurn/releaseOrMint + rate-limit fuzz
 test/DeploymentE2E.t.sol          full sequence simulation incl. handoff + rate-limit update
+test/Script04Paths.t.sol          script 04 admin-dispatch path coverage
+test/Script06Guards.t.sol         handoff env-var + multisig guard coverage
+test/Script06Renounce.t.sol       renounce precondition assertions
+test/Script07Preflight.t.sol      rate-limit preflight checks
+test/Script08Verify.t.sol         post-deploy verification coverage
 test/mocks/                       MockRouter, MockRMN
 test/fork/Fork_ETH.t.sol          ETH mainnet fork — deploy + registry + bridge simulation (4)
 test/fork/Fork_BSC.t.sol          BSC mainnet fork — token ownership probe + pool + bridge sim (4)
@@ -80,7 +86,7 @@ deployments/<chainId>.json        written by scripts via vm.writeJson
 Everything goes through the `Makefile`. The full sequence is documented in `RUNBOOK.md`. Key targets:
 
 - `make install`               — submodule init + patch-pragmas (one-time after clone).
-- `make test`                  — full test suite, no fork: 102 tests total (98 unit/integration + 4 stateful invariants).
+- `make test`                  — full test suite, no fork: 111 tests total (107 unit/integration + 4 stateful invariants).
 - `make test-unit`             — WrappedON.t.sol unit tests only.
 - `make test-e2e`              — PoolRoundtrip + DeploymentE2E integration tests.
 - `make test-fork ETH_RPC=... BSC_RPC=...` — fork tests against live mainnet (9 tests).
