@@ -114,10 +114,12 @@ Final step on both chains: transfer pool `Ownable` ownership and wON `DEFAULT_AD
 - BSC ON token CCIP-admin hook: confirm whether `0x0e4F6209eD984b21EDEA43acE6e09559eD051D48` exposes `getCCIPAdmin`, is `Ownable`, or uses OZ `AccessControl.DEFAULT_ADMIN_ROLE`. `script/04_RegisterAdminAndPool.s.sol` probes all three paths (with the AccessControl path routing through a local interface for the 1.6.0 registry on prod), then reverts with a clear instruction if none match. Resolve on a private fork before mainnet rollout (audit H-4).
 - **CCIP infrastructure addresses in `script/Helper.sol` are intentionally `address(0)` placeholders.** Fill them in from https://docs.chain.link/ccip/directory before broadcasting. Scripts call `_requireSet` on every address they consume.
 - ~~Test coverage gaps~~ — **closed**. All 8 previously tracked gaps are now covered (reserve-invariant stateful fuzz, renounce-before-accept negative, rate-limit exhaustion/refill, script 04 admin-dispatch on all four paths, BSC-side ownership handoff, property fuzz on deposit + cap boundary, fork tests assert non-zero rate/capacity, AccessControl v1.6 success path via `MockRegistryModuleV16`).
+- **Security review (`SECURITY.md`)**: 41 findings — 6 HIGH must close pre-mainnet (`DEP-1`, `CCIP-1`, `TEST-1`, `TEST-2`, `OPS-1`, `OPS-2`); 12 MEDIUM should be triaged. See SECURITY.md for IDs and recommendations.
 
 ## Reference
 
 - `README.md` — operator-facing step-by-step (clone → deploy → handoff → ops).
 - `RUNBOOK.md` — deep dive on each step + trust model + required monitoring.
+- `SECURITY.md` — consolidated security review with unique ID prefixes (`WON-`, `DEP-`, `CCIP-`, `TEST-`, `OPS-`); disclosure address `security@orochi.network`.
 - Chainlink CCIP CCT docs: https://docs.chain.link/ccip/concepts/cross-chain-token/overview
 - Reference repo: https://github.com/smartcontractkit/ccip-starter-kit-foundry
