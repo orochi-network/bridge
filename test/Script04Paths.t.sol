@@ -100,6 +100,21 @@ contract MockRevertingModuleV16 {
     }
 }
 
+/// @dev Mock module whose v1.6 entrypoint does a bare `revert();` with no reason data.
+///      TEST-13: the script's path-3 inner try/catch uses `reason.length != 0` to
+///      distinguish a missing-selector revert (an unexpectedly-v1.5 registry) from a
+///      structured v1.6 revert that should propagate. A module that explicitly silent-
+///      reverts looks identical to a missing selector at the call site — pin this
+///      fall-through behaviour with a dedicated mock so an inversion of the
+///      `reason.length != 0` branch (e.g. dropping the `!= 0` check) is caught.
+contract MockSilentRevertModule {
+    function registerAccessControlDefaultAdmin(address) external pure {
+        assembly {
+            revert(0, 0)
+        }
+    }
+}
+
 /// @dev Minimal stand-in for `RegistryModuleOwnerCustom` v1.6 — implements the
 ///      `registerAccessControlDefaultAdmin` selector that's missing in the v1.5 vendored
 ///      module. Verifies AccessControl on the token, then proposes the caller as
@@ -341,6 +356,22 @@ contract Script04PathsTest is Test {
                 MockRevertingModuleV16.V16Failed.selector, "token already registered with different admin"
             )
         );
+        harness.exposeRegisterAdmin(address(token), address(mockModule), broadcaster);
+    }
+
+    /// @notice TEST-13: a module that bare-`revert();`s from `registerAccessControlDefaultAdmin`
+    ///         is indistinguishable at the call site from a missing-selector revert against an
+    ///         unexpectedly-v1.5 registry — both return empty reason data. The script's path-3
+    ///         try/catch must fall through to the path-4 `CannotResolveCCIPAdmin` diagnostic
+    ///         rather than propagate (because there is no structured reason to surface).
+    ///         Inverting the `reason.length != 0` check in script 04 would also fall through
+    ///         silently on a real structured revert — `test_Dispatch_Path3_StructuredRevertPropagates`
+    ///         and this test together box that branch on both sides.
+    function test_Dispatch_Path3_SilentRevertFallsThrough() public {
+        AccessControlOnlyToken token = new AccessControlOnlyToken(broadcaster);
+        MockSilentRevertModule mockModule = new MockSilentRevertModule();
+
+        vm.expectPartialRevert(RegisterAdminAndPool.CannotResolveCCIPAdmin.selector);
         harness.exposeRegisterAdmin(address(token), address(mockModule), broadcaster);
     }
 }

@@ -411,6 +411,51 @@ contract WrappedONTest is Test {
         won.acceptCCIPAdmin();
     }
 
+    /// @notice TEST-10: a stale pending admin proposal must be invalidated by a subsequent
+    ///         re-proposal to a DIFFERENT address. Once B is proposed, A's queued
+    ///         `acceptCCIPAdmin` must revert with `OnlyPendingCCIPAdmin`. The
+    ///         `CCIPAdminProposalCancelled(A)` event already pins the overwrite signal at
+    ///         the writer side (`test_SetCCIPAdminEmitsCancellationWhenOverwritten`); this
+    ///         test pins the accept-side behaviour, so a regression that failed to clear
+    ///         the stale pending wouldn't silently honour A's tx.
+    function test_AcceptAfterProposalOverwriteReverts() public {
+        address first = makeAddr("firstProposed");
+        address second = makeAddr("secondProposed");
+
+        vm.prank(admin);
+        won.setCCIPAdmin(first);
+        vm.prank(admin);
+        won.setCCIPAdmin(second);
+
+        // First proposed address is now stale — accept must revert.
+        vm.prank(first);
+        vm.expectRevert(WrappedON.OnlyPendingCCIPAdmin.selector);
+        won.acceptCCIPAdmin();
+
+        // Second proposed address can still accept cleanly.
+        vm.prank(second);
+        won.acceptCCIPAdmin();
+        assertEq(won.getCCIPAdmin(), second);
+    }
+
+    /// @notice TEST-11: a successful `acceptCCIPAdmin` clears the pending slot. A second
+    ///         call from the same admin must revert `OnlyPendingCCIPAdmin` — confirming
+    ///         the slot was actually cleared rather than the check just happening to pass.
+    function test_AcceptCCIPAdminDoubleCallReverts() public {
+        address newAdmin = makeAddr("newAdmin");
+        vm.prank(admin);
+        won.setCCIPAdmin(newAdmin);
+
+        vm.prank(newAdmin);
+        won.acceptCCIPAdmin();
+
+        // Pending slot must now be zero; a second accept from the new admin reverts.
+        assertEq(won.pendingCCIPAdmin(), address(0));
+        vm.prank(newAdmin);
+        vm.expectRevert(WrappedON.OnlyPendingCCIPAdmin.selector);
+        won.acceptCCIPAdmin();
+    }
+
     // ─── CCIP mint cap ────────────────────────────────────────────────────────
 
     /// @notice WON-1: `mint(0)` must revert (mirrors the deposit/withdraw zero guards).
@@ -499,6 +544,38 @@ contract WrappedONTest is Test {
         for (uint256 i; i < logs.length; ++i) {
             assertFalse(logs[i].topics[0] == cancelTopic, "must not emit cancellation on identical re-propose");
         }
+    }
+
+    /// @notice TEST-12: `mint(address(0), amount)` must revert and must NOT inflate
+    ///         `ccipMintedSupply`. `_mintCapped` writes the counter BEFORE `_mint`; in OZ 5.x
+    ///         `_mint(address(0), …)` reverts `ERC20InvalidReceiver`, which the EVM rolls
+    ///         back along with the counter write — so the contract is safe today, but the
+    ///         ordering is a load-bearing assumption worth pinning. A future refactor that
+    ///         decoupled increment and mint could leave the counter permanently inflated.
+    function test_MintToZeroAddressRevertsAndDoesNotInflate() public {
+        uint256 before = won.ccipMintedSupply();
+        vm.prank(pool);
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InvalidReceiver.selector, address(0)));
+        won.mint(address(0), 5 ether);
+        assertEq(won.ccipMintedSupply(), before, "counter must not move on revert");
+    }
+
+    /// @notice TEST-12 (companion to mint-zero, per Chiro's review question): the
+    ///         `burn(address, uint256)` overload against `address(0)` must revert with the
+    ///         OZ `ERC20InvalidSender` and must NOT desync `ccipMintedSupply`. Unlike the
+    ///         mint path, the burn entrypoints call `_decrementCcipMinted` BEFORE `_burn`;
+    ///         the EVM rolls the counter change back when `_burn` reverts. Pin the
+    ///         ordering with a test so a future refactor can't quietly desync the counter.
+    function test_BurnAddressOverloadZeroAddressRevertsAndDoesNotDesync() public {
+        // Seed `ccipMintedSupply` so a desync would be observable.
+        vm.prank(pool);
+        won.mint(alice, 50 ether);
+        uint256 before = won.ccipMintedSupply();
+
+        vm.prank(pool);
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InvalidSender.selector, address(0)));
+        won.burn(address(0), 10 ether);
+        assertEq(won.ccipMintedSupply(), before, "counter must not move on revert");
     }
 
     function test_MintRevertsAtCCIPMintCap() public {

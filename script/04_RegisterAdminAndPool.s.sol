@@ -139,7 +139,7 @@ contract RegisterAdminAndPool is Script, Helper {
         // paused, AccessControl re-check failure, etc. — propagates so the operator sees
         // the actual reason rather than the misleading `CannotResolveCCIPAdmin` diagnostic
         // (round-3 review [7]).
-        try IAccessControlRead(token).hasRole(0x00, broadcaster) returns (bool has) {
+        try IAccessControlRead(token).hasRole(bytes32(0), broadcaster) returns (bool has) {
             if (has) {
                 try IRegistryModuleOwnerCustom16(moduleAddr).registerAccessControlDefaultAdmin(token) {
                     console.log("[path 3] registerAccessControlDefaultAdmin -- token %s, admin %s", token, broadcaster);

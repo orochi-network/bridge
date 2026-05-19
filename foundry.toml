@@ -14,6 +14,11 @@ fs_permissions = [
     {access = "read-write", path = "./deployments"},
     {access = "read", path = "./out"},
 ]
+# SECURITY: OPS-11 — remappings live ONLY here. A sibling `remappings.txt` was deleted
+# because Foundry gives the .txt file precedence when both exist, so an edit to one
+# but not the other would silently change resolution (most dangerous for the
+# `@chainlink/contracts-ccip/` line which points at the pinned vendored ABI). Do not
+# recreate `remappings.txt`.
 remappings = [
     "@chainlink/contracts-ccip/=lib/ccip/contracts/src/v0.8/",
     "@chainlink/local/=lib/chainlink-local/src/",

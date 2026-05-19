@@ -22,29 +22,34 @@ Counts after this pass:
 
 | Status              | Count |
 |---------------------|------:|
-| FIXED               |    24 |
+| FIXED               |    43 |
 | DOC ADDED           |     3 |
-| FALSE POSITIVE      |     4 |
+| FALSE POSITIVE      |     6 |
 | ALREADY ADDRESSED   |     1 |
-| DESIGN ACK          |     3 |
-| DEFERRED            |     2 |
-| **Total**           | **37** |
+| DESIGN ACK          |     4 |
+| DEFERRED            |     3 |
+| **Total**           | **60** |
 
-(Four of the original entries are records of "investigated, no defect" — `CCIP-5`,
-plus the three `INFO` design acknowledgements — so the effective resolution rate
-on actionable findings is 31 / 33.)
+(Five of the entries are "investigated, no defect" — `CCIP-5` plus four `INFO`
+design acknowledgements, including `WON-10` added this pass — so the effective
+resolution rate on actionable findings is 47 / 51.)
 
-Tests after the remediation pass: **111 passing, 0 failing** (was 102 before).
+Tests after the remediation pass: **121 passing, 0 failing** (was 102 before the
+second-pass review; this round added 10 net new tests covering DEP-8, TEST-10,
+TEST-11, TEST-12 mint/burn pair, TEST-13, TEST-15, plus two CCIP-10 strict-mode
+branches).
 
-Two HIGH-severity findings remain `DEFERRED`:
+Three findings remain `DEFERRED`:
 
-- **TEST-7** — requires live mainnet investigation of the BSC ON token's admin path
-  before the fork test can be tightened.
-- **OPS-8** — Slither CI gating left advisory until immediately before mainnet
-  broadcast; will be flipped to `--fail-on HIGH` then.
+- **TEST-7** (LOW) — requires live mainnet investigation of the BSC ON token's
+  admin path before the fork test can be tightened.
+- **OPS-8** (LOW) — Slither CI gating left advisory until immediately before
+  mainnet broadcast; will be flipped to `--fail-on HIGH` then.
+- **OPS-13** (LOW) — SARIF upload + Code-Scanning visibility bundled with the
+  OPS-8 pre-mainnet workflow commit so both land together.
 
-The other four originally HIGH-severity findings (DEP-1, CCIP-1, TEST-1, TEST-2,
-OPS-1, OPS-2) are all `FIXED`.
+All originally-HIGH findings (CCIP-1, DEP-1, TEST-1, TEST-2, OPS-1, OPS-2) and
+DEP-8 (HIGH, added in the second-pass review) are `FIXED`.
 
 - **Scope:** `src/`, `script/`, `test/`, `Makefile`, `foundry.toml`, `.gitmodules`,
   `README.md`, `RUNBOOK.md`, `CLAUDE.md`, `.github/workflows/`, `.env.example`.
@@ -83,12 +88,12 @@ on this repository.
 
 | Area  | CRITICAL | HIGH | MEDIUM | LOW | INFO | Total |
 |-------|---------:|-----:|-------:|----:|-----:|------:|
-| WON   |        0 |    0 |      0 |   4 |    3 |     7 |
-| DEP   |        0 |    1 |      2 |   3 |    1 |     7 |
-| CCIP  |        0 |    1 |      3 |   3 |    1 |     8 |
-| TEST  |        0 |    2 |      4 |   3 |    0 |     9 |
-| OPS   |        0 |    2 |      3 |   5 |    0 |    10 |
-| **Total** | **0** | **6** | **12** | **18** | **5** | **41** |
+| WON   |        0 |    0 |      1 |   5 |    4 |    10 |
+| DEP   |        0 |    2 |      2 |   5 |    1 |    10 |
+| CCIP  |        0 |    1 |      4 |   4 |    2 |    11 |
+| TEST  |        0 |    2 |      7 |   6 |    0 |    15 |
+| OPS   |        0 |    2 |      3 |   8 |    1 |    14 |
+| **Total** | **0** | **7** | **17** | **28** | **8** | **60** |
 
 **Headline:** no CRITICAL findings. The custom contract surface (`WrappedON.sol`)
 is clean — the highest WON finding is LOW. The bulk of the actionable risk
@@ -169,6 +174,30 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Impact:** Minor integration friction; no security risk.
 - **Recommendation:** Add `|| interfaceId == type(IERC20Metadata).interfaceId`.
 
+### WON-8: Constructor `decimals()` call lacks try/catch
+- **Severity:** MEDIUM
+- **Status:** FALSE POSITIVE — the constructor is only deployable against a canonical ON token whose interface and value are fixed at the project level. ON on Ethereum (`0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d`, 600M supply) and ON on BSC (`0x0e4F6209eD984b21EDEA43acE6e09559eD051D48`, 100M supply) are both immutable non-upgradeable ERC20Metadata implementations with `decimals() == 18`. `Helper.getConfig(block.chainid)` hardcodes these mainnet addresses, and the `01_DeployWrappedON` script reads `onToken` from `Helper.getConfig()` rather than from operator input. There is no realistic deploy path where `decimals()` returns a non-18 value or reverts — the equality check `onDecimals != decimals()` already provides the only defence the architecture supports. Adding a try/catch + zero-check would be a defensive no-op that doesn't move the threat model.
+- **Location:** `src/WrappedON.sol:118-121`
+- **Description:** `IERC20Metadata(onToken).decimals()` is called without try/catch in the constructor. A non-`IERC20Metadata` token with a fallback returning 18-like bytes would pass; a token returning `0` would pass only if wON's `decimals()` were changed from 18.
+- **Impact:** None under the canonical-token constraint.
+- **Recommendation:** No code change. The deploy-time controls (hardcoded canonical addresses + non-mintable, non-upgradeable ON token) are the load-bearing guarantee.
+
+### WON-9: `Wrapped` event field labelled `amount` carries the post-fee `received` value
+- **Severity:** LOW
+- **Status:** FIXED — event signature renamed to `Wrapped(address indexed account, uint256 received)` so indexers using the parameter name (e.g. via the deployed ABI JSON) see the post-fee semantics directly. The wire format / topic is unchanged because event-parameter names are not part of the keccak signature, so existing decoders keyed off `Transfer`/`Wrapped(address,uint256)` continue to match. NatSpec on the event now spells out the received-amount semantics. The corresponding `Unwrapped` event remains `amount`-labelled because `withdraw` operates against a non-hookable internal reserve and there is no fee-on-transfer asymmetry to disclose.
+- **Location:** `src/WrappedON.sol:76,143`
+- **Description:** `deposit` uses received-amount accounting (computes `received = balanceAfter - balanceBefore`) so the credited wON tracks the actual transfer, including any fee-on-transfer skim. The emitted event field was labelled `amount`, suggesting it matched the caller-supplied argument; under a fee-on-transfer token the two diverge.
+- **Impact:** Indexers correlating against the caller-supplied `amount` argument would see a mismatch with the post-fee credit. No funds at risk.
+- **Recommendation:** Rename to `received` or add a second parameter making the requested amount explicit.
+
+### WON-10: `acceptCCIPAdmin` lacks defence-in-depth `address(this)` guard
+- **Severity:** INFO
+- **Status:** DESIGN ACK — `setCCIPAdmin` already rejects `address(this)` via `InvalidCCIPAdmin` (round-6 R-56), so the path to `s_pendingCcipAdmin == address(this)` is structurally closed. Adding the same guard to `acceptCCIPAdmin` would be symmetric belt-and-suspenders only; no realistic attack path. Recorded for completeness — left out to keep the contract surface minimal.
+- **Location:** `src/WrappedON.sol:250-257`
+- **Description:** `acceptCCIPAdmin` does not redundantly check `msg.sender != address(this)`. Even if the pending slot were somehow forced to `address(this)`, no external caller can satisfy `msg.sender == address(this)` without a recursive `address(this).call(…)` — which the contract never makes.
+- **Impact:** None under current logic.
+- **Recommendation:** Optional. If the maintainer prefers symmetry, add `if (msg.sender == address(this)) revert InvalidCCIPAdmin();` at the top of `acceptCCIPAdmin`.
+
 ---
 
 ## Deployment scripts (`DEP-*`)
@@ -228,6 +257,30 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Description:** `vm.writeJson` writes in-place; a process killed mid-write leaves a corrupt file. `tryReadAddress` guards against a missing file via `vm.exists` but not against parse errors — `parseJsonAddress` will panic before any `_requireSet` guard runs.
 - **Impact:** Corrupt-file recovery produces a Foundry-internal panic instead of a friendly diagnostic.
 - **Recommendation:** Wrap `parseJsonAddress` in try/catch, returning `address(0)` with a console warning on failure (consistent with the missing-file path), or document the recovery step (delete + re-run) prominently in RUNBOOK.
+
+### DEP-8: `_checkDeployerRenounced` is vacuously satisfied under `make verify-*`
+- **Severity:** HIGH
+- **Status:** FIXED — `_checkDeployerRenounced` now accepts an explicit `deployer` parameter; the caller in `run()` reads it from `DEPLOYER` env via the new `_envAddressOrZero` helper and reverts `DeployerEnvMissing` when the var is absent and `MULTISIG` is set. Verification with `MULTISIG` set now requires the operator to supply the deployer address (or skip the renounce assertion by leaving `MULTISIG` unset). New tests: `test_CheckDeployerRenounced_RevertsWhenDeployerStillHoldsRole` (asserts the typed `RoleNotRenounced` revert when the deployer still holds the role) and `test_CheckDeployerRenounced_PassesAfterRenounce` (asserts the happy path).
+- **Location:** `script/08_PostDeployVerify.s.sol:213-227`, `Makefile:108-114`
+- **Description:** The renounce assertion read `msg.sender` directly. `verify-eth` / `verify-bsc` invoke `forge script` view-only with no `--sender` / `--account` / `--private-key`, so `msg.sender` is Foundry's default sender (`0x1804c8AB…`) — an address that has never held `DEFAULT_ADMIN_ROLE`. The branch `won.hasRole(adminRole, msg.sender)` therefore always evaluates `false` and the `RoleNotRenounced` revert is unreachable; the only post-deploy programmatic check that the deployer EOA has actually renounced was silently a no-op.
+- **Impact:** A non-renounced deployer state would NOT be caught by `make verify-*` despite the runbook treating it as load-bearing.
+- **Recommendation:** Thread the deployer address through as a parameter and require an env var (`DEPLOYER`) when `MULTISIG` is set so the renounce check actually validates what its name promises.
+
+### DEP-9: Script 08 `_checkRemoteLink` `abi.decode` lacks length guard
+- **Severity:** LOW
+- **Status:** FIXED — both `remotePoolBytes` and `remoteTokenBytes` are length-checked (`== 32`) before `abi.decode`. A non-32-byte value now surfaces as a typed `MalformedRemoteEncoding(selector, field, actualLength)` instead of a low-level Foundry panic. Mirrors the encoding-assumption check already documented for the CCIP-6 stale-wiring path in script 05.
+- **Location:** `script/08_PostDeployVerify.s.sol:128-141`
+- **Description:** `TokenPool.setRemotePool` accepts raw `bytes` with no encoding constraint. A non-32-byte stored value would panic at `abi.decode(remotePoolBytes, (address))` with a generic ABI error rather than producing a typed diagnostic.
+- **Impact:** Diagnostic only; CCIP message validation would still revert at use-time. The friendlier error helps operators debug an unusual manual wiring.
+- **Recommendation:** Assert `remotePoolBytes.length == 32` (and likewise for `remoteTokenBytes`) before decoding, with a human-readable revert.
+
+### DEP-10: Script 07 broadcasts without `isSupportedChain` preflight
+- **Severity:** LOW
+- **Status:** FIXED — `UpdateRateLimits.run()` now reverts `RemoteChainNotWired(selector)` before any broadcast if the local pool does not list the remote selector as supported. Mirrors the preflight posture of script 05 and script 08.
+- **Location:** `script/07_UpdateRateLimits.s.sol:25-35`
+- **Description:** `setChainRateLimiterConfig` on an unwired remote selector would burn a broadcast tx with a generic deep-revert. Scripts 05 and 08 both preflight `isSupportedChain`; script 07 didn't.
+- **Impact:** Wasted gas + unclear diagnostic; no correctness risk.
+- **Recommendation:** `require(TokenPool(localPool).isSupportedChain(remoteSelector), "remote chain not wired yet; run script 05 first");` before `vm.startBroadcast()`.
 
 ---
 
@@ -296,6 +349,30 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Description:** A curse on the BSC selector blocks both `lockOrBurn` and `releaseOrMint`. Users cannot exit in either direction. RUNBOOK has no documented response procedure.
 - **Impact:** During an RMN curse, all bridging stops. Funds are not at risk; user UX is.
 - **Recommendation:** Add a "RMN Curse Response" section to RUNBOOK: detection (monitor `CursedByRMN` reverts or query `IRMN.isCursed`), authority (Chainlink), user communication.
+
+### CCIP-9: Cross-chain decimal parity for BSC ON unverified at deploy/verify
+- **Severity:** MEDIUM
+- **Status:** FALSE POSITIVE — same architecture argument as WON-8. The BSC ON token at `0x0e4F6209eD984b21EDEA43acE6e09559eD051D48` is a non-upgradeable ERC20 with `decimals() == 18` already deployed and immutable; `Helper.getConfig(56)` hardcodes this address. A future redeploy against a token with different `decimals()` would also require updating `Helper.sol`, which is a deliberate code change reviewed under normal change control rather than a runtime risk. The ETH-side equality check in the wON constructor remains the architectural enforcement point — a redeploy that ignored both would already have to bypass Helper's hardcoded mainnet addresses.
+- **Location:** `script/02_DeployPools.s.sol:53`, `script/08_PostDeployVerify.s.sol` (BSC branch)
+- **Description:** WON-8's check guards the ETH side. No script asserts that the BSC ON token returns 18. A future redeploy against a token with different `decimals()` would silently misalign cross-chain accounting (no revert — wrong nominal amount delivered).
+- **Impact:** None under canonical-token + hardcoded-Helper constraint.
+- **Recommendation:** No code change required. Deploy-time controls (hardcoded canonical addresses in Helper + immutable ON tokens on both chains) are sufficient.
+
+### CCIP-10: `isEnabled=false` rate-limit state cannot pass `make verify-*`
+- **Severity:** LOW
+- **Status:** FIXED — `_checkRateLimits` reads `STRICT_RATE_LIMITS` from env (default `true`, preserving the previous "rate limits must be on at launch" posture). With `STRICT_RATE_LIMITS=false` a disabled bucket downgrades from `RateLimitDisabled` revert to a no-op (the silently-bricked `enabled-but-rate==0` state still reverts `RateLimitMisconfigured` regardless — that case is never a deliberate launch choice). New tests: `test_NonStrictPassesOnDisabledBucket` and `test_NonStrictStillRejectsZeroRate`.
+- **Location:** `script/08_PostDeployVerify.s.sol:141-181`
+- **Description:** Script 07's preflight accepts `OUTBOUND_ENABLED=false` (mirroring CCIP's `_validateTokenBucketConfig` exactly); script 08's `_assertEnabledAndConfigured` reverted on `!isEnabled`. An operator deliberately running with rate-limits off — a documented but unusual launch decision — could not pass `make verify-*`.
+- **Impact:** Operator UX only — the bridge is intended to launch with rate-limits engaged, but the escape hatch should be reachable through the released toolchain.
+- **Recommendation:** Add a `STRICT_RATE_LIMITS` env gate (default true), or document the interaction.
+
+### CCIP-11: `0x00` literal in `hasRole` call is visually ambiguous
+- **Severity:** INFO
+- **Status:** FIXED — replaced with `bytes32(0)` in `script/04_RegisterAdminAndPool.s.sol:142`. Functionally identical (Solidity literal `0x00` widens to `bytes32(0)` when typed as `bytes32`), but `bytes32(0)` matches the RUNBOOK §0.2 `cast call` example and is harder to mis-read as a 1-byte value.
+- **Location:** `script/04_RegisterAdminAndPool.s.sol:142`
+- **Description:** `hasRole(0x00, broadcaster)` and `hasRole(bytes32(0), broadcaster)` produce identical bytecode; the second form is clearer.
+- **Impact:** None.
+- **Recommendation:** Replace with `bytes32(0)`.
 
 ---
 
@@ -372,6 +449,54 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Description:** `test_BurnFromRevertsOnInsufficientAllowance` and `test_WithdrawRevertsOnInsufficientWonBalance` use bare `expectRevert()` for `ERC20InsufficientAllowance` / `ERC20InsufficientBalance`. Subset of TEST-3 but called out for the user-facing ERC20 surface specifically.
 - **Impact:** Wrong-error regressions on the ERC20 path pass silently.
 - **Recommendation:** Use `vm.expectRevert(abi.encodeWithSelector(IERC20Errors.*Error.selector, …))`.
+
+### TEST-10: Stale-pending CCIP admin re-proposal not tested
+- **Severity:** MEDIUM
+- **Status:** FIXED — new `test_AcceptAfterProposalOverwriteReverts` in `test/WrappedON.t.sol`: after `setCCIPAdmin(A)` then `setCCIPAdmin(B)`, A's `acceptCCIPAdmin` must revert `OnlyPendingCCIPAdmin` and B's must succeed. The `CCIPAdminProposalCancelled(A)` event sibling (WON-5) pinned the writer-side overwrite signal; this pins the accept-side behaviour so a regression that failed to clear the stale pending wouldn't silently honour A's tx.
+- **Location:** `test/WrappedON.t.sol`
+- **Description:** The `setCCIPAdmin(A) → setCCIPAdmin(B) → A.acceptCCIPAdmin()` sequence was unexercised.
+- **Impact:** A regression failing to overwrite `s_pendingCcipAdmin` would be invisible to tests.
+- **Recommendation:** Add `test_AcceptAfterProposalOverwriteReverts`.
+
+### TEST-11: `acceptCCIPAdmin()` double-call not tested
+- **Severity:** MEDIUM
+- **Status:** FIXED — new `test_AcceptCCIPAdminDoubleCallReverts` in `test/WrappedON.t.sol`: after a successful accept, `pendingCCIPAdmin() == address(0)` and a second call from the now-current admin reverts `OnlyPendingCCIPAdmin`.
+- **Location:** `test/WrappedON.t.sol`
+- **Description:** After success, `s_pendingCcipAdmin = address(0)`. A second call from the new admin should revert `OnlyPendingCCIPAdmin`. Untested.
+- **Impact:** Slot-clear regression would be invisible.
+- **Recommendation:** Add `test_AcceptCCIPAdminDoubleCallReverts`.
+
+### TEST-12: `mint(address(0))` and `burn(address(0))` ordering not pinned
+- **Severity:** LOW
+- **Status:** FIXED — added two tests in `test/WrappedON.t.sol`: `test_MintToZeroAddressRevertsAndDoesNotInflate` asserts `ERC20InvalidReceiver` AND `ccipMintedSupply` unchanged; `test_BurnAddressOverloadZeroAddressRevertsAndDoesNotDesync` asserts `ERC20InvalidSender` AND `ccipMintedSupply` unchanged. The mint-path test pins the WriteCounter→Mint ordering (OZ rolls the counter write back on the `_mint(0)` revert); the burn-path test pins the WriteCounter→Burn ordering (OZ rolls the saturating-decrement back on the `_burn(0)` revert). Two complementary halves cover the symmetric class — a future refactor that decoupled counter and ERC20 path on either side would break one of them.
+- **Location:** `test/WrappedON.t.sol`
+- **Description:** `ccipMintedSupply` is incremented BEFORE `_mint`; on OZ 5.x `ERC20InvalidReceiver` the EVM rolls back, so it's safe today. No test pinned the ordering.
+- **Impact:** A refactor decoupling the increment from the mint could leave `ccipMintedSupply` permanently inflated.
+- **Recommendation:** Add `test_MintToZeroAddressRevertsAndDoesNotInflate` (and symmetric `burn(address(0))` test).
+
+### TEST-13: Script-04 path-3 silent-revert disambiguation lacks dedicated mock
+- **Severity:** MEDIUM
+- **Status:** FIXED — new `MockSilentRevertModule` in `test/Script04Paths.t.sol` does an explicit `assembly { revert(0, 0) }`. New `test_Dispatch_Path3_SilentRevertFallsThrough` asserts the script falls through to path-4 `CannotResolveCCIPAdmin` when the module silently reverts (the same look-alike behaviour as a missing v1.5 selector). Together with `test_Dispatch_Path3_StructuredRevertPropagates`, both sides of the `reason.length != 0` branch are now under test.
+- **Location:** `test/Script04Paths.t.sol`
+- **Description:** Existing tests relied on the real v1.5 module's empty-revert behavior. A complementary mock that does an explicit `revert();` was missing, so an inversion of the `reason.length != 0` branch could pass.
+- **Impact:** A regression dropping the `!= 0` check would silently swallow real v1.6 structured reverts.
+- **Recommendation:** Add the silent-revert mock and a complementary structured-revert mock.
+
+### TEST-14: Invariant handler omits two-step CCIP admin rotation
+- **Severity:** LOW
+- **Status:** FIXED — added `setCCIPAdminRace` and `acceptCCIPAdminRace` handler selectors in `test/WrappedONInvariant.t.sol`, both included in `targetSelector`. The handler tracks the current ccipAdmin internally so rotations interleave correctly with mint/burn. All four invariants (`BackingCoversSupply`, `CounterBoundedByBscLocked`, `CcipMintedSupplyWithinCap`, `ReserveMatchesNetDeposits`) still pass across the rotation paths.
+- **Location:** `test/WrappedONInvariant.t.sol`
+- **Description:** Two-step admin transitions were never interleaved with mint/burn under the fuzzer.
+- **Impact:** Low likelihood of finding a bug, but a state-space gap.
+- **Recommendation:** Add `setCCIPAdminRace` / `acceptCCIPAdminRace` handler functions.
+
+### TEST-15: `releaseOrMint` direction not exercised under RMN curse
+- **Severity:** LOW
+- **Status:** FIXED — new `test_ReleaseOrMintRevertsWhenRMNCursed` in `test/PoolRoundtrip.t.sol` cursed the BSC selector on the ETH RMN, then asserted the typed `TokenPool.CursedByRMN` selector when `ethPool.releaseOrMint` is called via `ethOffRamp`. Combined with the existing outbound test, both curse-check branches (`_validateLockOrBurn` and `_validateReleaseOrMint`) are now under test.
+- **Location:** `test/PoolRoundtrip.t.sol`
+- **Description:** `test_LockOrBurnRevertsWhenRMNCursed` covered the outbound direction only.
+- **Impact:** A regression that only patched one direction's curse check would pass the outbound test while silently letting funds arrive under a curse.
+- **Recommendation:** Add `test_ReleaseOrMintRevertsWhenRMNCursed`.
 
 ---
 
@@ -456,6 +581,38 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Description:** The five multisig transactions are listed but no guidance is given on simulating them (Safe built-in, Tenderly, or `forge script --simulate`) before signing. The BSC pool owner is the custody-grade authority over the entire locked-ON reserve — a typo'd calldata target here is high-consequence.
 - **Impact:** Signers may sign without verifying target addresses; an incorrect target would still revert ("not pending owner") but extends the deployer-retention window unnecessarily.
 - **Recommendation:** Add: "Before signing each transaction, simulate via Safe / Tenderly. Cross-check target addresses against `deployments/<chainId>.json`. Run `make verify-eth` / `make verify-bsc` after acceptance."
+
+### OPS-11: `remappings.txt` duplicated `foundry.toml:remappings`
+- **Severity:** LOW
+- **Status:** FIXED — deleted `remappings.txt`. `foundry.toml`'s `remappings` table is now the single source of truth, with a header comment warning future contributors not to recreate the sibling file. Foundry gives `remappings.txt` precedence when both exist, so the duplication was a silent-divergence trap.
+- **Location:** `remappings.txt` (deleted), `foundry.toml:17-26`
+- **Description:** Both files listed the same four remappings. An edit to one but not the other would silently change resolution (most dangerous for `@chainlink/contracts-ccip/` drifting to a different vendored version).
+- **Impact:** Latent — easy to introduce a divergence in a future PR.
+- **Recommendation:** Delete `remappings.txt`; keep only `foundry.toml`'s table.
+
+### OPS-12: Slither installed without a version pin
+- **Severity:** LOW
+- **Status:** FIXED — `pip3 install slither-analyzer==0.11.0` in `.github/workflows/ci.yml`. New detectors or behaviour changes upstream no longer silently alter CI output. Refresh deliberately on bumps. Combined with OPS-8 (gating flipped immediately before mainnet broadcast), the pre-mainnet sign-off uses the same Slither version as the lead-up.
+- **Location:** `.github/workflows/ci.yml:63`
+- **Description:** Pre-fix `pip3 install slither-analyzer` followed upstream. New detector or behaviour change silently alters CI output.
+- **Impact:** Latent — CI signal could drift without a code change in the repo.
+- **Recommendation:** Pin to a tested release.
+
+### OPS-13: Slither output not uploaded to GitHub Code Scanning
+- **Severity:** LOW
+- **Status:** DEFERRED — pre-mainnet hardening. SARIF upload + `security-events: write` adds a meaningful "appears in the PR Security tab" surface, but it's strictly a visibility nicety on top of the OPS-8 gating change. Bundled with OPS-8 so both land together in the final pre-mainnet workflow commit.
+- **Location:** `.github/workflows/ci.yml:45-73`
+- **Description:** Findings live only in workflow logs; nothing surfaces in the PR Security tab.
+- **Impact:** Operator visibility only.
+- **Recommendation:** Add `--sarif slither.sarif`, `permissions: security-events: write`, and a `github/codeql-action/upload-sarif@v3` step.
+
+### OPS-14: `foundry-rs/foundry-toolchain@v1` moves with the major version
+- **Severity:** INFO
+- **Status:** FIXED — pinned to `foundry-rs/foundry-toolchain@v1.4.0` in both `test` and `slither` jobs. Refresh deliberately. SHA-pinning is the next hygiene step before mainnet broadcast.
+- **Location:** `.github/workflows/ci.yml:24,58`
+- **Description:** `v1` is a moving major-version pointer; a regression on the next CI run would silently alter build behaviour.
+- **Impact:** Latent; standard supply-chain hygiene.
+- **Recommendation:** Pin to a specific Foundry release tag and SHA-pin the action reference.
 
 ---
 

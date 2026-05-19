@@ -198,6 +198,49 @@ contract WrappedONHandler is Test {
         vm.prank(POOL);
         WON.burn(user, amount);
     }
+
+    // ─── Two-step CCIP admin handler (TEST-14) ────────────────────────────────
+    // Interleave admin rotation with mint/burn so the fuzzer can find any state-space
+    // gap between `setCCIPAdmin` and the burn/mint flow. The bridge invariants
+    // (`BackingCoversSupply`, `CounterBoundedByBscLocked`) must hold regardless of
+    // who currently holds the role.
+
+    /// @dev Track the current ccipAdmin separately so the handler can drive both
+    ///      `setCCIPAdmin` and `acceptCCIPAdmin` from the correct EOA even though the
+    ///      role rotates inside the fuzz run.
+    address public currentCcipAdmin;
+
+    /// @dev Seed the handler with the deployer's initial ccipAdmin so the first
+    ///      `setCCIPAdminRace` call has a valid current admin to prank from.
+    function seedCcipAdmin(address ccipAdmin_) external {
+        currentCcipAdmin = ccipAdmin_;
+    }
+
+    /// @dev Propose a new pending ccipAdmin. Cycles through the actor pool plus the
+    ///      current admin so re-proposal and the "rotate, accept, rotate back" pattern
+    ///      are both reachable.
+    function setCCIPAdminRace(uint256 actorSeed) external {
+        address proposed = _actor(actorSeed);
+        if (proposed == currentCcipAdmin || proposed == address(WON)) {
+            // setCCIPAdmin rejects self-proposal and address(this); skip these so the
+            // handler doesn't burn calls on guaranteed-revert paths.
+            return;
+        }
+        vm.prank(currentCcipAdmin);
+        WON.setCCIPAdmin(proposed);
+    }
+
+    /// @dev Complete the two-step rotation. No-op if there is no pending admin (the
+    ///      previous accept already consumed it, or no setCCIPAdmin has run yet).
+    function acceptCCIPAdminRace() external {
+        address pending = WON.pendingCCIPAdmin();
+        if (pending == address(0)) {
+            return;
+        }
+        vm.prank(pending);
+        WON.acceptCCIPAdmin();
+        currentCcipAdmin = pending;
+    }
 }
 
 contract WrappedONInvariantTest is StdInvariant, Test {
@@ -217,12 +260,17 @@ contract WrappedONInvariantTest is StdInvariant, Test {
         vm.stopPrank();
 
         handler = new WrappedONHandler(won, onToken, pool);
+        // TEST-14: seed the handler's tracked ccipAdmin with the deployer-time admin so
+        // the `setCCIPAdminRace` selector has a valid current admin to prank from.
+        handler.seedCcipAdmin(admin);
 
         targetContract(address(handler));
         // Restrict fuzzer to the handler's operations. Honest paths + adversarial burn +
         // burnFrom / burn(address,uint256) coverage (TEST-6 — every burn overload's
-        // `_decrementCcipMinted` branch is fuzzer-reachable).
-        bytes4[] memory selectors = new bytes4[](7);
+        // `_decrementCcipMinted` branch is fuzzer-reachable) + two-step CCIP admin
+        // rotation (TEST-14 — interleave admin rotation with mint/burn so the bridge
+        // invariants are exercised across the role transition).
+        bytes4[] memory selectors = new bytes4[](9);
         selectors[0] = WrappedONHandler.deposit.selector;
         selectors[1] = WrappedONHandler.withdraw.selector;
         selectors[2] = WrappedONHandler.ccipMint.selector;
@@ -230,6 +278,8 @@ contract WrappedONInvariantTest is StdInvariant, Test {
         selectors[4] = WrappedONHandler.adversarialPoolBurn.selector;
         selectors[5] = WrappedONHandler.ccipBurnFrom.selector;
         selectors[6] = WrappedONHandler.ccipBurnAddress.selector;
+        selectors[7] = WrappedONHandler.setCCIPAdminRace.selector;
+        selectors[8] = WrappedONHandler.acceptCCIPAdminRace.selector;
         targetSelector(StdInvariant.FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 

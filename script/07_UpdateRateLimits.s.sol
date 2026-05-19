@@ -22,12 +22,22 @@ import {Deployments} from "./Deployments.sol";
 ///                      mid-broadcast — pass an exact string.
 ///   INBOUND_ENABLED    bool — same constraint as OUTBOUND_ENABLED. Default: true.
 contract UpdateRateLimits is Script, Helper {
+    error RemoteChainNotWired(uint64 remoteSelector);
+
     function run() external {
         NetworkConfig memory local = getConfig(block.chainid);
         uint64 remoteSelector = _remoteSelector(block.chainid);
 
         address localPool = Deployments.tryReadAddress(block.chainid, "pool");
         _requireSet(localPool, "localPool (run script 02 first)");
+
+        // DEP-10: refuse to broadcast against an unwired remote selector. Without this
+        // preflight, `setChainRateLimiterConfig` reverts deep inside the pool with the
+        // generic "non-existent chain" path — the operator pays gas and gets no actionable
+        // diagnostic. Mirror script 05 / script 08's `isSupportedChain` posture.
+        if (!TokenPool(localPool).isSupportedChain(remoteSelector)) {
+            revert RemoteChainNotWired(remoteSelector);
+        }
 
         RateLimiter.Config memory outbound = RateLimiter.Config({
             isEnabled: vm.envOr("OUTBOUND_ENABLED", true),

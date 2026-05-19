@@ -30,6 +30,11 @@ contract PostDeployVerify is Script, Helper {
     error RoleNotRenounced(string role, address account);
     error PoolOwnershipNotHandedOff(address pool, address owner, address expectedMultisig);
     error UnexpectedRebalancer(address pool, address rebalancer);
+    /// @dev DEP-9: `TokenPool.setRemotePool` accepts raw `bytes` with no encoding constraint.
+    ///      A non-32-byte stored value would otherwise surface as a low-level abi-decode panic
+    ///      inside `_checkRemoteLink`; surface it as a typed revert instead.
+    error MalformedRemoteEncoding(uint64 selector, string field, uint256 actualLength);
+    error DeployerEnvMissing();
 
     function run() external view {
         NetworkConfig memory local = getConfig(block.chainid);
@@ -78,7 +83,18 @@ contract PostDeployVerify is Script, Helper {
             if (multisig != address(0)) {
                 _checkOwnershipHandoff(localPool, multisig);
                 if (block.chainid == 1 || block.chainid == 11_155_111) {
-                    _checkDeployerRenounced(WrappedON(localToken), multisig);
+                    // DEP-8: read DEPLOYER from env explicitly. View-only `forge script`
+                    // resolves `msg.sender` to Foundry's default sender (`0x1804c8AB…`),
+                    // not the deployer EOA, so the renounce check was vacuously satisfied
+                    // when invoked through `make verify-*`. Require `DEPLOYER` so the check
+                    // actually tests what its name promises. The fallback to `msg.sender` is
+                    // intentionally removed — a verify run without `DEPLOYER` should not
+                    // pretend to validate the renounce step.
+                    address deployer = _envAddressOrZero("DEPLOYER");
+                    if (deployer == address(0)) {
+                        revert DeployerEnvMissing();
+                    }
+                    _checkDeployerRenounced(WrappedON(localToken), multisig, deployer);
                 }
             }
         } catch {
@@ -121,13 +137,23 @@ contract PostDeployVerify is Script, Helper {
             revert RemoteChainNotSupported(remoteSelector);
         }
 
+        // DEP-9: assert the stored bytes are the canonical `abi.encode(address)` shape
+        // (32 bytes, left-padded) before decoding. Same protective check as the CCIP-6
+        // stale-wiring path in script 05; surfaces a typed `MalformedRemoteEncoding`
+        // diagnostic instead of a low-level `abi.decode` panic.
         bytes memory remotePoolBytes = TokenPool(pool).getRemotePool(remoteSelector);
+        if (remotePoolBytes.length != 32) {
+            revert MalformedRemoteEncoding(remoteSelector, "remotePool", remotePoolBytes.length);
+        }
         address remotePool = abi.decode(remotePoolBytes, (address));
         if (remotePool != expectedRemotePool) {
             revert RemotePoolNotLinked(remoteSelector, expectedRemotePool);
         }
 
         bytes memory remoteTokenBytes = TokenPool(pool).getRemoteToken(remoteSelector);
+        if (remoteTokenBytes.length != 32) {
+            revert MalformedRemoteEncoding(remoteSelector, "remoteToken", remoteTokenBytes.length);
+        }
         address remoteToken = abi.decode(remoteTokenBytes, (address));
         if (remoteToken != expectedRemoteToken) {
             revert RemoteTokenMismatch(remoteSelector, expectedRemoteToken, remoteToken);
@@ -139,30 +165,54 @@ contract PostDeployVerify is Script, Helper {
     }
 
     function _checkRateLimits(address pool, uint64 remoteSelector) internal view {
+        // CCIP-10: by default the verify step refuses a disabled bucket — the bridge is
+        // intended to launch with rate-limits engaged. Operators who deliberately want to
+        // run with limits off (and accept the corresponding C-3 unbounded-throughput
+        // exposure) can set `STRICT_RATE_LIMITS=false`, which downgrades the disabled-bucket
+        // revert to a console warning. The `rate==0 || capacity==0` *misconfigured* state
+        // (enabled bucket that cannot serve any transfer) is ALWAYS a revert — that's the
+        // silently-bricked configuration R-33 was built to catch and is never a deliberate
+        // launch choice.
+        bool strict = vm.envOr("STRICT_RATE_LIMITS", true);
         RateLimiter.TokenBucket memory outbound = TokenPool(pool).getCurrentOutboundRateLimiterState(remoteSelector);
-        _assertEnabledAndConfigured("outbound", outbound);
+        _assertConfiguredOrWarn("outbound", outbound, strict);
         RateLimiter.TokenBucket memory inbound = TokenPool(pool).getCurrentInboundRateLimiterState(remoteSelector);
-        _assertEnabledAndConfigured("inbound", inbound);
+        _assertConfiguredOrWarn("inbound", inbound, strict);
 
         console.log("[ok] outbound rate limit: cap=%d rate=%d", outbound.capacity, outbound.rate);
         console.log("[ok] inbound  rate limit: cap=%d rate=%d", inbound.capacity, inbound.rate);
     }
 
-    /// @dev An `isEnabled=true` bucket with `rate == 0` or `capacity == 0` silently bricks
-    ///      all transfers in that direction — the bucket never refills, so every transfer
-    ///      hits `TokenMaxCapacityExceeded`. CCIP's own `_validateTokenBucketConfig` would
-    ///      have rejected such a config at write time, but a future protocol change OR a
-    ///      stuck state from an aborted broadcast could leave it on-chain. Mirror the
-    ///      fork-test gap [7] check (`assertGt(rate, 0)` / `assertGt(capacity, 0)`) here so
-    ///      `make verify-*` catches the misconfiguration BEFORE the first user transfer.
-    ///      Round-3 review [3].
-    function _assertEnabledAndConfigured(string memory direction, RateLimiter.TokenBucket memory bucket) internal pure {
+    function _assertConfiguredOrWarn(string memory direction, RateLimiter.TokenBucket memory bucket, bool strict)
+        internal
+        pure
+    {
         if (!bucket.isEnabled) {
-            revert RateLimitDisabled(direction);
+            if (strict) {
+                revert RateLimitDisabled(direction);
+            }
+            // Non-strict path: a deliberate "no rate-limit" launch decision. CCIP itself
+            // requires capacity == rate == 0 in the disabled state, so the bucket is
+            // structurally inert — no need to assert rate/capacity here.
+            return;
         }
         if (bucket.rate == 0 || bucket.capacity == 0) {
             revert RateLimitMisconfigured(direction, bucket.capacity, bucket.rate);
         }
+    }
+
+    /// @dev Strict gate retained for `test/Script08Verify.t.sol` and any caller that wants
+    ///      the original "must be enabled and configured" posture without threading the
+    ///      `strict` toggle. Delegates to `_assertConfiguredOrWarn(strict=true)`. Round-3
+    ///      review [3].
+    ///
+    ///      An `isEnabled=true` bucket with `rate == 0` or `capacity == 0` silently bricks
+    ///      all transfers in that direction — the bucket never refills, so every transfer
+    ///      hits `TokenMaxCapacityExceeded`. CCIP's own `_validateTokenBucketConfig` would
+    ///      have rejected such a config at write time, but a future protocol change OR a
+    ///      stuck state from an aborted broadcast could leave it on-chain.
+    function _assertEnabledAndConfigured(string memory direction, RateLimiter.TokenBucket memory bucket) internal pure {
+        _assertConfiguredOrWarn(direction, bucket, true);
     }
 
     function _checkWonRoles(WrappedON won, address pool) internal view {
@@ -210,19 +260,33 @@ contract PostDeployVerify is Script, Helper {
         revert PoolOwnershipNotHandedOff(pool, owner, multisig);
     }
 
-    function _checkDeployerRenounced(WrappedON won, address multisig) internal view {
+    function _checkDeployerRenounced(WrappedON won, address multisig, address deployer) internal view {
         bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
         if (!won.hasRole(adminRole, multisig)) {
             revert RoleMissing("DEFAULT_ADMIN_ROLE", multisig);
         }
-        if (won.hasRole(adminRole, msg.sender)) {
-            revert RoleNotRenounced("DEFAULT_ADMIN_ROLE", msg.sender);
+        // DEP-8: check the supplied `deployer` rather than `msg.sender`. `forge script` in
+        // view-only mode resolves msg.sender to Foundry's default sender, so the previous
+        // form was always satisfied and never caught a non-renounced deployer.
+        if (won.hasRole(adminRole, deployer)) {
+            revert RoleNotRenounced("DEFAULT_ADMIN_ROLE", deployer);
         }
         if (won.getCCIPAdmin() != multisig) {
             revert RoleMissing("ccipAdmin", multisig);
         }
         console.log("[ok] wON DEFAULT_ADMIN_ROLE held only by multisig %s", multisig);
         console.log("[ok] wON ccipAdmin == multisig %s", multisig);
+        console.log("[ok] wON DEFAULT_ADMIN_ROLE renounced by deployer %s", deployer);
+    }
+
+    /// @dev `vm.envAddress` reverts when the env var is unset. Wrap so the caller can
+    ///      decide what missing-env means (here: a typed `DeployerEnvMissing` revert).
+    function _envAddressOrZero(string memory name) internal view returns (address) {
+        try vm.envAddress(name) returns (address a) {
+            return a;
+        } catch {
+            return address(0);
+        }
     }
 
     function _remoteChainId(uint256 chainId) internal pure returns (uint256) {

@@ -73,7 +73,11 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     address private s_ccipAdmin;
     address private s_pendingCcipAdmin;
 
-    event Wrapped(address indexed account, uint256 amount);
+    /// @notice Emitted by `deposit`. `received` is the POST-fee credited amount (matches the
+    ///         wON minted), not the user-supplied `amount` argument — fee-on-transfer ON
+    ///         variants would credit less than requested. Canonical ON is plain ERC20 so the
+    ///         two coincide in practice; rename made explicit per WON-9.
+    event Wrapped(address indexed account, uint256 received);
     event Unwrapped(address indexed account, uint256 amount);
     /// @notice Emitted by the CCIP `releaseOrMint` path. Lets indexers distinguish CCIP-inbound
     ///         mints from `deposit`-wrap mints (which emit `Wrapped`). Reports the post-call

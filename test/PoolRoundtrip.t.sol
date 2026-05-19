@@ -230,6 +230,31 @@ contract PoolRoundtripTest is Test {
         ethPool.lockOrBurn(inBurn);
     }
 
+    /// @notice TEST-15: an RMN curse must also block the inbound path. The outbound test
+    ///         above hits `_validateLockOrBurn`; the inbound path enters via
+    ///         `_validateReleaseOrMint`, which runs an independent curse check against the
+    ///         source-chain selector. A regression that only patched one direction would
+    ///         pass `test_LockOrBurnRevertsWhenRMNCursed` while silently letting funds
+    ///         arrive under a curse.
+    function test_ReleaseOrMintRevertsWhenRMNCursed() public {
+        // Curse the source-chain selector on the destination's RMN.
+        ethRmn.setSubjectCurse(bytes16(uint128(BSC_SELECTOR)), true);
+
+        Pool.ReleaseOrMintInV1 memory inMint = Pool.ReleaseOrMintInV1({
+            originalSender: abi.encode(alice),
+            remoteChainSelector: BSC_SELECTOR,
+            receiver: alice,
+            amount: 1 ether,
+            localToken: address(won),
+            sourcePoolAddress: abi.encode(address(bscPool)),
+            sourcePoolData: "",
+            offchainTokenData: ""
+        });
+        vm.prank(ethOffRamp);
+        vm.expectRevert(TokenPool.CursedByRMN.selector);
+        ethPool.releaseOrMint(inMint);
+    }
+
     function test_OnlyOnRampCanLock() public {
         // Random caller is not the registered OnRamp — pool must reject.
         // SECURITY: TEST-3 — assert the typed CCIP error so a regression in the

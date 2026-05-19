@@ -18,8 +18,11 @@ jobs:
         with:
           submodules: recursive
 
+      # OPS-14: pin the toolchain action to a specific release tag. `v1` is a moving
+      # major-version pointer; a regression on the next CI run would silently alter
+      # build behaviour. SHA-pinning is the next hygiene step before mainnet broadcast.
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+        uses: foundry-rs/foundry-toolchain@v1.4.0
         with:
           version: stable
 
@@ -53,14 +56,19 @@ jobs:
           submodules: recursive
 
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+        uses: foundry-rs/foundry-toolchain@v1.4.0
         with:
           version: stable
 
+      # OPS-12: pin slither-analyzer to a tested release. Without a pin, a new detector
+      # or behaviour change upstream silently alters CI output. Refresh deliberately on
+      # bumps. Combined with OPS-8 (gating flipped immediately before mainnet broadcast),
+      # this ensures the same Slither version is used for the pre-mainnet sign-off run as
+      # for every PR in the lead-up.
       - name: Install Slither
         run: |
           python3 -m pip install --upgrade pip
-          pip3 install slither-analyzer
+          pip3 install slither-analyzer==0.11.0
 
       - name: Patch vendored pragmas (0.8.24 -> ^0.8.24)
         run: make patch-pragmas

@@ -105,6 +105,12 @@ deploy-bsc: precheck-helper
 	forge script script/04_RegisterAdminAndPool.s.sol --rpc-url $(RPC) $(DEPLOY_FLAGS)
 	forge script script/05_ApplyChainUpdates.s.sol    --rpc-url $(RPC) $(DEPLOY_FLAGS)
 
+# SECURITY: DEP-8 — the post-handoff renounce check needs the deployer EOA's address. In
+# view-only mode `forge script` resolves `msg.sender` to Foundry's default sender, so
+# reading `msg.sender` inside the script wouldn't validate anything. The script reads
+# `DEPLOYER` from env when `MULTISIG` is set; if unset the renounce assertion is skipped
+# (the rest of the verification still runs). Pre-handoff verifications need neither
+# `MULTISIG` nor `DEPLOYER`.
 verify-eth:
 	@test -n "$(RPC)" || (echo "RPC=sepolia|eth required"; exit 1)
 	forge script script/08_PostDeployVerify.s.sol --rpc-url $(RPC)
