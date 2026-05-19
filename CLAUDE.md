@@ -86,7 +86,7 @@ deployments/<chainId>.json        written by scripts via vm.writeJson
 Everything goes through the `Makefile`. The full sequence is documented in `RUNBOOK.md`. Key targets:
 
 - `make install`               — submodule init + patch-pragmas (one-time after clone).
-- `make test`                  — full test suite, no fork: 121 tests total (117 unit/integration + 4 stateful invariants).
+- `make test`                  — full test suite, no fork: 130 tests total (126 unit/integration + 4 stateful invariants).
 - `make test-unit`             — WrappedON.t.sol unit tests only.
 - `make test-e2e`              — PoolRoundtrip + DeploymentE2E integration tests.
 - `make test-fork ETH_RPC=... BSC_RPC=...` — fork tests against live mainnet (9 tests).
@@ -117,9 +117,9 @@ Final step on both chains: transfer pool `Ownable` ownership and wON `DEFAULT_AD
 
 ## Known open items (operational, pre-mainnet)
 
-- BSC ON token CCIP-admin hook: confirm whether `0x0e4F6209eD984b21EDEA43acE6e09559eD051D48` exposes `getCCIPAdmin`, is `Ownable`, or uses OZ `AccessControl.DEFAULT_ADMIN_ROLE`. `script/04_RegisterAdminAndPool.s.sol` probes all three paths (with the AccessControl path routing through a local interface for the 1.6.0 registry on prod), then reverts with a clear instruction if none match. Resolve on a private fork before mainnet rollout (audit H-4).
+- BSC ON token CCIP-admin hook: confirm whether `0x0e4F6209eD984b21EDEA43acE6e09559eD051D48` exposes `getCCIPAdmin`, is `Ownable`, or uses OZ `AccessControl.DEFAULT_ADMIN_ROLE`. `script/04_RegisterAdminAndPool.s.sol` probes all three paths (with the AccessControl path routing through a local interface for the 1.6.0 registry on prod), then reverts with a clear instruction if none match. Resolve on a private fork before mainnet rollout (`TEST-7` / Known open items — formerly legacy audit tag `H-4`).
 - **CCIP infrastructure addresses in `script/Helper.sol` are intentionally `address(0)` placeholders.** Fill them in from https://docs.chain.link/ccip/directory before broadcasting. Scripts call `_requireSet` on every address they consume.
-- ~~Test coverage gaps~~ — **closed**. All 8 previously tracked gaps are now covered (reserve-invariant stateful fuzz, renounce-before-accept negative, rate-limit exhaustion/refill, script 04 admin-dispatch on all four paths, BSC-side ownership handoff, property fuzz on deposit + cap boundary, fork tests assert non-zero rate/capacity, AccessControl v1.6 success path via `MockRegistryModuleV16`).
+- ~~Test coverage gaps~~ — **closed**. See SECURITY.md `TEST-1` through `TEST-20` per-finding entries (the originally-HIGH `TEST-1` and `TEST-2` are FIXED; `TEST-7` LOW is deferred pending the BSC admin-path resolution above).
 - **Security review (`SECURITY.md`)**: post 2026-05-19 remediation pass — all six originally HIGH findings (`DEP-1`, `CCIP-1`, `TEST-1`, `TEST-2`, `OPS-1`, `OPS-2`) are FIXED; only `TEST-7` and `OPS-8` remain DEFERRED (both LOW). See SECURITY.md for per-finding status.
 
 ## Reference

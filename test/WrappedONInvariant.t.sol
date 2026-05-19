@@ -216,26 +216,44 @@ contract WrappedONHandler is Test {
         currentCcipAdmin = ccipAdmin_;
     }
 
-    /// @dev Propose a new pending ccipAdmin. Cycles through the actor pool plus the
-    ///      current admin so re-proposal and the "rotate, accept, rotate back" pattern
-    ///      are both reachable.
+    /// @dev TEST-19: bound the actor seed to land on an actor distinct from the current
+    ///      ccipAdmin instead of silently returning on the self-proposal / address(this)
+    ///      cases. This dilutes the high no-op rate the second-pass review flagged and
+    ///      lets every selector call contribute observable state to the fuzzer.
+    ///
+    ///      Use modulo-bounded indexing rather than seed arithmetic so a max-uint256 seed
+    ///      doesn't trip Solidity 0.8's checked-arithmetic overflow inside the handler
+    ///      (which under `fail_on_revert=true` would fail the invariant run).
     function setCCIPAdminRace(uint256 actorSeed) external {
-        address proposed = _actor(actorSeed);
+        uint256 base = actorSeed % actors.length;
+        address proposed = actors[base];
+        for (uint256 i = 1; i < actors.length; i++) {
+            if (proposed != currentCcipAdmin && proposed != address(WON)) {
+                break;
+            }
+            proposed = actors[(base + i) % actors.length];
+        }
         if (proposed == currentCcipAdmin || proposed == address(WON)) {
-            // setCCIPAdmin rejects self-proposal and address(this); skip these so the
-            // handler doesn't burn calls on guaranteed-revert paths.
+            // 4-actor pool with at most one match against the admin means this is
+            // unreachable. Guard for robustness.
             return;
         }
         vm.prank(currentCcipAdmin);
         WON.setCCIPAdmin(proposed);
     }
 
-    /// @dev Complete the two-step rotation. No-op if there is no pending admin (the
-    ///      previous accept already consumed it, or no setCCIPAdmin has run yet).
-    function acceptCCIPAdminRace() external {
+    /// @dev TEST-19: combine with `setCCIPAdminRace` so a sequence of fuzz calls always
+    ///      walks at least one rotation. If no proposal is pending, propose one first so
+    ///      the accept can actually fire.
+    function acceptCCIPAdminRace(uint256 actorSeed) external {
         address pending = WON.pendingCCIPAdmin();
         if (pending == address(0)) {
-            return;
+            // Bootstrap a proposal so the accept has something to accept.
+            this.setCCIPAdminRace(actorSeed);
+            pending = WON.pendingCCIPAdmin();
+            if (pending == address(0)) {
+                return;
+            }
         }
         vm.prank(pending);
         WON.acceptCCIPAdmin();

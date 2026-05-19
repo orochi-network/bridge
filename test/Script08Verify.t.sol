@@ -9,6 +9,46 @@ import {RateLimiter} from "@chainlink/contracts-ccip/ccip/libraries/RateLimiter.
 import {PostDeployVerify} from "../script/08_PostDeployVerify.s.sol";
 import {WrappedON} from "../src/WrappedON.sol";
 
+/// @dev TEST-20: stand-in pool that lets each test set the rebalancer and the
+///      `getRemotePool` / `getRemoteToken` payloads independently so the typed-revert
+///      branches in `_checkBscRebalancer` / `_checkRemoteLink` are exercisable without a
+///      full pool fixture.
+contract MockBadPool {
+    address public rebalancer;
+    bytes public remotePoolBytes;
+    bytes public remoteTokenBytes;
+
+    function setRebalancer(address r) external {
+        rebalancer = r;
+    }
+
+    function setRemotePoolBytes(bytes memory b) external {
+        remotePoolBytes = b;
+    }
+
+    function setRemoteTokenBytes(bytes memory b) external {
+        remoteTokenBytes = b;
+    }
+
+    function getRebalancer() external view returns (address) {
+        return rebalancer;
+    }
+
+    function getRemotePool(uint64) external view returns (bytes memory) {
+        return remotePoolBytes;
+    }
+
+    function getRemoteToken(uint64) external view returns (bytes memory) {
+        return remoteTokenBytes;
+    }
+
+    /// @dev `_checkRemoteLink` calls `isSupportedChain` first; treat the configured remote
+    ///      as supported so the tests reach the abi-decode length guards.
+    function isSupportedChain(uint64) external pure returns (bool) {
+        return true;
+    }
+}
+
 contract _MockON18 is ERC20 {
     constructor() ERC20("Orochi Network", "ON") {}
 }
@@ -33,6 +73,21 @@ contract PostDeployVerifyHarness is PostDeployVerify {
         bool strict
     ) external pure {
         _assertConfiguredOrWarn(direction, bucket, strict);
+    }
+
+    /// @notice TEST-20: expose the BSC-rebalancer and remote-link checks so each
+    ///         typed-revert branch can be exercised against a `MockBadPool`.
+    function exposeCheckBscRebalancer(address pool) external view {
+        _checkBscRebalancer(pool);
+    }
+
+    function exposeCheckRemoteLink(
+        address pool,
+        uint64 remoteSelector,
+        address expectedRemotePool,
+        address expectedRemoteToken
+    ) external view {
+        _checkRemoteLink(pool, remoteSelector, expectedRemotePool, expectedRemoteToken);
     }
 }
 
@@ -130,6 +185,57 @@ contract Script08VerifyTest is Test {
             abi.encodeWithSelector(PostDeployVerify.RoleNotRenounced.selector, "DEFAULT_ADMIN_ROLE", deployer)
         );
         h.exposeCheckDeployerRenounced(won, multisig, deployer);
+    }
+
+    // ─── TEST-20: BSC rebalancer + remote-link typed-revert paths ─────────────
+
+    /// @notice TEST-20: an `UnexpectedRebalancer` revert fires when the BSC pool's slot is
+    ///         non-zero. Pre-second-pass the only coverage came indirectly via fork tests.
+    function test_CheckBscRebalancer_RevertsOnUnexpectedRebalancer() public {
+        MockBadPool bad = new MockBadPool();
+        address attacker = makeAddr("attacker");
+        bad.setRebalancer(attacker);
+
+        vm.expectRevert(abi.encodeWithSelector(PostDeployVerify.UnexpectedRebalancer.selector, address(bad), attacker));
+        h.exposeCheckBscRebalancer(address(bad));
+    }
+
+    /// @notice TEST-20: a `BscRebalancerReadFailed` revert surfaces when the pool returns
+    ///         non-32-byte data (or doesn't implement the selector at all). Uses an EOA
+    ///         (no code) as the "pool" — the staticcall returns `ok=true,data.length=0`.
+    ///         DEP-19: previously a `require` string; now a typed error.
+    function test_CheckBscRebalancer_RevertsOnReadFailure() public {
+        address noCode = makeAddr("eoa");
+        vm.expectRevert(abi.encodeWithSelector(PostDeployVerify.BscRebalancerReadFailed.selector, noCode));
+        h.exposeCheckBscRebalancer(noCode);
+    }
+
+    /// @notice TEST-20: malformed `getRemotePool` payload surfaces as the typed
+    ///         `MalformedRemoteEncoding`, not a low-level abi-decode panic. DEP-9.
+    function test_CheckRemoteLink_RevertsOnMalformedRemotePool() public {
+        MockBadPool bad = new MockBadPool();
+        // 31 bytes of payload — one short of the canonical `abi.encode(address)` 32.
+        bytes memory malformed = new bytes(31);
+        bad.setRemotePoolBytes(malformed);
+        bad.setRemoteTokenBytes(abi.encode(address(0xBEEF)));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(PostDeployVerify.MalformedRemoteEncoding.selector, uint64(123), "remotePool", 31)
+        );
+        h.exposeCheckRemoteLink(address(bad), 123, address(0xCAFE), address(0xBEEF));
+    }
+
+    /// @notice TEST-20: malformed `getRemoteToken` payload surfaces the same way.
+    function test_CheckRemoteLink_RevertsOnMalformedRemoteToken() public {
+        MockBadPool bad = new MockBadPool();
+        bad.setRemotePoolBytes(abi.encode(address(0xCAFE)));
+        bytes memory malformed = new bytes(33);
+        bad.setRemoteTokenBytes(malformed);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(PostDeployVerify.MalformedRemoteEncoding.selector, uint64(456), "remoteToken", 33)
+        );
+        h.exposeCheckRemoteLink(address(bad), 456, address(0xCAFE), address(0xBEEF));
     }
 
     /// @notice DEP-8 happy path: the fully-handed-off state (multisig holds admin,

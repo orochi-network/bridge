@@ -536,7 +536,7 @@ The test suite is the executable specification for the architecture:
 | Test file | Purpose |
 |---|---|
 | `test/WrappedON.t.sol` | Unit tests for every wON entry-point including reentrancy probe. |
-| `test/WrappedONInvariant.t.sol` | 4 stateful invariants over 7 handler actions (reserve invariant, cap monotonicity, role gating, two-step admin). |
+| `test/WrappedONInvariant.t.sol` | 4 stateful invariants over 9 handler actions (reserve invariant, cap monotonicity, role gating, two-step admin). |
 | `test/PoolRoundtrip.t.sol` | Pool wiring + `lockOrBurn` / `releaseOrMint` with mock router + rate-limit fuzz. |
 | `test/DeploymentE2E.t.sol` | Full deploy sequence in-process incl. handoff + rate-limit update. |
 | `test/Script04Paths.t.sol` | Admin-path dispatch coverage for all four paths in script 04. |
@@ -547,7 +547,7 @@ The test suite is the executable specification for the architecture:
 | `test/fork/Fork_BSC.t.sol` | BSC mainnet fork — token ownership probe + pool + bridge sim. |
 | `test/fork/Fork_Bridge.t.sol` | Dual-fork BSC → ETH → BSC roundtrip against live CCIP. |
 
-`make test` runs 111 tests (107 unit/integration + 4 stateful invariants).
+`make test` runs 130 tests (126 unit/integration + 4 stateful invariants).
 `make test-fork ETH_RPC=… BSC_RPC=…` adds 9 mainnet fork tests.
 
 ---
@@ -577,7 +577,12 @@ Disclosure: `security@orochi.network`.
 - **BSC ON CCIP-admin hook**: confirm whether the canonical BSC ON exposes
   `getCCIPAdmin`, is `Ownable`, or uses OZ `AccessControl`. RUNBOOK §0.2
   documents the read-only `cast call` probes to run before broadcasting
-  script 04 on mainnet (audit `H-4`).
+  script 04 on mainnet (tracked as `TEST-7`/`Known open items` — the
+  prior `H-4` legacy audit tag).
+- **BSC ON non-mintability** (OPS-29): the bridge assumes BSC ON's supply
+  is the immutable 100M `MAX_CCIP_MINTED` ceiling. Confirm with `cast call`
+  in RUNBOOK §0.2 that no minter / unbounded mint function exists on
+  `0x0e4F62…` before mainnet broadcast.
 - **Mainnet key handling**: deploy via Foundry's encrypted keystore
   (`cast wallet import deployer --interactive` + `--account deployer`)
   rather than `--private-key $DEPLOYER_PK`, which leaks the key into

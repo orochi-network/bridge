@@ -35,6 +35,19 @@ contract PostDeployVerify is Script, Helper {
     ///      inside `_checkRemoteLink`; surface it as a typed revert instead.
     error MalformedRemoteEncoding(uint64 selector, string field, uint256 actualLength);
     error DeployerEnvMissing();
+    /// @dev DEP-11: the recorded deployer in `deployments/<chainId>.json` did not match the
+    ///      operator-supplied `DEPLOYER` env. The renounce check would otherwise vacuously
+    ///      pass for any wrong address (a typo'd EOA trivially does not hold the role).
+    error DeployerAddressMismatch(address envSupplied, address recorded);
+    /// @dev DEP-12: a literal `MULTISIG=0x000…` would silently skip the entire handoff
+    ///      block under the previous `if (multisig != address(0))` guard. The script now
+    ///      treats explicit zero as an operator error: refuse to verify and surface the typo.
+    error MultisigIsZeroAddress();
+    /// @dev DEP-19: typed sibling errors for the staticcall helpers that previously used
+    ///      `require` strings. Matches the rest of this script's error vocabulary so Slither's
+    ///      `prefer-custom-errors` detector stays quiet and `vm.expectRevert(selector)` works.
+    error BscRebalancerReadFailed(address pool);
+    error PoolOwnerReadFailed(address pool);
 
     function run() external view {
         NetworkConfig memory local = getConfig(block.chainid);
@@ -79,26 +92,50 @@ contract PostDeployVerify is Script, Helper {
         }
 
         // Optional: check ownership handoff if MULTISIG env var is set.
-        try vm.envAddress("MULTISIG") returns (address multisig) {
-            if (multisig != address(0)) {
-                _checkOwnershipHandoff(localPool, multisig);
-                if (block.chainid == 1 || block.chainid == 11_155_111) {
-                    // DEP-8: read DEPLOYER from env explicitly. View-only `forge script`
-                    // resolves `msg.sender` to Foundry's default sender (`0x1804c8AB…`),
-                    // not the deployer EOA, so the renounce check was vacuously satisfied
-                    // when invoked through `make verify-*`. Require `DEPLOYER` so the check
-                    // actually tests what its name promises. The fallback to `msg.sender` is
-                    // intentionally removed — a verify run without `DEPLOYER` should not
-                    // pretend to validate the renounce step.
-                    address deployer = _envAddressOrZero("DEPLOYER");
-                    if (deployer == address(0)) {
-                        revert DeployerEnvMissing();
-                    }
-                    _checkDeployerRenounced(WrappedON(localToken), multisig, deployer);
-                }
+        // DEP-12: `vm.envOr` returns the default on unset; explicit zero is treated as an
+        // operator typo and surfaces via `MultisigIsZeroAddress` rather than silently
+        // skipping the whole handoff block. The previous `try/catch` over `envAddress` plus
+        // `if (multisig != address(0))` skip combined to swallow both cases.
+        address multisig = vm.envOr("MULTISIG", address(0));
+        if (multisig == address(0)) {
+            // Distinguish "literal MULTISIG=0x…0" from "MULTISIG unset" so the operator
+            // sees the right diagnostic. `envOr` cannot disambiguate, so probe the var
+            // explicitly via the try/catch.
+            try vm.envAddress("MULTISIG") returns (
+                address /* unused */
+            ) {
+                revert MultisigIsZeroAddress();
+            } catch {
+                console.log("  (skipping multisig handoff check -- MULTISIG env var not set)");
             }
-        } catch {
-            console.log("  (skipping multisig handoff check -- MULTISIG env var not set)");
+        } else {
+            _checkOwnershipHandoff(localPool, multisig);
+            if (block.chainid == 1 || block.chainid == 11_155_111) {
+                // DEP-8: read DEPLOYER from env explicitly. View-only `forge script`
+                // resolves `msg.sender` to Foundry's default sender (`0x1804c8AB…`),
+                // not the deployer EOA, so the renounce check was vacuously satisfied
+                // when invoked through `make verify-*`. Require `DEPLOYER` so the check
+                // actually tests what its name promises.
+                //
+                // DEP-17: use `vm.envOr` so an unset var returns zero. A MALFORMED value
+                // (e.g. truncated hex) reverts deep inside the cheatcode with Foundry's
+                // native error rather than being swallowed by the previous try/catch —
+                // gives the operator a real diagnostic instead of a confusing
+                // `DeployerEnvMissing` when the value is actually present-but-bad.
+                address deployer = vm.envOr("DEPLOYER", address(0));
+                if (deployer == address(0)) {
+                    revert DeployerEnvMissing();
+                }
+                // DEP-11: cross-validate against the deployer recorded by script 01. The
+                // recorded value is the address that ACTUALLY deployed wON — a typo in the
+                // `DEPLOYER` env would otherwise pass the renounce check vacuously (a
+                // wrong address trivially does not hold the role).
+                address recorded = Deployments.tryReadAddress(block.chainid, "deployer");
+                if (recorded != address(0) && recorded != deployer) {
+                    revert DeployerAddressMismatch(deployer, recorded);
+                }
+                _checkDeployerRenounced(WrappedON(localToken), multisig, deployer);
+            }
         }
 
         console.log("All checks passed.");
@@ -179,8 +216,21 @@ contract PostDeployVerify is Script, Helper {
         RateLimiter.TokenBucket memory inbound = TokenPool(pool).getCurrentInboundRateLimiterState(remoteSelector);
         _assertConfiguredOrWarn("inbound", inbound, strict);
 
-        console.log("[ok] outbound rate limit: cap=%d rate=%d", outbound.capacity, outbound.rate);
-        console.log("[ok] inbound  rate limit: cap=%d rate=%d", inbound.capacity, inbound.rate);
+        // DEP-15: only log `[ok]` for buckets that are actually configured. For a disabled
+        // bucket under non-strict mode, surface a `[warn]` instead so the operator-facing
+        // output matches the NatSpec promise ("downgrades the disabled-bucket revert to a
+        // console warning"). The previous implementation early-returned from the assertion
+        // and then unconditionally logged `[ok] cap=0 rate=0`.
+        _logBucket("outbound", outbound);
+        _logBucket("inbound", inbound);
+    }
+
+    function _logBucket(string memory direction, RateLimiter.TokenBucket memory bucket) internal pure {
+        if (bucket.isEnabled) {
+            console.log("[ok] %s rate limit: cap=%d rate=%d", direction, bucket.capacity, bucket.rate);
+        } else {
+            console.log("[warn] %s rate limit DISABLED (STRICT_RATE_LIMITS=false)", direction);
+        }
     }
 
     function _assertConfiguredOrWarn(string memory direction, RateLimiter.TokenBucket memory bucket, bool strict)
@@ -234,7 +284,10 @@ contract PostDeployVerify is Script, Helper {
     ///      come from an audited multisig action. SECURITY: CCIP-1.
     function _checkBscRebalancer(address pool) internal view {
         (bool ok, bytes memory data) = pool.staticcall(abi.encodeWithSignature("getRebalancer()"));
-        require(ok && data.length == 32, "pool.getRebalancer() call failed");
+        // DEP-19: typed revert so script-level errors are uniformly custom errors.
+        if (!ok || data.length != 32) {
+            revert BscRebalancerReadFailed(pool);
+        }
         address rebalancer = abi.decode(data, (address));
         if (rebalancer != address(0)) {
             revert UnexpectedRebalancer(pool, rebalancer);
@@ -250,7 +303,9 @@ contract PostDeployVerify is Script, Helper {
         // hasn't accepted yet" — both look like `owner == deployer`. Diagnostic says
         // both possibilities honestly rather than pretending to disambiguate.
         (bool ok, bytes memory data) = pool.staticcall(abi.encodeWithSignature("owner()"));
-        require(ok && data.length == 32, "pool owner() call failed");
+        if (!ok || data.length != 32) {
+            revert PoolOwnerReadFailed(pool);
+        }
         address owner = abi.decode(data, (address));
         if (owner == multisig) {
             console.log("[ok] pool.owner() == multisig %s", multisig);
@@ -277,16 +332,6 @@ contract PostDeployVerify is Script, Helper {
         console.log("[ok] wON DEFAULT_ADMIN_ROLE held only by multisig %s", multisig);
         console.log("[ok] wON ccipAdmin == multisig %s", multisig);
         console.log("[ok] wON DEFAULT_ADMIN_ROLE renounced by deployer %s", deployer);
-    }
-
-    /// @dev `vm.envAddress` reverts when the env var is unset. Wrap so the caller can
-    ///      decide what missing-env means (here: a typed `DeployerEnvMissing` revert).
-    function _envAddressOrZero(string memory name) internal view returns (address) {
-        try vm.envAddress(name) returns (address a) {
-            return a;
-        } catch {
-            return address(0);
-        }
     }
 
     function _remoteChainId(uint256 chainId) internal pure returns (uint256) {

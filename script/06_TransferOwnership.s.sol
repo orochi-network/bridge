@@ -12,6 +12,13 @@ interface ITokenPoolOwnable {
     function owner() external view returns (address);
 }
 
+/// @dev DEP-20: symmetric `getToken()` cross-check on the handoff path. Same shape as
+///      `script/03_GrantRoles.s.sol::ITokenPoolReader` — duplicated here because pulling
+///      in the GrantRoles script would import its broadcasting logic too.
+interface ITokenPoolReadToken {
+    function getToken() external view returns (address);
+}
+
 interface ITokenAdminRegistry {
     function transferAdminRole(address localToken, address newAdmin) external;
 }
@@ -44,6 +51,11 @@ interface ITokenAdminRegistryRead {
 contract TransferOwnership is Script, Helper {
     error MultisigEnvMissing();
     error MultisigEqualsDeployer(address addr);
+    /// @dev DEP-20: refuses to transfer custody-grade ownership of a pool that isn't bound
+    ///      to the expected token. Mirrors the CCIP-4 check in script 03 so a tampered
+    ///      `deployments/<chainId>.json` cannot redirect the handoff to a foreign pool.
+    error PoolTokenMismatch(address pool, address poolToken, address expectedToken);
+    error PoolGetTokenCallFailed(address pool);
 
     function run() external {
         // Use envOr so the MissingMULTISIG case yields our own clear error rather than
@@ -85,6 +97,18 @@ contract TransferOwnership is Script, Helper {
             token = cfg.onToken;
         }
         _requireSet(token, "token");
+
+        // DEP-20: before transferring custody-grade ownership, assert the pool reads back
+        // its bound token correctly. On BSC this is the higher-stakes leg (pool owns the
+        // locked-ON reserve via setRebalancer/withdrawLiquidity), so the asymmetry vs
+        // CCIP-4's ETH-only check was a real gap.
+        try ITokenPoolReadToken(pool).getToken() returns (address poolToken) {
+            if (poolToken != token) {
+                revert PoolTokenMismatch(pool, poolToken, token);
+            }
+        } catch {
+            revert PoolGetTokenCallFailed(pool);
+        }
 
         vm.startBroadcast();
 

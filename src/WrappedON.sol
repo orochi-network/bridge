@@ -78,6 +78,12 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     ///         variants would credit less than requested. Canonical ON is plain ERC20 so the
     ///         two coincide in practice; rename made explicit per WON-9.
     event Wrapped(address indexed account, uint256 received);
+    /// @notice Emitted by `withdraw`. `amount` is the wON burned AND the ON returned (no
+    ///         received-amount accounting on the unwrap path — the contract holds the
+    ///         reserve and the outbound `safeTransfer` doesn't apply a fee on canonical
+    ///         ON). For a hypothetical future fee-on-transfer ON variant, `amount` would be
+    ///         what the contract sent; the recipient's credited balance may be lower. See
+    ///         WON-18 — the asymmetry vs `Wrapped(received)` is recorded by design.
     event Unwrapped(address indexed account, uint256 amount);
     /// @notice Emitted by the CCIP `releaseOrMint` path. Lets indexers distinguish CCIP-inbound
     ///         mints from `deposit`-wrap mints (which emit `Wrapped`). Reports the post-call
@@ -136,6 +142,11 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     ///      (defensive; canonical ON is plain ERC20). `nonReentrant` guards against future
     ///      hook-bearing tokens. Uncapped — bounded by ETH-side ON supply; independent of
     ///      `MAX_CCIP_MINTED` so heavy wrap usage can't starve inbound CCIP.
+    /// @dev WON-14: also rejects `received == 0` after the transfer. A 100%-fee or buggy
+    ///      ERC20 whose `transferFrom` returned `true` without actually moving anything
+    ///      would otherwise let a `deposit(N)` call mint 0 wON and emit `Wrapped(_, 0)`.
+    ///      Canonical ON cannot hit this, but the received-amount guard is what mints the
+    ///      defensive accounting; rejecting `received == 0` matches the WON-1 mint guard.
     function deposit(uint256 amount) external nonReentrant {
         if (amount == 0) {
             revert ZeroAmount();
@@ -143,6 +154,9 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         uint256 before = ON.balanceOf(address(this));
         ON.safeTransferFrom(msg.sender, address(this), amount);
         uint256 received = ON.balanceOf(address(this)) - before;
+        if (received == 0) {
+            revert ZeroAmount();
+        }
         _mint(msg.sender, received);
         emit Wrapped(msg.sender, received);
     }
@@ -167,10 +181,14 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
 
     // ─── IBurnMintERC20 (pool-only) ───────────────────────────────────────────
 
-    /// @notice CCIP `BurnMintTokenPool.releaseOrMint` entrypoint. Capped at
-    ///         `MAX_CCIP_MINTED`; cap tracked via `ccipMintedSupply` so deposit-backed wON
-    ///         does not consume it.
-    function mint(address account, uint256 amount) external onlyRole(MINTER_ROLE) {
+    /// @notice CCIP `BurnMintTokenPool.releaseOrMint` entrypoint.
+    /// @dev Capped at `MAX_CCIP_MINTED` via `ccipMintedSupply`. See the contract-level
+    ///      CAP REPLENISHMENT block (CCIP-7) for the cycling-refill semantics — the cap
+    ///      is a live BSC-balance approximation, not a lifetime CCIP-mint ceiling.
+    ///      WON-17: `nonReentrant` is defensive — OZ 5.x ERC20 has no hooks, so re-entry
+    ///      via `_mint` cannot happen today. The guard locks the cap-counter / mint
+    ///      ordering against a future subclass that overrides `_update`.
+    function mint(address account, uint256 amount) external onlyRole(MINTER_ROLE) nonReentrant {
         // Zero-amount mints emit a Transfer(pool, account, 0) log and otherwise no-op,
         // matching the asymmetry the `deposit`/`withdraw` guards exist to prevent.
         // SECURITY: WON-1.
@@ -188,26 +206,41 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
 
     /// @notice Burns from `msg.sender`. Called by `BurnMintTokenPool._burn` after the pool
     ///         transfers user tokens to itself.
-    function burn(uint256 amount) external onlyRole(BURNER_ROLE) {
-        _decrementCcipMinted(amount);
+    /// @dev WON-11: `ZeroAmount` guard mirrors the `mint`/`deposit`/`withdraw` pattern so a
+    ///      misbehaving pool can't spam `CCIPBurned(_, 0, supply)` events. WON-17:
+    ///      `nonReentrant` mirrors `mint` — defensive against future hookable subclasses.
+    function burn(uint256 amount) external onlyRole(BURNER_ROLE) nonReentrant {
+        if (amount == 0) {
+            revert ZeroAmount();
+        }
+        uint256 newSupply = _decrementCcipMinted(amount);
         _burn(msg.sender, amount);
-        emit CCIPBurned(msg.sender, amount, ccipMintedSupply);
+        emit CCIPBurned(msg.sender, amount, newSupply);
     }
 
     /// @notice Burns from `account` without allowance check (matches `IBurnMintERC20`).
-    /// @dev `BURNER_ROLE` must be held exclusively by the audited pool.
-    function burn(address account, uint256 amount) external onlyRole(BURNER_ROLE) {
-        _decrementCcipMinted(amount);
+    /// @dev `BURNER_ROLE` must be held exclusively by the audited pool. Same WON-11 +
+    ///      WON-17 rationale as the single-arg overload. CCIP-12: `account` is the burning
+    ///      pool's caller-supplied target, NOT the pool itself; for the single-arg
+    ///      `burn(uint256)` overload, `account` in the event is `msg.sender` (the pool).
+    function burn(address account, uint256 amount) external onlyRole(BURNER_ROLE) nonReentrant {
+        if (amount == 0) {
+            revert ZeroAmount();
+        }
+        uint256 newSupply = _decrementCcipMinted(amount);
         _burn(account, amount);
-        emit CCIPBurned(account, amount, ccipMintedSupply);
+        emit CCIPBurned(account, amount, newSupply);
     }
 
     /// @notice Allowance-respecting burn. For pool variants that go through `approve`.
-    function burnFrom(address account, uint256 amount) external onlyRole(BURNER_ROLE) {
+    function burnFrom(address account, uint256 amount) external onlyRole(BURNER_ROLE) nonReentrant {
+        if (amount == 0) {
+            revert ZeroAmount();
+        }
         _spendAllowance(account, msg.sender, amount);
-        _decrementCcipMinted(amount);
+        uint256 newSupply = _decrementCcipMinted(amount);
         _burn(account, amount);
-        emit CCIPBurned(account, amount, ccipMintedSupply);
+        emit CCIPBurned(account, amount, newSupply);
     }
 
     // ─── IGetCCIPAdmin (two-step) ─────────────────────────────────────────────
@@ -241,11 +274,17 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         // DIFFERENT address. Re-proposing the same pending admin is a no-op for the
         // pending slot, so suppressing the event there avoids spurious cancellation
         // signals during honest retry flows. SECURITY: WON-5.
+        //
+        // WON-12: write the new pending slot BEFORE emitting either event. The contract
+        // makes no external calls here, so there's no reentrancy risk either way, but
+        // emitting after the state write matches the `mint`/`burn`/`acceptCCIPAdmin` order
+        // and prevents an indexer that subscribes to `CCIPAdminProposalCancelled` and
+        // immediately reads `pendingCCIPAdmin()` from seeing the stale value.
         address prev = s_pendingCcipAdmin;
+        s_pendingCcipAdmin = newAdmin;
         if (prev != address(0) && prev != newAdmin) {
             emit CCIPAdminProposalCancelled(prev);
         }
-        s_pendingCcipAdmin = newAdmin;
         emit CCIPAdminTransferProposed(s_ccipAdmin, newAdmin);
     }
 
@@ -276,8 +315,12 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     ///      counter tracks `lockedON_BSC` down in lockstep. Saturation is a defensive floor —
     ///      only matters if a buggy/compromised pool over-burns. Not a per-token-provenance
     ///      counter (wON is fungible).
-    function _decrementCcipMinted(uint256 amount) internal {
+    /// @dev WON-13: returns the new supply so each burn entrypoint can emit `CCIPBurned`
+    ///      with the local variable instead of re-reading storage (saves one SLOAD per burn
+    ///      and matches the `mint` path's local-variable pattern).
+    function _decrementCcipMinted(uint256 amount) internal returns (uint256 newSupply) {
         uint256 current = ccipMintedSupply;
-        ccipMintedSupply = amount >= current ? 0 : current - amount;
+        newSupply = amount >= current ? 0 : current - amount;
+        ccipMintedSupply = newSupply;
     }
 }

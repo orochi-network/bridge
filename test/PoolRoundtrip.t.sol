@@ -230,6 +230,25 @@ contract PoolRoundtripTest is Test {
         ethPool.lockOrBurn(inBurn);
     }
 
+    /// @notice TEST-17: BSC pool's outbound `lockOrBurn` must also halt under an RMN curse.
+    ///         TEST-15 covered ETH-side outbound + inbound; this pins the BSC-side outbound
+    ///         leg directly — a regression that patched only the ETH pool's curse wiring
+    ///         would still pass TEST-15 but allow BSC users to lock through a curse.
+    function test_BscLockOrBurnRevertsWhenRMNCursed() public {
+        bscRmn.setSubjectCurse(bytes16(uint128(ETH_SELECTOR)), true);
+
+        Pool.LockOrBurnInV1 memory inLock = Pool.LockOrBurnInV1({
+            receiver: abi.encode(alice),
+            remoteChainSelector: ETH_SELECTOR,
+            originalSender: alice,
+            amount: 1 ether,
+            localToken: address(onBsc)
+        });
+        vm.prank(bscOnRamp);
+        vm.expectRevert(TokenPool.CursedByRMN.selector);
+        bscPool.lockOrBurn(inLock);
+    }
+
     /// @notice TEST-15: an RMN curse must also block the inbound path. The outbound test
     ///         above hits `_validateLockOrBurn`; the inbound path enters via
     ///         `_validateReleaseOrMint`, which runs an independent curse check against the

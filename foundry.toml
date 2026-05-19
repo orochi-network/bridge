@@ -35,6 +35,11 @@ fuzz = {runs = 1_000}
 # rather than silently degrading coverage. `depth = 50` is enough to reach interleaved
 # `adversarialPoolBurn`/`ccipMint`/`ccipBurn` sequences that exercise the saturating-
 # decrement branch. SECURITY: TEST-2 + OPS-4.
+#
+# Local default (`make test`) uses these settings. CI sets `FOUNDRY_PROFILE=ci` and picks
+# up the [profile.ci.invariant] override below at runs=500/depth=100 (~4x the local depth
+# coverage). Local runs are intentionally lighter so iteration stays fast; a green local
+# `make test` does not imply a green CI run. See `.github/workflows/ci.yml`.
 [invariant]
 runs = 256
 depth = 50

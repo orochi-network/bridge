@@ -19,6 +19,32 @@ library Deployments {
         return string.concat(vm.projectRoot(), "/deployments/", vm.toString(chainId), ".json");
     }
 
+    /// @notice True iff the per-chain deployments file is missing OR parses as syntactically
+    ///         valid JSON. False iff the file exists on disk but is corrupt (truncated /
+    ///         partial-write / hand-edit gone wrong). Used by scripts 01 / 02 to refuse a
+    ///         re-deploy on top of a possibly-existing on-chain artefact when the artefact
+    ///         file is unreadable (DEP-13). A missing file is considered "valid" because
+    ///         that's the first-deploy state — script 01 / 02 will create the file.
+    ///
+    ///         The "delete a single key to force re-deploy" recovery path remains supported:
+    ///         deleting `.wrappedON` from a still-syntactically-valid JSON makes
+    ///         `tryReadAddress` return zero AND this function return true, so the deploy
+    ///         proceeds normally.
+    function jsonIsValid(uint256 chainId) internal view returns (bool) {
+        string memory file = path(chainId);
+        if (!vm.exists(file)) {
+            return true;
+        }
+        string memory json = vm.readFile(file);
+        // Probe with a known-bogus key. On valid JSON `keyExistsJson` returns false; on
+        // malformed JSON it reverts inside the cheatcode and we catch.
+        try vm.keyExistsJson(json, ".__deployments_jsonIsValid_probe") returns (bool) {
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
     function readAddress(uint256 chainId, string memory key) internal view returns (address) {
         string memory file = path(chainId);
         string memory json = vm.readFile(file);

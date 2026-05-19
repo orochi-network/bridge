@@ -27,7 +27,7 @@ The deployer needs to be able to register as admin for the canonical ON on BSC (
 3. OZ `AccessControl.hasRole(DEFAULT_ADMIN_ROLE, deployer)` on the v1.6 registry path — script auto-uses `registerAccessControlDefaultAdmin`.
 4. None of the above — the script reverts with a `CannotResolveCCIPAdmin` diagnostic. Recovery requires either (a) the token's `Ownable.owner` calling `RegistryModuleOwnerCustom.registerAdminViaOwner(token)` themselves, or (b) coordinating with Chainlink to register the admin out-of-band. After admin is set, re-run script 04 — `acceptAdminRole` and `setPool` are idempotent.
 
-**Required: validate the path against live BSC state BEFORE broadcasting (audit H-4).** The MEV / front-running window on `TokenAdminRegistry.proposeAdministrator` is closed if you already know the path resolves to a permissionless on-chain branch (1, 2, or 3); it stays open if recovery has to go through path 4.
+**Required: validate the path against live BSC state BEFORE broadcasting (`TEST-7` — legacy audit tag H-4).** The MEV / front-running window on `TokenAdminRegistry.proposeAdministrator` is closed if you already know the path resolves to a permissionless on-chain branch (1, 2, or 3); it stays open if recovery has to go through path 4.
 
 Use `cast call` to read each path's discriminator against the live BSC RPC and compare against the deployer EOA. This is purely read-only — no fork, no broadcast, no key needed. Script 04's path probes test whether **the broadcaster** is the admin holder, so the question to answer here is "would `$DEPLOYER_ADDR` match any of paths 1/2/3?" (an earlier draft of this section used `anvil --fork-url` with a well-known anvil pre-funded key, but the anvil key isn't `$DEPLOYER_ADDR`, so on a fork the script always fell through to path-4 regardless of which path the real deployer would have hit on mainnet — invalidating the mitigation goal):
 
@@ -48,6 +48,19 @@ cast call $BSC_ON 'hasRole(bytes32,address)(bool)' \
 ```
 
 Compare the path-1 / path-2 returns to `$DEPLOYER_ADDR` (case-insensitive) and check path-3 for `true`. If any of the three matches, script 04 will land on that branch on mainnet — no front-running window. If none match, the path-4 fallthrough is your reality: coordinate recovery with the ON token owner (so they call `RegistryModuleOwnerCustom.registerAdminViaOwner(token)` for you) or Chainlink (out-of-band admin set) *before* mainnet broadcast — do not run script 04 against mainnet hoping it works.
+
+**Also confirm BSC ON has no mint capability (OPS-29).** The bridge's `MAX_CCIP_MINTED = 100M` assumes the canonical BSC ON supply is fixed at 100M. If BSC ON has a minter and supply ever exceeds 100M, the cap becomes an asymmetric ceiling: excess BSC ON can be locked but cannot reflect to ETH (`mint` reverts `CCIPMintCapExceeded`), permanently stranding users with the surplus.
+
+```bash
+# Probe likely mint surfaces. Each is expected to revert ("selector absent") on a
+# correctly fixed-supply ERC20.
+cast call $BSC_ON 'mint(address,uint256)' $DEPLOYER_ADDR 1 --rpc-url $BSC_RPC 2>&1 || echo "no mint(address,uint256) — good"
+cast call $BSC_ON 'owner()(address)' --rpc-url $BSC_RPC 2>&1 || echo "no Ownable owner — owner-gated mint surface absent"
+# Spot the current totalSupply against the documented 100M:
+cast call $BSC_ON 'totalSupply()(uint256)' --rpc-url $BSC_RPC
+```
+
+If any mint surface is present and gated to an address that could plausibly mint more, halt the deployment — the cap-vs-supply relationship is load-bearing for the entire CCIP-7 / cap-replenishment safety story.
 
 ### 0.3 Environment
 
@@ -71,13 +84,33 @@ Then `source .env`.
 
 ```bash
 make build
-make test                 # all 111 non-fork tests (107 unit/integration + 4 stateful invariants) must pass
+make test                 # all 130 non-fork tests (126 unit/integration + 4 stateful invariants) must pass
 make fmt-check
 ```
 
 ---
 
 ## 1. Testnet deployment
+
+### 1.0 Deploy a mock ON token (testnet only — OPS-23)
+
+`script/Helper.sol` intentionally leaves `onToken: address(0)` for Sepolia (chainid `11_155_111`) and BSC testnet (chainid `97`), because there is no canonical ON deployed on those chains. Scripts 01 / 02 `_requireSet` the `onToken` field, so without a stand-in the documented `make deploy-eth RPC=sepolia` / `make deploy-bsc RPC=bsc_testnet` flows revert immediately with `MissingAddress("onToken (...)")`.
+
+Before running the deploy targets on testnet, deploy a simple `MockERC20("Orochi Network (Testnet)", "ON", 18)` and patch `script/Helper.sol` with its address on the matching chainid branch:
+
+```bash
+# Example: deploy your own MockERC20 (use `forge create`, your existing mock, or any
+# OZ ERC20Mock). The exact deploy mechanism is intentionally out of scope — testnet
+# deploys are not bridge-funds-bearing.
+forge create test/mocks/MockON.sol:MockON \
+    --rpc-url sepolia \
+    --private-key $DEPLOYER_PK \
+    --constructor-args "Orochi Network (Testnet)" "ON"
+# Take the printed Deployed-to address and patch `script/Helper.sol` so the
+# chainid 11_155_111 / 97 branch returns it under `onToken`. Then proceed to §1.1.
+```
+
+This step is a no-op on mainnet — Helper's `1` / `56` branches already point at the canonical addresses. (`OPS-23` tracks a future `script/00_DeployMockON.s.sol` that automates this; until then it's a manual step.)
 
 ### 1.1 Ethereum (Sepolia)
 
@@ -153,16 +186,16 @@ Once the bridge is verified on mainnet, hand off control to the operations multi
 make handoff-all ETH_RPC=eth BSC_RPC=bsc MULTISIG=0x<safe-address>
 ```
 
-The single target runs the handoff sequentially against both chains with the same multisig — preventing the half-handed-off-on-one-chain footgun (audit H-5). For single-chain handoffs (e.g. during testnet dry runs) use `make handoff RPC=<chain> MULTISIG=…`.
+The single target runs the handoff sequentially against both chains with the same multisig — preventing the half-handed-off-on-one-chain footgun (legacy audit tag H-5, now operational mitigation only — no current ledger entry). For single-chain handoffs (e.g. during testnet dry runs) use `make handoff RPC=<chain> MULTISIG=…`.
 
 Each per-chain invocation:
 - Calls `pool.transferOwnership(multisig)` (two-step Ownable).
 - (ETH only) Grants wON `DEFAULT_ADMIN_ROLE` to the multisig and proposes the new CCIP admin (two-step — multisig must call `acceptCCIPAdmin`).
 - Calls `TokenAdminRegistry.transferAdminRole(token, multisig)` (two-step).
 
-**Minimize the handoff window (audit H-2 + C-1).** Between the grant in 3.1 and the multisig accepts in 3.2, the deployer EOA still holds:
+**Minimize the handoff window (`DEP-3` + `CCIP-1` — legacy audit tags H-2 + C-1).** Between the grant in 3.1 and the multisig accepts in 3.2, the deployer EOA still holds:
 - wON `DEFAULT_ADMIN_ROLE` on ETH → admin authority over `MINTER_ROLE` / `BURNER_ROLE` (a compromised deployer key can grant `MINTER_ROLE` to an attacker and mint unbacked wON).
-- `Ownable` ownership of the BSC `LockReleaseTokenPool` → can call `setRebalancer(attacker)` → `withdrawLiquidity` and drain the locked-ON reserve (the C-1 trust-model surface; the multisig isn't yet the owner until 3.2 BSC `acceptOwnership`).
+- `Ownable` ownership of the BSC `LockReleaseTokenPool` → can call `setRebalancer(attacker)` → `withdrawLiquidity` and drain the locked-ON reserve (the `CCIP-1` trust-model surface; the multisig isn't yet the owner until 3.2 BSC `acceptOwnership`).
 
 To reduce exposure:
 
@@ -218,7 +251,7 @@ After 3.2 + 3.3 confirm the multisig holds every role:
 make renounce RPC=eth MULTISIG=0x<safe-address>
 ```
 
-The script now pre-asserts (audit H-1):
+The script now pre-asserts (`DEP-3` — legacy audit tag H-1):
 - Multisig holds `DEFAULT_ADMIN_ROLE` on wON.
 - Multisig is `getCCIPAdmin()` (i.e. it called `acceptCCIPAdmin`).
 - The deployer still holds the role at call time.
@@ -299,13 +332,40 @@ This means the multisig effectively has custody of the BSC-side locked-ON reserv
 | `LiquidityRemoved(remover, amount)` | BSC pool | **Critical** |
 | `LiquidityAdded(provider, amount)` | BSC pool | High |
 | `setRebalancer(addr)` calldata trace | BSC pool | **Critical** |
+| `setRateLimitAdmin(addr)` calldata trace (`onlyOwner`, no event — OPS-28) | both pools | High |
 | `OwnershipTransferRequested` / `OwnershipTransferred` | BSC pool | **Critical** |
+| `RouterUpdated(oldRouter, newRouter)` (CCIP-13) | both pools | **Critical** |
+| `RemotePoolSet(selector, oldRemote, newRemote)` (CCIP-14) | both pools | **Critical** |
+| `ChainAdded` / `ChainRemoved` / `ChainConfigured` (CCIP-14) | both pools | High |
 | `RoleGranted(MINTER_ROLE, *)` where grantee ≠ ETH pool | wON | **Critical** |
 | `RoleGranted(BURNER_ROLE, *)` where grantee ≠ ETH pool | wON | **Critical** |
+| `RoleAdminChanged(role, prev, new)` on `MINTER_ROLE`/`BURNER_ROLE` (OPS-30; forward-compat) | wON | High |
 | `CCIPAdminTransferProposed` / `CCIPAdminTransferred` | wON | High |
+| `AdministratorTransferRequested` / `AdministratorTransferred` (registry — OPS-28) | TokenAdminRegistry | High |
 | `CCIPMinted` cumulative > BSC `IERC20(ON).balanceOf(LockReleaseTokenPool)` | wON ↔ BSC pool | **Critical** |
 | `CCIPAdminProposalCancelled` | wON | High |
 | Outbound / inbound rate-limit bucket exhausted | both pools | Medium |
+
+**Rationale for the post-handoff additions (round-8 review):**
+
+- `RouterUpdated` (CCIP-13) — `TokenPool.setRouter(addr)` is `onlyOwner`. A compromised
+  multisig can swap `s_router` to attacker-controlled logic; `_onlyOnRamp` /
+  `_onlyOffRamp` then defer to the new router's `getOnRamp` / `isOffRamp`, opening both
+  `lockOrBurn` (drains BSC reserve) and `releaseOrMint` (mints unbacked wON up to cap).
+  Direct analog of `setRebalancer` for routing.
+- `RemotePoolSet` (CCIP-14) — alters the source-pool keccak the destination uses to
+  validate inbound mints. Door to forged-source mints if compromised.
+- `ChainAdded` / `ChainRemoved` / `ChainConfigured` (CCIP-14) — rate-limit reset / new
+  selector wired in. Less catastrophic than RouterUpdated/RemotePoolSet but worth a page.
+- `setRateLimitAdmin` calldata (OPS-28) — `onlyOwner`, no event. §4.1.1 recommends
+  delegating to a hot key, so this is a legitimate operational call — but it should be a
+  signal you can correlate with a multisig action you know about.
+- `AdministratorTransferRequested`/`Transferred` on `TokenAdminRegistry` (OPS-28) — the
+  registry sibling of `CCIPAdminTransferProposed`/`Transferred` on wON; previously only
+  the wON half was monitored.
+- `RoleAdminChanged` on `MINTER_ROLE`/`BURNER_ROLE` (OPS-30) — forward-compat. wON does
+  not currently expose `_setRoleAdmin` externally (OZ AccessControl 5.x internal), so
+  not an active vector — but if a future redeploy ever does, the monitor is in place.
 
 **Note on `ccipMintedSupply` monitoring** (SECURITY: WON-3 / CCIP-7). The contract-side
 `ccipMintedSupply` counter approximates BSC locked balance but saturating-decrements on

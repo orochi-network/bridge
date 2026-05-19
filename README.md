@@ -43,14 +43,14 @@ make build            # forge build --sizes
 ### 3. Run the test suite (no RPC needed)
 
 ```bash
-make test             # 111 tests, no fork (107 unit/integration + 4 stateful invariants)
+make test             # 130 tests, no fork (126 unit/integration + 4 stateful invariants)
 ```
 
 Targeted subsets:
 
 ```bash
 make test-unit        # WrappedON.t.sol only
-make test-e2e         # PoolRoundtrip + DeploymentE2E
+make test-e2e         # everything except WrappedON unit tests and forks
 ```
 
 Fork tests (live mainnet RPCs required):
@@ -242,6 +242,7 @@ Trust-model TL;DR:
 - wON's CCIP-mint path is hard-capped at 100M ether (the BSC ON canonical supply, the absolute upper bound on what the bridge can ever reflect onto Ethereum). The `deposit` wrap path is intentionally uncapped — bounded naturally by the ETH-side ON supply — so heavy wrap usage cannot starve inbound CCIP messages. The safety invariant `lockedON_BSC + reserveON_ETH >= totalSupply(wON)` is preserved by mechanics (CCIP mint ↔ BSC lock pairing; deposit ↔ reserve lockstep), not by a `totalSupply` cap.
 - `setCCIPAdmin` on wON is two-step (propose + accept). Overwriting an in-flight proposal emits `CCIPAdminProposalCancelled(prev)` so any party with a queued `acceptCCIPAdmin` tx gets a clear signal.
 - CCIP entrypoints emit named events for indexer-friendly auditing: `CCIPMinted(account, amount, ccipMintedSupply)` from inbound mints and `CCIPBurned(account, amount, ccipMintedSupply)` from all three burn overloads.
+- The `Wrapped` event's second parameter is named `received` (post-fee, the actual wON minted) — renamed from `amount` per `SECURITY.md` WON-9 to make the received-amount-accounting semantics explicit. ABI consumers that read parameters by name (ethers v6, viem, OZ Defender) need to update their bindings; consumers that read by index are unaffected.
 
 See [`SECURITY.md`](SECURITY.md) for the full security review with per-finding status, the
 disclosure policy (`security@orochi.network`), and the identifier-prefix convention

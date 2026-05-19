@@ -12,6 +12,7 @@ import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.so
 
 import {IBurnMintERC20} from "@chainlink/contracts-ccip/shared/token/ERC20/IBurnMintERC20.sol";
 import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/ccip/interfaces/IGetCCIPAdmin.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
 
@@ -25,12 +26,20 @@ contract MockON is ERC20 {
 /// @dev Reentrancy probe — overrides `transferFrom` to call back into `WrappedON.deposit`.
 ///      A real ON-like ERC20 wouldn't do this, but if a future deployment reuses WrappedON
 ///      against a hook-bearing token the `nonReentrant` guard must hold. SECURITY: TEST-8.
+/// @dev TEST-16: also seeds itself with a small balance so the inner reentry's
+///      `safeTransferFrom(rOn, rWon, 1)` can succeed on token-side accounting — that way
+///      the inner call's revert is provably from `nonReentrant`, not from the mock running
+///      out of balance. The `require` then asserts the specific
+///      `ReentrancyGuardReentrantCall` selector, so a removed `nonReentrant` modifier no
+///      longer trivially passes via `ERC20InsufficientBalance`.
 contract ReentrantMockON is ERC20 {
     address public target;
     bool internal reentered;
 
     constructor() ERC20("Reentrant Mock ON", "rON") {
         _mint(msg.sender, 1_000_000 ether);
+        // TEST-16: pre-fund the mock so the inner reentry can satisfy ERC20 accounting.
+        _mint(address(this), 100 ether);
     }
 
     function setTarget(address t) external {
@@ -41,12 +50,37 @@ contract ReentrantMockON is ERC20 {
         bool ok = super.transferFrom(from, to, amount);
         if (target != address(0) && !reentered) {
             reentered = true;
+            // Approve the target to spend rON balance held by this mock, so the inner
+            // deposit's safeTransferFrom doesn't fail on allowance accounting before the
+            // reentrancy guard runs.
+            _approve(address(this), target, type(uint256).max);
             // Attempt reentry into deposit; the wON contract's `nonReentrant` must reject.
-            (bool success,) = target.call(abi.encodeWithSignature("deposit(uint256)", 1));
+            (bool success, bytes memory ret) = target.call(abi.encodeWithSignature("deposit(uint256)", 1));
             require(!success, "reentry succeeded - nonReentrant guard missing");
+            // TEST-16: assert the specific selector so an inner revert from a *different*
+            // cause (insufficient balance, allowance, etc.) doesn't masquerade as the
+            // guard firing. Foundry surfaces the inner revert reason as a 4-byte selector.
+            require(
+                ret.length >= 4 && bytes4(ret) == ReentrancyGuard.ReentrancyGuardReentrantCall.selector,
+                "expected ReentrancyGuardReentrantCall"
+            );
             reentered = false;
         }
         return ok;
+    }
+}
+
+/// @dev WON-14: mock whose `transferFrom` claims success without moving any balance.
+///      Exercises the `received == 0` defensive guard in `deposit`.
+contract NullTransferMockON is ERC20 {
+    constructor() ERC20("Null Transfer Mock ON", "nON") {}
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+
+    function transferFrom(address, address, uint256) public pure override returns (bool) {
+        return true; // lies about success — balance never moves
     }
 }
 
@@ -97,6 +131,22 @@ contract WrappedONTest is Test {
         vm.prank(alice);
         vm.expectRevert(WrappedON.ZeroAmount.selector);
         won.deposit(0);
+    }
+
+    /// @notice WON-14: even when `amount > 0`, a `received == 0` outcome (e.g. a 100%-fee
+    ///         or buggy ERC20 whose `transferFrom` returns `true` without moving anything)
+    ///         must revert. Otherwise `deposit(N)` would mint zero wON and emit
+    ///         `Wrapped(_, 0)`, polluting indexer accounting. Canonical ON is plain ERC20
+    ///         and cannot hit this path; the test exercises the defensive guard against
+    ///         non-canonical ON variants.
+    function test_DepositRevertsOnReceivedZero() public {
+        NullTransferMockON mock = new NullTransferMockON();
+        WrappedON nullWon = new WrappedON(IERC20(address(mock)), admin);
+        mock.mint(address(this), 100 ether);
+        mock.approve(address(nullWon), 100 ether);
+
+        vm.expectRevert(WrappedON.ZeroAmount.selector);
+        nullWon.deposit(50 ether);
     }
 
     function test_DepositMintsOneToOne() public {
@@ -657,6 +707,28 @@ contract WrappedONTest is Test {
         vm.prank(pool);
         won.burnFrom(alice, 25 ether);
         assertEq(won.ccipMintedSupply(), 25 ether);
+    }
+
+    /// @notice WON-11: every burn entrypoint rejects zero-amount calls (mirrors the
+    ///         `mint`/`deposit`/`withdraw` zero-guards). Without these guards a misbehaving
+    ///         pool could spam `CCIPBurned(_, 0, supply)` events and pollute indexer
+    ///         accounting.
+    function test_BurnRevertsOnZeroAmount_SingleArg() public {
+        vm.prank(pool);
+        vm.expectRevert(WrappedON.ZeroAmount.selector);
+        won.burn(0);
+    }
+
+    function test_BurnRevertsOnZeroAmount_AddressOverload() public {
+        vm.prank(pool);
+        vm.expectRevert(WrappedON.ZeroAmount.selector);
+        won.burn(alice, 0);
+    }
+
+    function test_BurnFromRevertsOnZeroAmount() public {
+        vm.prank(pool);
+        vm.expectRevert(WrappedON.ZeroAmount.selector);
+        won.burnFrom(alice, 0);
     }
 
     // ─── Constructor guards ───────────────────────────────────────────────────

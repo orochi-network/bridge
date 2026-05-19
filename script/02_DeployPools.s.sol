@@ -21,6 +21,9 @@ import {Deployments} from "./Deployments.sol";
 /// JSON and orphan the previous pool from subsequent scripts). To force a redeploy,
 /// delete the `pool` entry from the JSON file. Round-3 review [6].
 contract DeployPools is Script, Helper {
+    /// @dev DEP-13: see `01_DeployWrappedON.s.sol` for the same-named error / rationale.
+    error DeploymentsJsonCorrupt(uint256 chainId, string key);
+
     function run() external returns (address pool) {
         NetworkConfig memory cfg = getConfig(block.chainid);
 
@@ -32,6 +35,12 @@ contract DeployPools is Script, Helper {
             console.log("Pool already deployed at:", existing);
             console.log("Skipping. Delete the `pool` entry in deployments/<chainId>.json to redeploy.");
             return existing;
+        }
+        // DEP-13: same JSON-validity gate as script 01. Missing file / missing key continue
+        // the deploy; corrupt JSON refuses so we don't broadcast on top of a potentially-
+        // existing on-chain pool. See `Deployments.jsonIsValid` NatSpec.
+        if (!Deployments.jsonIsValid(block.chainid)) {
+            revert DeploymentsJsonCorrupt(block.chainid, "pool");
         }
 
         if (block.chainid == 1 || block.chainid == 11_155_111) {
