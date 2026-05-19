@@ -218,6 +218,15 @@ contract RenounceDeployerAdmin is Script, Helper {
 
         require(!won.hasRole(adminRole, deployer), "renounce failed: deployer still has role");
         console.log("Deployer", deployer, "renounced DEFAULT_ADMIN_ROLE on wON", address(won));
+        // SECURITY: DEP-3 — renounce is ETH-only; BSC pool ownership is enforced on a
+        // separate chain. Remind the operator to independently verify the BSC handoff
+        // before treating the renounce as a full surrender of authority.
+        console.log("");
+        console.log("REMINDER: this renounce only affects ETH-side wON DEFAULT_ADMIN_ROLE.");
+        console.log("Independently verify the BSC LockReleaseTokenPool ownership has moved");
+        console.log("to the multisig (`make verify-bsc RPC=bsc MULTISIG=0x..`) before treating");
+        console.log("the deployer EOA as fully retired. The BSC pool owner controls reserve");
+        console.log("custody via setRebalancer + withdrawLiquidity.");
     }
 
     /// @dev All pre-broadcast safety checks for the renounce step. Factored out of `run()`

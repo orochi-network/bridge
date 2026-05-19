@@ -18,6 +18,7 @@ import {TokenAdminRegistry} from "@chainlink/contracts-ccip/ccip/tokenAdminRegis
 import {
     RegistryModuleOwnerCustom
 } from "@chainlink/contracts-ccip/ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
+import {TokenPool as ITokenPool} from "@chainlink/contracts-ccip/ccip/pools/TokenPool.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
 import {MockRouter} from "./mocks/MockRouter.sol";
@@ -362,8 +363,11 @@ contract DeploymentE2ETest is Test {
         assertEq(ethPool.getCurrentOutboundRateLimiterState(BSC_SELECTOR).capacity, 200_000 ether);
 
         // Multisig cannot act as owner before calling acceptOwnership.
+        // SECURITY: TEST-3 — `setChainRateLimiterConfig` gates on `owner() || rateLimitAdmin`
+        // and reverts `Unauthorized(caller)` for anyone else. Match the selector via
+        // expectPartialRevert so the caller-arg doesn't have to be threaded through.
         vm.prank(multisig);
-        vm.expectRevert();
+        vm.expectPartialRevert(ITokenPool.Unauthorized.selector);
         ethPool.setChainRateLimiterConfig(
             BSC_SELECTOR,
             RateLimiter.Config({isEnabled: true, capacity: 1 ether, rate: 1 ether}),
@@ -419,8 +423,10 @@ contract DeploymentE2ETest is Test {
         // Trust-model verification: after handoff the multisig CAN call
         // setRebalancer + withdrawLiquidity (designed Chainlink CCT pattern).
         // Sanity-check: bscTokenOwner cannot, multisig can.
+        // SECURITY: TEST-3 — `setRebalancer` is `onlyOwner`; CCIP's ConfirmedOwner reverts
+        // with the bytes message "Only callable by owner".
         vm.prank(bscTokenOwner);
-        vm.expectRevert(); // owner-only
+        vm.expectRevert(bytes("Only callable by owner"));
         bscPool.setRebalancer(bscTokenOwner);
 
         vm.prank(multisig);

@@ -16,6 +16,17 @@ import {Deployments} from "./Deployments.sol";
 ///   rate     = 10 ON/sec    (~864,000 ON / day)
 ///
 /// Re-tune via `setChainRateLimiterConfig` on the pool after launch.
+///
+/// SECURITY: CCIP-2 + CCIP-3 — design notes:
+///   - Symmetric capacity/rate in both directions is intentional. The bridge is
+///     directionally asymmetric (ETH has the hard `MAX_CCIP_MINTED = 100M` cap; BSC has
+///     no equivalent wON-side cap), but ETH-inbound is the side the cap already protects,
+///     so symmetric rate limits keep the operator surface predictable. Confirm before
+///     mainnet broadcast — if you want ETH-inbound throttled tighter than BSC-outbound,
+///     adjust these constants before running script 05.
+///   - The 100k cap : 10/sec rate ratio = ~2.8h to refill from zero. A single user can
+///     saturate the bucket for that window. Reduce capacity (or raise rate) if a tighter
+///     refill window is desired.
 contract ApplyChainUpdates is Script, Helper {
     uint128 internal constant DEFAULT_CAPACITY = 100_000 ether;
     uint128 internal constant DEFAULT_RATE = 10 ether;

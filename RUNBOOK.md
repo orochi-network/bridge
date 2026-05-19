@@ -183,6 +183,24 @@ Queue these transactions on the multisig:
 | BSC   | `pool.acceptOwnership()` on the LockReleaseTokenPool |
 | BSC   | `registry.acceptAdminRole(ON_BSC)` on TokenAdminRegistry |
 
+**Verify each transaction before signing** (SECURITY: OPS-10). Each of these accepts moves
+custody-grade authority, especially the BSC `pool.acceptOwnership` (controls `setRebalancer`
+→ `withdrawLiquidity` over the entire locked-ON reserve). Before any signer signs:
+
+1. Confirm the **target address** in the Safe UI's transaction preview matches the address
+   recorded in `deployments/<chainId>.json` (`pool`, `wrappedON`) on the corresponding chain.
+2. Use the Safe UI's **built-in simulation** (or [Tenderly](https://tenderly.co)) to
+   simulate each transaction. Look for the expected state changes:
+   `acceptOwnership` flips `owner` to the multisig; `acceptAdminRole` flips the registry
+   administrator; `acceptCCIPAdmin` flips `getCCIPAdmin()` to the multisig.
+3. After all accepts have executed, run `MULTISIG=0x.. make verify-eth RPC=eth` and the
+   BSC equivalent to programmatically confirm the post-state.
+
+A typo'd target won't be caught by the multisig threshold itself — `acceptOwnership` on
+the wrong pool just reverts ("not pending owner") and burns gas, but a structurally
+similar surface (e.g. another deployed pool the deployer accidentally referenced) would
+silently land. Simulation is the only step that catches this before signatures.
+
 ### 3.3 Re-verify with `MULTISIG` env var set
 
 ```bash
@@ -276,7 +294,16 @@ This means the multisig effectively has custody of the BSC-side locked-ON reserv
 | `RoleGranted(MINTER_ROLE, *)` where grantee ≠ ETH pool | wON | **Critical** |
 | `RoleGranted(BURNER_ROLE, *)` where grantee ≠ ETH pool | wON | **Critical** |
 | `CCIPAdminTransferProposed` / `CCIPAdminTransferred` | wON | High |
+| `CCIPMinted` cumulative > BSC `IERC20(ON).balanceOf(LockReleaseTokenPool)` | wON ↔ BSC pool | **Critical** |
+| `CCIPAdminProposalCancelled` | wON | High |
 | Outbound / inbound rate-limit bucket exhausted | both pools | Medium |
+
+**Note on `ccipMintedSupply` monitoring** (SECURITY: WON-3 / CCIP-7). The contract-side
+`ccipMintedSupply` counter approximates BSC locked balance but saturating-decrements on
+burns of deposit-backed wON, so it can drift below the true BSC exposure. Source the
+cross-chain risk signal from `IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` as the
+authoritative locked-balance read; treat `ccipMintedSupply` as a useful local indicator
+but not the ground truth for "how much value is in flight."
 
 Source the events in `lib/ccip/contracts/src/v0.8/ccip/pools/LockReleaseTokenPool.sol` and `src/WrappedON.sol`. Page the on-call rotation on Critical lines.
 

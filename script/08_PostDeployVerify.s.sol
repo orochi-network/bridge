@@ -29,6 +29,7 @@ contract PostDeployVerify is Script, Helper {
     error RoleMissing(string role, address account);
     error RoleNotRenounced(string role, address account);
     error PoolOwnershipNotHandedOff(address pool, address owner, address expectedMultisig);
+    error UnexpectedRebalancer(address pool, address rebalancer);
 
     function run() external view {
         NetworkConfig memory local = getConfig(block.chainid);
@@ -44,6 +45,11 @@ contract PostDeployVerify is Script, Helper {
         _requireSet(remotePool, "remotePool (run script 02 on the remote chain first)");
         address remoteToken = _remoteTokenAddress(remote);
         _requireSet(remoteToken, "remoteToken");
+        // SECURITY: DEP-4 — surface unfilled Helper addresses as MissingAddress here
+        // instead of bubbling up later as a confusing `RouterMismatch(0x0, …)`.
+        _requireSet(local.tokenAdminRegistry, "tokenAdminRegistry");
+        _requireSet(local.router, "router");
+        _requireSet(local.rmnProxy, "rmnProxy");
 
         console.log("=== Post-deploy verification -- chainId %d ===", block.chainid);
         console.log("  localPool   =", localPool);
@@ -58,6 +64,13 @@ contract PostDeployVerify is Script, Helper {
 
         if (block.chainid == 1 || block.chainid == 11_155_111) {
             _checkWonRoles(WrappedON(localToken), localPool);
+        } else {
+            // BSC side: assert the LockReleaseTokenPool's rebalancer slot is zero. Any
+            // non-zero rebalancer is a custody-grade event under the Chainlink CCT trust
+            // model (`setRebalancer` → `withdrawLiquidity` can drain the locked-ON
+            // reserve). Catch accidental/malicious sets at deploy-time and on every
+            // verify run. SECURITY: CCIP-1.
+            _checkBscRebalancer(localPool);
         }
 
         // Optional: check ownership handoff if MULTISIG env var is set.
@@ -162,6 +175,21 @@ contract PostDeployVerify is Script, Helper {
 
         console.log("[ok] wON.hasRole(MINTER_ROLE, %s)", pool);
         console.log("[ok] wON.hasRole(BURNER_ROLE, %s)", pool);
+    }
+
+    /// @dev BSC-only. Asserts the `LockReleaseTokenPool`'s rebalancer slot is empty.
+    ///      Non-zero means custody of the locked-ON reserve has been delegated and can be
+    ///      drained via `withdrawLiquidity`. The trust model intentionally lets the multisig
+    ///      do this post-handoff, but it should NEVER be set silently — every change must
+    ///      come from an audited multisig action. SECURITY: CCIP-1.
+    function _checkBscRebalancer(address pool) internal view {
+        (bool ok, bytes memory data) = pool.staticcall(abi.encodeWithSignature("getRebalancer()"));
+        require(ok && data.length == 32, "pool.getRebalancer() call failed");
+        address rebalancer = abi.decode(data, (address));
+        if (rebalancer != address(0)) {
+            revert UnexpectedRebalancer(pool, rebalancer);
+        }
+        console.log("[ok] BSC pool.getRebalancer() == address(0)");
     }
 
     function _checkOwnershipHandoff(address pool, address multisig) internal view {

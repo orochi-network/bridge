@@ -232,6 +232,8 @@ contract PoolRoundtripTest is Test {
 
     function test_OnlyOnRampCanLock() public {
         // Random caller is not the registered OnRamp — pool must reject.
+        // SECURITY: TEST-3 — assert the typed CCIP error so a regression in the
+        // `_validateLockOrBurn` access-control path is caught.
         vm.prank(alice);
         onBsc.transfer(address(bscPool), 1 ether);
 
@@ -243,7 +245,7 @@ contract PoolRoundtripTest is Test {
             localToken: address(onBsc)
         });
         vm.prank(alice);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(TokenPool.CallerIsNotARampOnRouter.selector, alice));
         bscPool.lockOrBurn(inLock);
     }
 
@@ -302,13 +304,51 @@ contract PoolRoundtripTest is Test {
             localToken: address(onBsc)
         });
         vm.prank(bscOnRamp);
-        vm.expectRevert(); // RateLimiter.TokenRateLimitReached(minWait, available, token)
+        // SECURITY: TEST-3 — `expectPartialRevert(selector)` matches by 4-byte prefix so
+        // the time-dependent `minWait` arg doesn't have to be predicted.
+        vm.expectPartialRevert(RateLimiter.TokenRateLimitReached.selector);
         bscPool.lockOrBurn(inLock2);
 
         // Advance enough time to refill 1 ether at the 10-ether-per-second rate.
         vm.warp(block.timestamp + 1);
         vm.prank(bscOnRamp);
         bscPool.lockOrBurn(inLock2); // must succeed after refill
+    }
+
+    /// @notice SECURITY: TEST-4 — fuzz the bucket refill math across drain amounts and
+    ///         elapsed times. The token-bucket arithmetic is `tokens += elapsed * rate`
+    ///         capped at `capacity`. Drain by a fuzzed amount, advance a fuzzed time,
+    ///         then assert the available headroom matches `min(drainAmt, elapsed * rate)`.
+    ///         Reaches off-by-one / rounding regimes the spot-check at
+    ///         `test_RateLimitBucketRefillsOverTime` can't.
+    function testFuzz_RateLimitRefillMath(uint128 drainAmt, uint40 elapsedSeconds) public {
+        uint128 capacity = 100_000 ether;
+        uint128 rate = 10 ether;
+        drainAmt = uint128(bound(uint256(drainAmt), 1, capacity));
+        elapsedSeconds = uint40(bound(uint256(elapsedSeconds), 0, 100_000));
+
+        // Drain the outbound bucket by `drainAmt`.
+        vm.prank(alice);
+        onBsc.transfer(address(bscPool), drainAmt);
+        Pool.LockOrBurnInV1 memory inLock = Pool.LockOrBurnInV1({
+            receiver: abi.encode(alice),
+            remoteChainSelector: ETH_SELECTOR,
+            originalSender: alice,
+            amount: drainAmt,
+            localToken: address(onBsc)
+        });
+        vm.prank(bscOnRamp);
+        bscPool.lockOrBurn(inLock);
+
+        // After the drain, the bucket's `tokens` equals `capacity - drainAmt`. Warp.
+        vm.warp(block.timestamp + elapsedSeconds);
+
+        RateLimiter.TokenBucket memory bucket = bscPool.getCurrentOutboundRateLimiterState(ETH_SELECTOR);
+        uint256 expected = uint256(capacity) - uint256(drainAmt) + uint256(elapsedSeconds) * uint256(rate);
+        if (expected > capacity) {
+            expected = capacity;
+        }
+        assertEq(uint256(bucket.tokens), expected, "bucket refill math drifted");
     }
 
     /// @notice Outbound-rate-limit disabled means transfers above capacity flow through —

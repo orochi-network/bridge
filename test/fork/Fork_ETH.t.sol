@@ -57,7 +57,12 @@ contract Fork_ETH is Test {
             vm.skip(true);
             return;
         }
-        vm.createSelectFork(rpc);
+        // SECURITY: TEST-1 — pin to a specific block by default so CCIP infra upgrades on
+        // live mainnet can't silently change test behaviour. Operators can override via
+        // ETH_FORK_BLOCK (e.g. to verify against a freshly observed registry). Update the
+        // default deliberately when CCIP-side state changes warrant it.
+        uint256 forkBlock = vm.envOr("ETH_FORK_BLOCK", uint256(22_000_000));
+        vm.createSelectFork(rpc, forkBlock);
 
         fakeRemoteBscPool = makeAddr("bscPoolPlaceholder");
 

@@ -60,7 +60,9 @@ contract Fork_BSC is Test {
             vm.skip(true);
             return;
         }
-        vm.createSelectFork(rpc);
+        // SECURITY: TEST-1 — pin to a specific block by default; override via BSC_FORK_BLOCK.
+        uint256 forkBlock = vm.envOr("BSC_FORK_BLOCK", uint256(50_000_000));
+        vm.createSelectFork(rpc, forkBlock);
 
         fakeRemoteEthPool = makeAddr("ethPoolPlaceholder");
 

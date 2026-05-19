@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.34;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
 import {IBurnMintERC20} from "@chainlink/contracts-ccip/shared/token/ERC20/IBurnMintERC20.sol";
 import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/ccip/interfaces/IGetCCIPAdmin.sol";
@@ -16,6 +19,34 @@ import {WrappedON} from "../src/WrappedON.sol";
 contract MockON is ERC20 {
     constructor() ERC20("Orochi Network", "ON") {
         _mint(msg.sender, 1_000_000 ether);
+    }
+}
+
+/// @dev Reentrancy probe — overrides `transferFrom` to call back into `WrappedON.deposit`.
+///      A real ON-like ERC20 wouldn't do this, but if a future deployment reuses WrappedON
+///      against a hook-bearing token the `nonReentrant` guard must hold. SECURITY: TEST-8.
+contract ReentrantMockON is ERC20 {
+    address public target;
+    bool internal reentered;
+
+    constructor() ERC20("Reentrant Mock ON", "rON") {
+        _mint(msg.sender, 1_000_000 ether);
+    }
+
+    function setTarget(address t) external {
+        target = t;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) public override returns (bool) {
+        bool ok = super.transferFrom(from, to, amount);
+        if (target != address(0) && !reentered) {
+            reentered = true;
+            // Attempt reentry into deposit; the wON contract's `nonReentrant` must reject.
+            (bool success,) = target.call(abi.encodeWithSignature("deposit(uint256)", 1));
+            require(!success, "reentry succeeded - nonReentrant guard missing");
+            reentered = false;
+        }
+        return ok;
     }
 }
 
@@ -118,6 +149,8 @@ contract WrappedONTest is Test {
     function test_WithdrawRevertsOnInsufficientWonBalance() public {
         // Reserve is non-zero (alice deposited), but bob holds zero wON.
         // The reserve check passes; _burn reverts with ERC20InsufficientBalance.
+        // SECURITY: TEST-9 — assert the typed OZ error so a refactor that reverts via a
+        // different path is caught.
         vm.startPrank(alice);
         on.approve(address(won), 100 ether);
         won.deposit(100 ether);
@@ -125,7 +158,7 @@ contract WrappedONTest is Test {
 
         address bob = makeAddr("bob");
         vm.prank(bob);
-        vm.expectRevert(); // OZ ERC20InsufficientBalance — bob has 0 wON
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, bob, 0, 1 ether));
         won.withdraw(1 ether);
     }
 
@@ -221,6 +254,7 @@ contract WrappedONTest is Test {
     }
 
     function test_BurnFromRevertsOnInsufficientAllowance() public {
+        // SECURITY: TEST-9 — assert the typed OZ error.
         vm.prank(pool);
         won.mint(alice, 10 ether);
 
@@ -228,7 +262,9 @@ contract WrappedONTest is Test {
         won.approve(pool, 3 ether);
 
         vm.prank(pool);
-        vm.expectRevert(); // OZ ERC20InsufficientAllowance
+        vm.expectRevert(
+            abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, pool, 3 ether, 5 ether)
+        );
         won.burnFrom(alice, 5 ether);
     }
 
@@ -377,6 +413,94 @@ contract WrappedONTest is Test {
 
     // ─── CCIP mint cap ────────────────────────────────────────────────────────
 
+    /// @notice WON-1: `mint(0)` must revert (mirrors the deposit/withdraw zero guards).
+    ///         Pool will never legitimately pass zero; the guard exists to suppress the
+    ///         Transfer(pool, account, 0) event a misbehaving pool would otherwise emit.
+    function test_MintRevertsOnZeroAmount() public {
+        vm.prank(pool);
+        vm.expectRevert(WrappedON.ZeroAmount.selector);
+        won.mint(alice, 0);
+    }
+
+    /// @notice WON-4: `mint` emits the named `CCIPMinted(account, amount, ccipMintedSupply)`
+    ///         event in addition to the inherited ERC20 `Transfer`, so indexers can
+    ///         distinguish CCIP inbound from deposit-backed mints.
+    function test_MintEmitsCCIPMinted() public {
+        vm.expectEmit(true, false, false, true);
+        emit WrappedON.CCIPMinted(alice, 5 ether, 5 ether);
+        vm.prank(pool);
+        won.mint(alice, 5 ether);
+    }
+
+    /// @notice WON-4: every burn entrypoint emits `CCIPBurned`.
+    function test_BurnEmitsCCIPBurned_SingleArg() public {
+        vm.prank(pool);
+        won.mint(pool, 5 ether);
+
+        vm.expectEmit(true, false, false, true);
+        emit WrappedON.CCIPBurned(pool, 3 ether, 2 ether);
+        vm.prank(pool);
+        won.burn(3 ether);
+    }
+
+    function test_BurnEmitsCCIPBurned_AddressOverload() public {
+        vm.prank(pool);
+        won.mint(alice, 5 ether);
+
+        vm.expectEmit(true, false, false, true);
+        emit WrappedON.CCIPBurned(alice, 2 ether, 3 ether);
+        vm.prank(pool);
+        won.burn(alice, 2 ether);
+    }
+
+    function test_BurnEmitsCCIPBurned_BurnFrom() public {
+        vm.prank(pool);
+        won.mint(alice, 5 ether);
+        vm.prank(alice);
+        won.approve(pool, 2 ether);
+
+        vm.expectEmit(true, false, false, true);
+        emit WrappedON.CCIPBurned(alice, 2 ether, 3 ether);
+        vm.prank(pool);
+        won.burnFrom(alice, 2 ether);
+    }
+
+    /// @notice WON-5: overwriting an in-flight pending CCIP admin with a DIFFERENT address
+    ///         emits `CCIPAdminProposalCancelled(prior)`.
+    function test_SetCCIPAdminEmitsCancellationWhenOverwritten() public {
+        address first = makeAddr("firstProposed");
+        address second = makeAddr("secondProposed");
+
+        vm.prank(admin);
+        won.setCCIPAdmin(first);
+        assertEq(won.pendingCCIPAdmin(), first);
+
+        vm.expectEmit(true, false, false, false);
+        emit WrappedON.CCIPAdminProposalCancelled(first);
+        vm.prank(admin);
+        won.setCCIPAdmin(second);
+        assertEq(won.pendingCCIPAdmin(), second);
+    }
+
+    /// @notice WON-5: re-proposing the SAME pending admin must NOT emit a cancellation
+    ///         (the slot ends up unchanged; suppressing the event keeps honest retries quiet).
+    function test_SetCCIPAdminRePropose_DoesNotEmitCancellation() public {
+        address proposed = makeAddr("proposed");
+
+        vm.startPrank(admin);
+        won.setCCIPAdmin(proposed);
+        // Record logs only for the second call.
+        vm.recordLogs();
+        won.setCCIPAdmin(proposed);
+        vm.stopPrank();
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 cancelTopic = keccak256("CCIPAdminProposalCancelled(address)");
+        for (uint256 i; i < logs.length; ++i) {
+            assertFalse(logs[i].topics[0] == cancelTopic, "must not emit cancellation on identical re-propose");
+        }
+    }
+
     function test_MintRevertsAtCCIPMintCap() public {
         uint256 cap = won.MAX_CCIP_MINTED();
         vm.prank(pool);
@@ -489,6 +613,29 @@ contract WrappedONTest is Test {
 
     /// @dev Per PR #19 review (bao-ninh #5): constructor must reject ON tokens with
     ///      non-18 decimals (1:1 wrap accounting only holds at matching decimals).
+    /// @notice SECURITY: TEST-8 — `nonReentrant` on `deposit` must reject a reentry
+    ///         triggered by a hook-bearing ERC20's `transferFrom`. The current canonical
+    ///         ON is plain ERC20 with no hooks; this test pins the behaviour against
+    ///         future redeployments against tokens that do hook.
+    function test_DepositReentrancyGuardFires() public {
+        ReentrantMockON rOn = new ReentrantMockON();
+        WrappedON rWon = new WrappedON(IERC20(address(rOn)), admin);
+        rOn.setTarget(address(rWon));
+
+        // Mock token mints supply to test contract; approve from here as the depositor.
+        rOn.approve(address(rWon), 10 ether);
+
+        // The mock's `transferFrom` will call back into `rWon.deposit(1)` mid-execution.
+        // The nonReentrant guard must reject the inner call. The mock then `require(!success)`s,
+        // which surfaces here as a revert from the outer deposit.
+        // If the guard were removed, the inner call would succeed and the require would revert
+        // with "reentry succeeded …"; if the guard is intact, the inner call reverts with
+        // `ReentrancyGuardReentrantCall` and the mock's super.transferFrom completed fine —
+        // so the OUTER deposit must complete normally.
+        rWon.deposit(5 ether);
+        assertEq(rWon.balanceOf(address(this)), 5 ether, "outer deposit must complete");
+    }
+
     function test_ConstructorRevertsOnDecimalsMismatch() public {
         MockON6 on6 = new MockON6();
         vm.expectRevert(abi.encodeWithSelector(WrappedON.DecimalsMismatch.selector, 18, 6));
@@ -499,6 +646,7 @@ contract WrappedONTest is Test {
 
     function test_SupportsInterfacePositiveAndNegative() public view {
         assertTrue(won.supportsInterface(type(IERC20).interfaceId));
+        assertTrue(won.supportsInterface(type(IERC20Metadata).interfaceId), "WON-7: must advertise IERC20Metadata");
         assertTrue(won.supportsInterface(type(IBurnMintERC20).interfaceId));
         assertTrue(won.supportsInterface(type(IGetCCIPAdmin).interfaceId));
         assertTrue(won.supportsInterface(type(IAccessControl).interfaceId));

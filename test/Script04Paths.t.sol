@@ -169,11 +169,13 @@ contract Script04PathsTest is Test {
     ///         or AccessControl fallback, the script falls through to the final revert.
     ///         Exercises that the try/catch dispatch CHECKS each branch's condition rather
     ///         than just falling through on revert.
+    ///         SECURITY: TEST-3 — typed selector check (full payload tested in the
+    ///         NeitherPath sibling).
     function test_RegisterAdmin_GetCCIPAdminMismatchFallsThrough() public {
         AlwaysOtherCCIPAdmin token = new AlwaysOtherCCIPAdmin();
 
         vm.prank(broadcaster);
-        vm.expectRevert(); // CannotResolveCCIPAdmin
+        vm.expectPartialRevert(RegisterAdminAndPool.CannotResolveCCIPAdmin.selector);
         harness.exposeRegisterAdmin(address(token), address(module), broadcaster);
     }
 

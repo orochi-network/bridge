@@ -25,6 +25,21 @@ remappings = [
 verbosity = 3
 fuzz = {runs = 1_000}
 
+# Invariant configuration — explicit override of Foundry defaults (256 runs / depth 15 /
+# fail_on_revert = false). `fail_on_revert = true` ensures broken handler logic surfaces
+# rather than silently degrading coverage. `depth = 50` is enough to reach interleaved
+# `adversarialPoolBurn`/`ccipMint`/`ccipBurn` sequences that exercise the saturating-
+# decrement branch. SECURITY: TEST-2 + OPS-4.
+[invariant]
+runs = 256
+depth = 50
+fail_on_revert = true
+
+[profile.ci.invariant]
+runs = 500
+depth = 100
+fail_on_revert = true
+
 [fmt]
 line_length = 120
 tab_width = 4

@@ -26,8 +26,15 @@ library Deployments {
     }
 
     /// @notice Like `readAddress` but returns `address(0)` if the deployment file is missing
-    ///         OR the key is absent. Used by scripts 01 / 02 to skip re-deploying an artifact
-    ///         that already has an entry on this chain (round-3 review [6]).
+    ///         OR the key is absent OR the file is corrupt. Used by scripts 01 / 02 to skip
+    ///         re-deploying an artifact that already has an entry on this chain (round-3
+    ///         review [6]).
+    ///
+    ///         SECURITY: DEP-7 — `vm.keyExistsJson` reverts on malformed JSON before the
+    ///         friendly missing-key branch can fire. Wrap it in try/catch so a corrupt
+    ///         `deployments/<chainId>.json` (e.g. a script broadcast killed mid-write)
+    ///         surfaces as `address(0)` and routes through the calling script's
+    ///         `_requireSet(…)` diagnostic instead of a low-level Foundry panic.
     function tryReadAddress(uint256 chainId, string memory key) internal view returns (address) {
         string memory file = path(chainId);
         if (!vm.exists(file)) {
@@ -35,10 +42,20 @@ library Deployments {
         }
         string memory json = vm.readFile(file);
         string memory jsonPath = string.concat(".", key);
-        if (!vm.keyExistsJson(json, jsonPath)) {
+        try vm.keyExistsJson(json, jsonPath) returns (bool exists) {
+            if (!exists) {
+                return address(0);
+            }
+        } catch {
+            // Malformed JSON. Return zero so the caller's `_requireSet` produces a clear
+            // diagnostic. Recovery: delete `deployments/<chainId>.json` and re-run.
             return address(0);
         }
-        return vm.parseJsonAddress(json, jsonPath);
+        try vm.parseJsonAddress(json, jsonPath) returns (address a) {
+            return a;
+        } catch {
+            return address(0);
+        }
     }
 
     /// @notice Writes a single key into the deployment JSON without clobbering existing keys.

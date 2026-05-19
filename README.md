@@ -81,6 +81,8 @@ BSCSCAN_API_KEY=...
 
 Then **edit `script/Helper.sol`** and replace the `address(0)` placeholders with the live CCIP infrastructure addresses for each chain you'll deploy on. Get them from the official [CCIP directory](https://docs.chain.link/ccip/directory). Scripts call `_requireSet` on every address they consume, so a missed placeholder fails fast with a `MissingAddress` revert before any broadcast.
 
+> **Mainnet key handling** (SECURITY: OPS-1). The default `make deploy-*` targets pass `--private-key $(DEPLOYER_PK)` on the CLI, which makes the key visible in `ps aux` and shell history. For mainnet broadcasts, use Foundry's encrypted keystore instead: `cast wallet import deployer --interactive`, then run forge scripts with `--account deployer` rather than `--private-key`. See `RUNBOOK.md §0.3` for the full procedure. Treat this as mandatory on mainnet; the deployer EOA holds critical authority throughout the handoff window.
+
 ### 5. Deploy — testnet first (Sepolia ⇄ BSC Testnet)
 
 Always validate on testnet before mainnet. The sequence is symmetric, except wON only exists on the Ethereum side (Sepolia).
@@ -96,6 +98,8 @@ make deploy-bsc RPC=bsc_testnet
 ```
 
 Each script writes its outputs to `deployments/<chainId>.json` (key: `wrappedON`, `pool`). Subsequent scripts read from the same file, so order matters within a chain but the two chains can be deployed in either order.
+
+> **Recovery after mid-sequence failure** (SECURITY: OPS-5). If any of the chained scripts in `make deploy-eth` / `make deploy-bsc` fails (RPC timeout, nonce collision, gas exhaustion), simply re-run the same `make` target. Every script is idempotent: 01/02 skip when their artifact entry exists; 03 skips role grants that already landed; 04 probes the registry state before broadcasting; 05 skips wiring that's already in place. Do NOT manually re-run individual scripts unless you have confirmed the deployment artifact JSON is consistent with on-chain state — manual recovery is the most common path to inconsistent state.
 
 ### 6. Verify wiring is correct
 

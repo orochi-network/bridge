@@ -164,6 +164,40 @@ contract WrappedONHandler is Test {
         vm.prank(POOL);
         WON.burn(amount);
     }
+
+    /// @dev SECURITY: TEST-6 — `burnFrom` exercises the allowance-respecting burn path,
+    ///      which independently calls `_decrementCcipMinted`. Without coverage here the
+    ///      invariant engine never reaches `WrappedON.burnFrom` in stateful sequences.
+    function ccipBurnFrom(uint256 actorSeed, uint256 amount) external {
+        address user = _actor(actorSeed);
+        uint256 userBal = WON.balanceOf(user);
+        if (userBal == 0 || bscLocked == 0) {
+            return;
+        }
+        uint256 capAmt = userBal < bscLocked ? userBal : bscLocked;
+        amount = _boundAmt(amount, capAmt);
+        // User approves the pool to spend `amount` wON, then the pool burns via burnFrom.
+        vm.prank(user);
+        WON.approve(POOL, amount);
+        bscLocked -= amount;
+        vm.prank(POOL);
+        WON.burnFrom(user, amount);
+    }
+
+    /// @dev SECURITY: TEST-6 — exercises the `burn(address, uint256)` overload (no
+    ///      allowance check) so its `_decrementCcipMinted` path is fuzzer-reachable.
+    function ccipBurnAddress(uint256 actorSeed, uint256 amount) external {
+        address user = _actor(actorSeed);
+        uint256 userBal = WON.balanceOf(user);
+        if (userBal == 0 || bscLocked == 0) {
+            return;
+        }
+        uint256 capAmt = userBal < bscLocked ? userBal : bscLocked;
+        amount = _boundAmt(amount, capAmt);
+        bscLocked -= amount;
+        vm.prank(POOL);
+        WON.burn(user, amount);
+    }
 }
 
 contract WrappedONInvariantTest is StdInvariant, Test {
@@ -185,14 +219,17 @@ contract WrappedONInvariantTest is StdInvariant, Test {
         handler = new WrappedONHandler(won, onToken, pool);
 
         targetContract(address(handler));
-        // Restrict fuzzer to the handler's five operations (four honest paths + one
-        // adversarial pool-burn path that walks the cap-bypass scenario).
-        bytes4[] memory selectors = new bytes4[](5);
+        // Restrict fuzzer to the handler's operations. Honest paths + adversarial burn +
+        // burnFrom / burn(address,uint256) coverage (TEST-6 — every burn overload's
+        // `_decrementCcipMinted` branch is fuzzer-reachable).
+        bytes4[] memory selectors = new bytes4[](7);
         selectors[0] = WrappedONHandler.deposit.selector;
         selectors[1] = WrappedONHandler.withdraw.selector;
         selectors[2] = WrappedONHandler.ccipMint.selector;
         selectors[3] = WrappedONHandler.ccipBurn.selector;
         selectors[4] = WrappedONHandler.adversarialPoolBurn.selector;
+        selectors[5] = WrappedONHandler.ccipBurnFrom.selector;
+        selectors[6] = WrappedONHandler.ccipBurnAddress.selector;
         targetSelector(StdInvariant.FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 

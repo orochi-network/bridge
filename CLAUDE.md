@@ -96,7 +96,7 @@ Everything goes through the `Makefile`. The full sequence is documented in `RUNB
 ```bash
 make install                                             # submodules + patch-pragmas
 forge build
-forge test -vvv --no-match-path "test/fork/**"          # 102 mock-based tests (no RPC needed)
+make test                                                # mock-based suite; fork tests self-skip when ETH_RPC/BSC_RPC unset
 make test-fork ETH_RPC=<url> BSC_RPC=<url>              # 9 mainnet fork tests
 make test-unit                                           # WrappedON.t.sol only
 make test-e2e                                            # PoolRoundtrip + DeploymentE2E only
@@ -114,7 +114,7 @@ Final step on both chains: transfer pool `Ownable` ownership and wON `DEFAULT_AD
 - BSC ON token CCIP-admin hook: confirm whether `0x0e4F6209eD984b21EDEA43acE6e09559eD051D48` exposes `getCCIPAdmin`, is `Ownable`, or uses OZ `AccessControl.DEFAULT_ADMIN_ROLE`. `script/04_RegisterAdminAndPool.s.sol` probes all three paths (with the AccessControl path routing through a local interface for the 1.6.0 registry on prod), then reverts with a clear instruction if none match. Resolve on a private fork before mainnet rollout (audit H-4).
 - **CCIP infrastructure addresses in `script/Helper.sol` are intentionally `address(0)` placeholders.** Fill them in from https://docs.chain.link/ccip/directory before broadcasting. Scripts call `_requireSet` on every address they consume.
 - ~~Test coverage gaps~~ — **closed**. All 8 previously tracked gaps are now covered (reserve-invariant stateful fuzz, renounce-before-accept negative, rate-limit exhaustion/refill, script 04 admin-dispatch on all four paths, BSC-side ownership handoff, property fuzz on deposit + cap boundary, fork tests assert non-zero rate/capacity, AccessControl v1.6 success path via `MockRegistryModuleV16`).
-- **Security review (`SECURITY.md`)**: 41 findings — 6 HIGH must close pre-mainnet (`DEP-1`, `CCIP-1`, `TEST-1`, `TEST-2`, `OPS-1`, `OPS-2`); 12 MEDIUM should be triaged. See SECURITY.md for IDs and recommendations.
+- **Security review (`SECURITY.md`)**: post 2026-05-19 remediation pass — all six originally HIGH findings (`DEP-1`, `CCIP-1`, `TEST-1`, `TEST-2`, `OPS-1`, `OPS-2`) are FIXED; only `TEST-7` and `OPS-8` remain DEFERRED (both LOW). See SECURITY.md for per-finding status.
 
 ## Reference
 

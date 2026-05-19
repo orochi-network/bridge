@@ -113,7 +113,9 @@ verify-bsc:
 	@test -n "$(RPC)" || (echo "RPC=bsc_testnet|bsc required"; exit 1)
 	forge script script/08_PostDeployVerify.s.sol --rpc-url $(RPC)
 
-handoff:
+# SECURITY: DEP-2 — gate handoff and renounce on precheck-helper to surface unfilled
+# Helper placeholders BEFORE the deployer-EOA broadcast moves authority around.
+handoff: precheck-helper
 	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
 	@test -n "$(RPC)"         || (echo "RPC required"; exit 1)
 	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
@@ -134,18 +136,28 @@ handoff-all:
 	$(MAKE) handoff MULTISIG=$(MULTISIG) RPC=$(BSC_RPC)
 
 # Final renounce — only after multisig has accepted everything on both chains.
-renounce:
+renounce: precheck-helper
 	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
 	@test -n "$(RPC)"         || (echo "RPC required"; exit 1)
 	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
 	MULTISIG=$(MULTISIG) forge script script/06_TransferOwnership.s.sol:RenounceDeployerAdmin \
 	    --rpc-url $(RPC) $(DEPLOY_FLAGS) --sig "run()"
 
+# SECURITY: OPS-2 — post-handoff, the deployer EOA is neither pool owner nor rate-limit
+# admin, so `--private-key $(DEPLOYER_PK)` would broadcast a tx that reverts on `onlyOwner`.
+# Operators must supply a caller authorised at the time of the call:
+#   - pre-handoff   : CALLER_FLAGS unset → falls back to DEPLOYER_PK (current behaviour).
+#   - post-handoff  : CALLER_FLAGS='--account multisig-signer' (or an encrypted keystore
+#                     for the delegated `rateLimitAdmin`). The multisig itself queues this
+#                     call via the Safe UI; this Makefile target is for the delegated
+#                     hot-key path described in RUNBOOK §4.1.1.
 update-limits:
 	@test -n "$(RPC)"               || (echo "RPC required"; exit 1)
-	@test -n "$(DEPLOYER_PK)"       || (echo "DEPLOYER_PK env var required"; exit 1)
 	@test -n "$(OUTBOUND_CAPACITY)" || (echo "OUTBOUND_CAPACITY required"; exit 1)
 	@test -n "$(OUTBOUND_RATE)"     || (echo "OUTBOUND_RATE required"; exit 1)
 	@test -n "$(INBOUND_CAPACITY)"  || (echo "INBOUND_CAPACITY required"; exit 1)
 	@test -n "$(INBOUND_RATE)"      || (echo "INBOUND_RATE required"; exit 1)
-	forge script script/07_UpdateRateLimits.s.sol --rpc-url $(RPC) $(DEPLOY_FLAGS)
+	@test -n "$(CALLER_FLAGS)$(DEPLOYER_PK)" || \
+	    (echo "Set CALLER_FLAGS=--account ... (post-handoff) OR DEPLOYER_PK (pre-handoff)"; exit 1)
+	forge script script/07_UpdateRateLimits.s.sol --rpc-url $(RPC) --broadcast \
+	    $(if $(CALLER_FLAGS),$(CALLER_FLAGS),--private-key $(DEPLOYER_PK))

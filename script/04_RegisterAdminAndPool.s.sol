@@ -23,6 +23,14 @@ interface IAccessControlRead {
     function hasRole(bytes32 role, address account) external view returns (bool);
 }
 
+interface ITokenAdminRegistryConfig {
+    // 96-byte static struct {administrator, pendingAdministrator, tokenPool}.
+    function getTokenConfig(address token)
+        external
+        view
+        returns (address administrator, address pendingAdministrator, address tokenPool);
+}
+
 /// @dev The deployed `RegistryModuleOwnerCustom` on Ethereum and BSC mainnet is at version
 /// 1.6.0, which exposes `registerAccessControlDefaultAdmin` for tokens that use OZ
 /// `AccessControl.DEFAULT_ADMIN_ROLE`. The vendored ABI at v2.17.0-ccip1.5.16 only ships the
@@ -63,10 +71,35 @@ contract RegisterAdminAndPool is Script, Helper {
 
         address broadcaster = msg.sender;
 
+        // Idempotency probe: if a previous run already registered the broadcaster and
+        // accepted the admin role, re-running `_registerAdmin`/`acceptAdminRole` would
+        // revert (`AlreadyRegistered` / `OnlyPendingAdministrator`), blocking a partial-
+        // failure retry. Probe the registry state first and skip the already-done steps.
+        // SECURITY: DEP-1.
+        (address regAdmin, address regPending, address regPool) =
+            ITokenAdminRegistryConfig(cfg.tokenAdminRegistry).getTokenConfig(token);
+
         vm.startBroadcast();
-        _registerAdmin(token, cfg.registryModuleOwnerCustom, broadcaster);
-        TokenAdminRegistry(cfg.tokenAdminRegistry).acceptAdminRole(token);
-        TokenAdminRegistry(cfg.tokenAdminRegistry).setPool(token, pool);
+        if (regAdmin == broadcaster) {
+            // Both registration and acceptance already complete; only ensure setPool lands.
+            console.log("Admin already accepted for token %s - skipping register/accept", token);
+        } else if (regPending == broadcaster) {
+            // Registration already proposed (broadcaster is the pending admin); only the
+            // `acceptAdminRole` + `setPool` calls need to execute.
+            console.log("Admin already proposed for token %s - skipping register, accepting now", token);
+            TokenAdminRegistry(cfg.tokenAdminRegistry).acceptAdminRole(token);
+        } else {
+            _registerAdmin(token, cfg.registryModuleOwnerCustom, broadcaster);
+            TokenAdminRegistry(cfg.tokenAdminRegistry).acceptAdminRole(token);
+        }
+        // `setPool` is owner-only but idempotent at the protocol level: writing the same
+        // pool twice is a no-op. Always call it so a partial run that registered the admin
+        // but never reached setPool can complete cleanly.
+        if (regPool != pool) {
+            TokenAdminRegistry(cfg.tokenAdminRegistry).setPool(token, pool);
+        } else {
+            console.log("Pool already wired in registry to %s - skipping setPool", pool);
+        }
         vm.stopBroadcast();
 
         console.log("Registered admin + pool for token %s -> pool %s", token, pool);

@@ -32,6 +32,16 @@ import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/ccip/interfaces/IGetCCIPA
 /// wON is fungible. Saturating-subtract on burn handles deposit-backed wON being bridged
 /// out; pool lock/release accounting nets out regardless.
 ///
+/// CAP REPLENISHMENT (SECURITY: CCIP-7): the cap is a live BSC-balance approximation, NOT
+/// a lifetime CCIP-mint bound. Deposit-backed wON cycled OUT through the bridge will burn
+/// and saturating-decrement `ccipMintedSupply` toward 0 even though the underlying mint
+/// was never CCIP-sourced — refilling cap headroom for subsequent CCIP inbound mints. The
+/// safety invariant (`lockedON_BSC + reserveON_ETH >= totalSupply(wON)`) is preserved
+/// regardless, because every CCIP mint here still pairs a BSC lock at the cap-checked
+/// moment, and burns reverse both sides in lockstep. Monitor `ccipMintedSupply` AS A
+/// FRACTION OF CURRENT BSC LOCKED BALANCE — not as a fraction of MAX_CCIP_MINTED — for an
+/// accurate live-exposure read.
+///
 /// Safety invariant (mechanical): `lockedON_BSC + reserveON_ETH >= totalSupply(wON)`.
 ///
 /// @dev `IBurnMintERC20` is NOT inherited — it brings the CCIP-vendored `IERC20`, which
@@ -65,8 +75,21 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
 
     event Wrapped(address indexed account, uint256 amount);
     event Unwrapped(address indexed account, uint256 amount);
+    /// @notice Emitted by the CCIP `releaseOrMint` path. Lets indexers distinguish CCIP-inbound
+    ///         mints from `deposit`-wrap mints (which emit `Wrapped`). Reports the post-call
+    ///         `ccipMintedSupply` so monitors don't need a second `eth_call`. SECURITY: WON-4.
+    event CCIPMinted(address indexed account, uint256 amount, uint256 ccipMintedSupply);
+    /// @notice Emitted by every CCIP burn entrypoint. Sibling to `CCIPMinted` — gives indexers
+    ///         a named event in addition to the inherited ERC20 `Transfer(account, 0, amount)`.
+    ///         SECURITY: WON-4.
+    event CCIPBurned(address indexed account, uint256 amount, uint256 ccipMintedSupply);
     event CCIPAdminTransferProposed(address indexed currentAdmin, address indexed proposed);
     event CCIPAdminTransferred(address indexed previousAdmin, address indexed newAdmin);
+    /// @notice Emitted when an in-flight `setCCIPAdmin` proposal is overwritten by a new
+    ///         proposal to a different address. Gives the previously proposed party an
+    ///         unambiguous signal that any queued `acceptCCIPAdmin` tx will revert.
+    ///         SECURITY: WON-5.
+    event CCIPAdminProposalCancelled(address indexed cancelled);
 
     error InsufficientReserve(uint256 requested, uint256 available);
     error OnlyCCIPAdmin();
@@ -144,12 +167,19 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     ///         `MAX_CCIP_MINTED`; cap tracked via `ccipMintedSupply` so deposit-backed wON
     ///         does not consume it.
     function mint(address account, uint256 amount) external onlyRole(MINTER_ROLE) {
+        // Zero-amount mints emit a Transfer(pool, account, 0) log and otherwise no-op,
+        // matching the asymmetry the `deposit`/`withdraw` guards exist to prevent.
+        // SECURITY: WON-1.
+        if (amount == 0) {
+            revert ZeroAmount();
+        }
         uint256 wouldBe = ccipMintedSupply + amount;
         if (wouldBe > MAX_CCIP_MINTED) {
             revert CCIPMintCapExceeded(MAX_CCIP_MINTED, wouldBe);
         }
         ccipMintedSupply = wouldBe;
         _mint(account, amount);
+        emit CCIPMinted(account, amount, wouldBe);
     }
 
     /// @notice Burns from `msg.sender`. Called by `BurnMintTokenPool._burn` after the pool
@@ -157,6 +187,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     function burn(uint256 amount) external onlyRole(BURNER_ROLE) {
         _decrementCcipMinted(amount);
         _burn(msg.sender, amount);
+        emit CCIPBurned(msg.sender, amount, ccipMintedSupply);
     }
 
     /// @notice Burns from `account` without allowance check (matches `IBurnMintERC20`).
@@ -164,6 +195,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     function burn(address account, uint256 amount) external onlyRole(BURNER_ROLE) {
         _decrementCcipMinted(amount);
         _burn(account, amount);
+        emit CCIPBurned(account, amount, ccipMintedSupply);
     }
 
     /// @notice Allowance-respecting burn. For pool variants that go through `approve`.
@@ -171,6 +203,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         _spendAllowance(account, msg.sender, amount);
         _decrementCcipMinted(amount);
         _burn(account, amount);
+        emit CCIPBurned(account, amount, ccipMintedSupply);
     }
 
     // ─── IGetCCIPAdmin (two-step) ─────────────────────────────────────────────
@@ -200,6 +233,14 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         if (newAdmin == s_ccipAdmin || newAdmin == address(this)) {
             revert InvalidCCIPAdmin();
         }
+        // Emit a named cancellation event when overwriting an in-flight proposal to a
+        // DIFFERENT address. Re-proposing the same pending admin is a no-op for the
+        // pending slot, so suppressing the event there avoids spurious cancellation
+        // signals during honest retry flows. SECURITY: WON-5.
+        address prev = s_pendingCcipAdmin;
+        if (prev != address(0) && prev != newAdmin) {
+            emit CCIPAdminProposalCancelled(prev);
+        }
         s_pendingCcipAdmin = newAdmin;
         emit CCIPAdminTransferProposed(s_ccipAdmin, newAdmin);
     }
@@ -220,9 +261,9 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     /// @notice ERC-165 advertisement. Reports `IBurnMintERC20` despite no formal inheritance
     ///         (selectors are reproduced manually — see contract NatSpec).
     function supportsInterface(bytes4 interfaceId) public view override(AccessControl) returns (bool) {
-        return interfaceId == type(IERC20).interfaceId || interfaceId == type(IBurnMintERC20).interfaceId
-            || interfaceId == type(IGetCCIPAdmin).interfaceId || interfaceId == type(IAccessControl).interfaceId
-            || interfaceId == type(IERC165).interfaceId;
+        return interfaceId == type(IERC20).interfaceId || interfaceId == type(IERC20Metadata).interfaceId
+            || interfaceId == type(IBurnMintERC20).interfaceId || interfaceId == type(IGetCCIPAdmin).interfaceId
+            || interfaceId == type(IAccessControl).interfaceId || interfaceId == type(IERC165).interfaceId;
     }
 
     // ─── Internal ─────────────────────────────────────────────────────────────
