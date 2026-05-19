@@ -23,8 +23,12 @@ contract ApplyChainUpdates is Script, Helper {
     function run() external {
         NetworkConfig memory remote = _remoteConfig(block.chainid);
 
-        address localPool = Deployments.readAddress(block.chainid, "pool");
-        address remotePool = Deployments.readAddress(_remoteChainId(block.chainid), "pool");
+        // Use `tryReadAddress` so a missing `deployments/<chainId>.json` (e.g. first-ever
+        // run of `make deploy-eth` before `make deploy-bsc` has populated the remote
+        // artifact) surfaces with the friendly `_requireSet` diagnostic below instead of a
+        // low-level `vm.readFile` revert. Round-7 review [1].
+        address localPool = Deployments.tryReadAddress(block.chainid, "pool");
+        address remotePool = Deployments.tryReadAddress(_remoteChainId(block.chainid), "pool");
         address remoteToken = _remoteTokenAddress(block.chainid, remote);
 
         _requireSet(localPool, "localPool (run script 02 on this chain first)");
@@ -104,7 +108,9 @@ contract ApplyChainUpdates is Script, Helper {
     function _remoteTokenAddress(uint256 chainId, NetworkConfig memory remote) internal view returns (address) {
         uint256 remoteChainId = _remoteChainId(chainId);
         if (remoteChainId == 1 || remoteChainId == 11_155_111) {
-            return Deployments.readAddress(remoteChainId, "wrappedON");
+            // tryReadAddress so a missing remote deployments file surfaces with our
+            // `_requireSet(remoteToken, …)` diagnostic rather than vm.readFile reverting.
+            return Deployments.tryReadAddress(remoteChainId, "wrappedON");
         }
         return remote.onToken;
     }

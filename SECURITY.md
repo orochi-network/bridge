@@ -19,9 +19,9 @@ each finding tracked inline.
 | Low/Nit  | 6 | 6 (incl. `supportsInterface` now `view` per R-58) | 0 | 0 |
 | **Original total** | **24** | **20** | **2** | **2** |
 
-PR #19 reviewer follow-ups span R-1 through R-58. All findings either fixed in code,
-accepted with documented rationale, or addressed via operational guidance in
-`RUNBOOK.md`. Per-round breakdown:
+PR #19 reviewer follow-ups span R-1 onward. All findings either fixed in code, accepted
+with documented rationale, or addressed via operational guidance in `RUNBOOK.md`.
+Per-round breakdown:
 
 - **Round 1** (R-1..R-13): mostly code fixes for the initial brng1151 + bao-ninh review
   passes; everything except R-8 (PR description correction) and R-13 (a Make/doc grab-bag
@@ -49,6 +49,12 @@ accepted with documented rationale, or addressed via operational guidance in
   proposal and `address(this)` (new `InvalidCCIPAdmin` error), `withdraw(0)` matches
   `deposit(0)`'s `ZeroAmount` guard, `supportsInterface` mutability narrowed back to
   `view` to keep the inheritance chain extensible.
+- **Round 7 brng1151** (R-59..R-65 + 2 accepted): script 05 first-deploy crash fixed
+  via `tryReadAddress`, Makefile `test-e2e` expanded to cover all non-fork suites,
+  RUNBOOK §0.2 fork-validate procedure rewritten to use direct `forge script` + anvil
+  key + healthcheck, §3.1 monitoring step now enumerates both ETH and BSC events,
+  H-2 / H-4 entry status re-labelled to match the operational column, plus two
+  testnet-mock items accepted as deliberate trade-offs.
 
 Non-fork tests: **102 total** (98 unit/integration + 4 stateful invariants).
 
@@ -99,7 +105,7 @@ Each entry below: file:line — issue — impact — fix — **Status**.
 
 ### H-2. Deployer retains mint authority during the handoff window
 - **Where:** `script/06_TransferOwnership.s.sol`.
-- **Status: FIXED (operational — RUNBOOK §3.1).** The two-step grant → multisig accept →
+- **Status: OPERATIONAL (documented — RUNBOOK §3.1).** The two-step grant → multisig accept →
   deployer renounce window is intrinsic to OpenZeppelin AccessControl + two-step Ownable
   and cannot be made atomic without forking those primitives. Mitigations now fully
   documented:
@@ -117,7 +123,7 @@ Each entry below: file:line — issue — impact — fix — **Status**.
 
 ### H-4. Cross-chain front-running of `proposeAdministrator` on BSC ON token
 - **Where:** `script/04_RegisterAdminAndPool.s.sol`.
-- **Status: FIXED (code + operational — RUNBOOK §0.2).**
+- **Status: OPERATIONAL (code fix + documented — RUNBOOK §0.2).**
   - **Fixed in code:** post-registration assertion in script 04 that
     `TokenAdminRegistry.getPool(token) == ourPool` immediately after `setPool`. If a
     front-runner registered a hostile pool first, `setPool` will revert (caller is not
@@ -571,6 +577,44 @@ ledger/doc/test-rigor gaps. All addressed below (R-49 through R-55).
 
 ### R-58. `supportsInterface` declared `pure` instead of `view` (round-6 multi-agent review [3])
 **Status: FIXED.** `src/WrappedON.sol:215` narrowed `AccessControl.supportsInterface` (declared `view`) to `pure`. Solidity allows the narrowing and the current body is state-independent, but `pure` silently blocks any future base override that reads storage — a latent inheritance hazard. Previous "no action needed" disposition reversed. Changed to `public view override(AccessControl)`; no behaviour change, existing `test_SupportsInterface` passes unchanged.
+
+---
+
+## PR #19 round-7 review follow-ups (brng1151)
+
+A seventh review pass on commit `6c47c9d` raised 12 items. Two were closed as
+"accepted (false-positive on this fix's intent)" with reasoning in the PR
+thread; ten landed as code/doc fixes (R-59 through R-65 plus a few re-labellings).
+
+### R-59. Script 05 first-deploy crashes inside vm.readFile (round-7 [1])
+**Status: FIXED.** `script/05_ApplyChainUpdates.s.sol` used `Deployments.readAddress` for both `localPool` / `remotePool` (and `wrappedON` inside `_remoteTokenAddress`). On the first-ever ETH deploy `deployments/<remote-chain>.json` doesn't exist yet, so `vm.readFile` reverted before reaching the friendly `_requireSet` diagnostic — the documented `make deploy-eth` sequence crashed cryptically. Switched all three to `tryReadAddress`; the existing `_requireSet` now fires with the intended "run script 02 on the remote chain first" message, and the cross-chain bootstrap (deploy A → deploy B → re-run 05 on A) works as RUNBOOK describes.
+
+### R-60. Makefile test-e2e covered 3 of 10 non-fork files (round-7 [2])
+**Status: FIXED.** `test-e2e` was `--match-path 'test/{PoolRoundtrip,DeploymentE2E}.t.sol'`, so the script-suite tests (`Script04Paths`, `Script06Guards`, `Script06Renounce`, `Script07Preflight`, `Script08Verify`), `Deployments.t.sol`, and `WrappedONInvariant.t.sol` only ran via `make test`. An operator running `test-unit && test-e2e` would think they'd covered the unit + integration tracks and miss 7 suites. Switched to `--no-match-path 'test/{WrappedON.t.sol,fork/**}'`: now `test-unit + test-e2e` partition the non-fork suite (44 + 58 = 102 tests).
+
+### R-61. `RenounceDeployerAdmin.run()` wON read was the last `readAddress` holdout (round-7 [3])
+**Status: FIXED.** R-45 / R-52 converted `RenounceDeployerAdmin`'s pool lookup and `_handoff`'s wON + pool lookups to `tryReadAddress` so R-36's "delete the JSON entry to force redeploy" recovery path surfaces with a friendly diagnostic; the wON read at `script/06_TransferOwnership.s.sol:184` was overlooked. Switched to `tryReadAddress` + explicit `require(wonAddr != address(0), …)` naming the script the operator needs to re-run.
+
+### R-62. RUNBOOK §0.2 fork-validate command was unusable as written (round-7 [5] + [9])
+**Status: FIXED.** §0.2 told operators to run `make deploy-bsc RPC=http://127.0.0.1:8545`, but the Makefile target hard-codes `DEPLOY_FLAGS := --broadcast --verify --private-key $(DEPLOYER_PK)` — `--verify` pollutes BSCScan with fork-only addresses, and `DEPLOYER_PK` defaults to the real deployer key. The procedure now uses direct `forge script` invocations against the local anvil with a well-known anvil pre-funded private key, drops `--verify`, adds an `until cast block-number …` healthcheck instead of an implicit race after the backgrounded `anvil &`, and ends with `rm -f deployments/56.json` so the forked artifact doesn't leak into a real BSC deploy.
+
+### R-63. RUNBOOK §3.1 monitoring step only enumerated ETH events (round-7 [6])
+**Status: FIXED.** R-62's earlier §3.1 rewrite (H-2 mitigation) listed `RoleGranted(MINTER_ROLE,*)` / `RoleGranted(BURNER_ROLE,*)` for paging but didn't enumerate the symmetric BSC window — between `02_DeployPools` and multisig `acceptOwnership`, the deployer EOA still owns the BSC `LockReleaseTokenPool` and can call `setRebalancer(attacker)` → `withdrawLiquidity` to drain the locked-ON reserve (the C-1 surface). §3.1 step 4 now enumerates both sides explicitly: ETH-side wON `RoleGranted`; BSC-side `RebalancerSet`, `LiquidityRemoved`, pre-acceptance `OwnershipTransferRequested`. Cross-references the trust-model monitoring table.
+
+### R-64. WrappedON ctor NatSpec referenced removed `DecimalsUnreadable` (round-7 [8])
+**Status: FIXED.** When `fa9f9e0` removed the R-20 try/catch + `DecimalsUnreadable` error per user direction, the constructor NatSpec at `src/WrappedON.sol:85` still listed "decimals-mismatch / unreadable tokens" as ctor rejection cases. Struck "/ unreadable" — only `DecimalsMismatch` remains as a decimals guard.
+
+### R-65. RUNBOOK §3.1 step 3 implied `make renounce` closed both chains (round-7 [10])
+**Status: FIXED.** "Run `make renounce` as soon as 3.2 + 3.3 confirm" implied the renounce covered the whole handoff; `make renounce` only runs `RenounceDeployerAdmin` on ETH — BSC has no equivalent renounce step (the BSC window closes when the multisig accepts `pool.acceptOwnership` in 3.2). §3.1 step 2 and step 3 now say this explicitly.
+
+### Round-7 status reconciliation (round-7 [4] + [11])
+**Status: FIXED (doc-only).** Headline "PR #19 reviewer follow-ups span R-1 through R-58" rewritten to "R-1 onward" so each new round doesn't require a hardcoded bump (round-7 [4]). H-2 and H-4 entry headers re-labelled from "Status: FIXED (operational — …)" to "Status: OPERATIONAL (documented — …)" to match the status-summary table at the top of this file — both findings are documented operational mitigations, not in-code fixes (round-7 [11]).
+
+### R-7-accepted-1. Testnet mock ergonomics from `DecimalsUnreadable` removal (round-7 [7])
+**Status: ACCEPTED (deliberate trade-off, no fix).** The reviewer correctly notes that on Sepolia / BSCT (`Helper.sol` testnet entries with `onToken: address(0)`) a mock deployed with no `decimals()` selector now reverts low-level instead of with the previous `DecimalsUnreadable()`. The user explicitly removed the try/catch in `fa9f9e0` ("our token is deployed and no way for `.decimals()` to not be available"): the production token is conformant, mock-token conformance is the operator's responsibility on testnet, and re-introducing defensive infrastructure for non-existent production cases re-introduces the YAGNI we just removed. R-64 cleared the matching NatSpec stale reference.
+
+### R-7-accepted-2. No test locks in post-R-20 ctor behaviour (round-7 [12])
+**Status: ACCEPTED (testing absence of feature, no fix).** Per R-7-accepted-1, the ctor no longer guarantees a specific revert shape on a non-conformant token — it just `decimals()`-calls and propagates whatever the call does. A test asserting "low-level revert with no data" would lock in the absence of a guarantee, which is fragile and informational only. `test_ConstructorRevertsOnDecimalsMismatch` (which uses a conformant `decimals()`-returning mock) still locks the audit-derived 18-decimals guard, which is the actual property under test.
 
 ---
 

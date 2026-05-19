@@ -58,7 +58,7 @@ test-unit:
 	forge test --match-path 'test/WrappedON.t.sol' -vvv
 
 test-e2e:
-	forge test --match-path 'test/{PoolRoundtrip,DeploymentE2E}.t.sol' -vvv
+	forge test --no-match-path 'test/{WrappedON.t.sol,fork/**}' -vvv
 
 test-fork:
 	@test -n "$(ETH_RPC)" || (echo "ETH_RPC env var required"; exit 1)

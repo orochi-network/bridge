@@ -82,7 +82,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     /// @notice Deploys wON wired to canonical ON and a bootstrap `admin`.
     /// @dev `admin` gets `DEFAULT_ADMIN_ROLE` AND becomes initial `s_ccipAdmin`; both
     ///      hand off to the multisig (two-step each) before the deployer renounces. Rejects
-    ///      zero-address, self-reserve, and decimals-mismatch / unreadable tokens.
+    ///      zero-address, self-reserve, and decimals-mismatch tokens.
     constructor(IERC20 onToken, address admin) ERC20("Wrapped Orochi Network", "wON") {
         if (address(onToken) == address(0) || admin == address(0)) {
             revert ZeroAddress();

@@ -27,18 +27,35 @@ The deployer needs to be able to register as admin for the canonical ON on BSC (
 3. OZ `AccessControl.hasRole(DEFAULT_ADMIN_ROLE, deployer)` on the v1.6 registry path — script auto-uses `registerAccessControlDefaultAdmin`.
 4. None of the above — the script reverts with a `CannotResolveCCIPAdmin` diagnostic. Recovery requires either (a) the token's `Ownable.owner` calling `RegistryModuleOwnerCustom.registerAdminViaOwner(token)` themselves, or (b) coordinating with Chainlink to register the admin out-of-band. After admin is set, re-run script 04 — `acceptAdminRole` and `setPool` are idempotent.
 
-**Required: validate the path on a BSC mainnet fork BEFORE broadcasting (audit H-4).** The MEV / front-running window on `TokenAdminRegistry.proposeAdministrator` is closed if you already know the path resolves to a permissionless on-chain branch (1, 2, or 3); it stays open if recovery has to go through path 4. Procedure:
+**Required: validate the path on a BSC mainnet fork BEFORE broadcasting (audit H-4).** The MEV / front-running window on `TokenAdminRegistry.proposeAdministrator` is closed if you already know the path resolves to a permissionless on-chain branch (1, 2, or 3); it stays open if recovery has to go through path 4. **Do not** use `make deploy-bsc` for this — it adds `--verify` (pollutes BSCScan) and `--broadcast` against the real RPC. Drive `forge script` directly against a local anvil fork instead:
 
 ```bash
-# 1. Start a BSC mainnet fork pinned to a recent block
-anvil --fork-url $BSC_RPC --port 8545 &
+# 1. Start a BSC mainnet fork pinned to a recent block, in the background
+anvil --fork-url $BSC_RPC --port 8545 >/tmp/anvil.log 2>&1 &
+ANVIL_PID=$!
 
-# 2. Simulate scripts 02 + 04 against the fork
-make deploy-bsc RPC=http://127.0.0.1:8545
-# (or run forge script directly with --rpc-url http://127.0.0.1:8545 and no --broadcast)
+# 2. Wait until anvil is accepting connections (avoid race on slow hosts)
+until cast block-number --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1; do sleep 1; done
+
+# 3. Simulate scripts 02 + 04 against the fork using a well-known anvil key
+#    (anvil's default first account — pre-funded with 10000 ETH on the fork)
+ANVIL_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+forge script script/02_DeployPools.s.sol \
+    --rpc-url http://127.0.0.1:8545 --broadcast --private-key $ANVIL_KEY
+forge script script/04_RegisterAdminAndPool.s.sol \
+    --rpc-url http://127.0.0.1:8545 --broadcast --private-key $ANVIL_KEY
+
+# 4. Tear down the fork
+kill $ANVIL_PID
 ```
 
-Observe the `[path N]` log line from script 04 (R-41) to confirm which branch matched. If the script reverts with `CannotResolveCCIPAdmin`, coordinate path-4 recovery with the ON token owner / Chainlink *before* touching mainnet — do not broadcast script 04 hoping it works.
+`--broadcast` against the local anvil is required (otherwise script 02's pool-address write to `deployments/56.json` doesn't persist for script 04 to read); `--verify` is omitted so no requests hit BSCScan. Observe the `[path N]` log line from script 04 (R-41) to confirm which branch matched. If the script reverts with `CannotResolveCCIPAdmin`, coordinate path-4 recovery with the ON token owner / Chainlink *before* touching mainnet — do not broadcast script 04 against mainnet hoping it works.
+
+After the fork run, delete any forked `deployments/56.json` so it doesn't leak into a real BSC deploy:
+
+```bash
+rm -f deployments/56.json
+```
 
 ### 0.3 Environment
 
@@ -151,12 +168,16 @@ Each per-chain invocation:
 - (ETH only) Grants wON `DEFAULT_ADMIN_ROLE` to the multisig and proposes the new CCIP admin (two-step — multisig must call `acceptCCIPAdmin`).
 - Calls `TokenAdminRegistry.transferAdminRole(token, multisig)` (two-step).
 
-**Minimize the handoff window (audit H-2).** Between the grant in 3.1 and the deployer renounce in 3.4, the deployer EOA still holds wON `DEFAULT_ADMIN_ROLE` — and therefore admin authority over `MINTER_ROLE` / `BURNER_ROLE`. A compromised deployer key in this window can grant `MINTER_ROLE` to an attacker EOA and mint unbacked wON. To reduce exposure:
+**Minimize the handoff window (audit H-2 + C-1).** Between the grant in 3.1 and the multisig accepts in 3.2, the deployer EOA still holds:
+- wON `DEFAULT_ADMIN_ROLE` on ETH → admin authority over `MINTER_ROLE` / `BURNER_ROLE` (a compromised deployer key can grant `MINTER_ROLE` to an attacker and mint unbacked wON).
+- `Ownable` ownership of the BSC `LockReleaseTokenPool` → can call `setRebalancer(attacker)` → `withdrawLiquidity` and drain the locked-ON reserve (the C-1 trust-model surface; the multisig isn't yet the owner until 3.2 BSC `acceptOwnership`).
+
+To reduce exposure:
 
 1. Have the multisig signers staged and ready before running `make handoff-all`.
-2. Queue the 3.2 accept transactions in the Safe UI immediately after 3.1 completes.
-3. Run `make renounce` (3.4) as soon as 3.2 + 3.3 confirm. Aim for hours, not days, between grant and renounce.
-4. **Monitor while the handoff is in flight.** Watch for unexpected `RoleGranted(MINTER_ROLE, *)` / `RoleGranted(BURNER_ROLE, *)` events on wON whose grantee is not the BurnMintTokenPool — page on-call on any match. See [Trust model](#trust-model-bsc-reserve-custody) for the full monitoring table.
+2. Queue the 3.2 accept transactions in the Safe UI immediately after 3.1 completes — **all of them**, both chains. The BSC handoff completes when the multisig accepts `pool.acceptOwnership` in 3.2 (BSC has no separate renounce step; `make renounce` in 3.4 only renounces wON `DEFAULT_ADMIN_ROLE` on ETH).
+3. Run `make renounce` (3.4) as soon as 3.2 + 3.3 confirm. Aim for hours, not days, between grant and renounce on ETH; the BSC window closes earlier (at 3.2 acceptance).
+4. **Monitor while the handoff is in flight on both chains.** ETH-side: page on `RoleGranted(MINTER_ROLE, *)` / `RoleGranted(BURNER_ROLE, *)` on wON whose grantee is not the BurnMintTokenPool. BSC-side: page on `RebalancerSet(*)`, `LiquidityRemoved(*, *)`, and any pre-3.2 `OwnershipTransferRequested` on the LockReleaseTokenPool. See [Trust model](#trust-model-bsc-reserve-custody) for the full monitoring table.
 
 ### 3.2 Multisig accepts (from the Safe UI / SDK)
 

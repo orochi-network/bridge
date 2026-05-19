@@ -191,16 +191,18 @@ contract RenounceDeployerAdmin is Script, Helper {
             revert MultisigEqualsDeployer(multisig);
         }
 
-        WrappedON won = WrappedON(Deployments.readAddress(block.chainid, "wrappedON"));
+        // Use `tryReadAddress` so a deleted/missing entry surfaces with our own diagnostic
+        // rather than a low-level `vm.parseJsonAddress` revert — R-36's "delete the JSON
+        // entry to force redeploy" recovery path explicitly invites operators to remove
+        // the entry, so the friendly message must actually fire (round-4 review [4]).
+        // wON converted to `tryReadAddress` per round-7 review [3] (symmetric with pool).
+        address wonAddr = Deployments.tryReadAddress(block.chainid, "wrappedON");
+        require(wonAddr != address(0), "missing wrappedON in deployments JSON: run script 01 first");
+        WrappedON won = WrappedON(wonAddr);
         bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
         address deployer = msg.sender;
         NetworkConfig memory cfg = getConfig(block.chainid);
 
-        // Use `tryReadAddress` so a deleted/missing `pool` entry surfaces with our own
-        // diagnostic rather than a low-level `vm.parseJsonAddress` revert — R-36's
-        // "delete the JSON entry to force redeploy" recovery path explicitly invites
-        // operators to remove the entry, so the friendly message must actually fire
-        // (round-4 review [4]).
         address pool = Deployments.tryReadAddress(block.chainid, "pool");
 
         _assertReadyToRenounce(won, multisig, deployer, pool, cfg.tokenAdminRegistry);
