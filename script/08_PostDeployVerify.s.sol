@@ -29,18 +29,21 @@ contract PostDeployVerify is Script, Helper {
     error RoleMissing(string role, address account);
     error RoleNotRenounced(string role, address account);
     error PoolOwnershipNotHandedOff(address pool, address owner, address expectedMultisig);
-    error PoolOwnershipPending(address pool, address pending, address expectedMultisig);
 
     function run() external view {
         NetworkConfig memory local = getConfig(block.chainid);
         NetworkConfig memory remote = getConfig(_remoteChainId(block.chainid));
 
-        address localPool = Deployments.readAddress(block.chainid, "pool");
+        address localPool = Deployments.tryReadAddress(block.chainid, "pool");
+        _requireSet(localPool, "localPool (run script 02 on this chain first)");
         address localToken = (block.chainid == 1 || block.chainid == 11_155_111)
-            ? Deployments.readAddress(block.chainid, "wrappedON")
+            ? Deployments.tryReadAddress(block.chainid, "wrappedON")
             : local.onToken;
-        address remotePool = Deployments.readAddress(_remoteChainId(block.chainid), "pool");
+        _requireSet(localToken, "localToken (wON not deployed?)");
+        address remotePool = Deployments.tryReadAddress(_remoteChainId(block.chainid), "pool");
+        _requireSet(remotePool, "remotePool (run script 02 on the remote chain first)");
         address remoteToken = _remoteTokenAddress(remote);
+        _requireSet(remoteToken, "remoteToken");
 
         console.log("=== Post-deploy verification -- chainId %d ===", block.chainid);
         console.log("  localPool   =", localPool);
@@ -163,20 +166,17 @@ contract PostDeployVerify is Script, Helper {
 
     function _checkOwnershipHandoff(address pool, address multisig) internal view {
         // Active state: owner == multisig (after multisig.acceptOwnership()).
+        // CCIP TokenPool inherits ConfirmedOwnerWithProposal where `s_pendingOwner` is
+        // `private` with no public getter (see R-49 + R-7-3), so we cannot distinguish
+        // "transferOwnership never called" from "transferOwnership called, multisig
+        // hasn't accepted yet" — both look like `owner == deployer`. Diagnostic says
+        // both possibilities honestly rather than pretending to disambiguate.
         (bool ok, bytes memory data) = pool.staticcall(abi.encodeWithSignature("owner()"));
         require(ok && data.length == 32, "pool owner() call failed");
         address owner = abi.decode(data, (address));
         if (owner == multisig) {
             console.log("[ok] pool.owner() == multisig %s", multisig);
             return;
-        }
-
-        // Pending state: transferOwnership called, multisig has not yet accepted.
-        (bool ok2, bytes memory d2) = pool.staticcall(abi.encodeWithSignature("pendingOwner()"));
-        address pending = (ok2 && d2.length == 32) ? abi.decode(d2, (address)) : address(0);
-        if (pending == multisig) {
-            console.log("[pending] pool.pendingOwner() == multisig %s (call acceptOwnership)", multisig);
-            revert PoolOwnershipPending(pool, pending, multisig);
         }
 
         revert PoolOwnershipNotHandedOff(pool, owner, multisig);
@@ -218,10 +218,10 @@ contract PostDeployVerify is Script, Helper {
         //   - wON on the ETH side (if the remote chain is ETH/Sepolia), or
         //   - canonical ON on the BSC side.
         if (remote.chainSelector == ETH_MAINNET_SELECTOR) {
-            return Deployments.readAddress(1, "wrappedON");
+            return Deployments.tryReadAddress(1, "wrappedON");
         }
         if (remote.chainSelector == SEPOLIA_SELECTOR) {
-            return Deployments.readAddress(11_155_111, "wrappedON");
+            return Deployments.tryReadAddress(11_155_111, "wrappedON");
         }
         return remote.onToken;
     }

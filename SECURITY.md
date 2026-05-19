@@ -14,7 +14,7 @@ each finding tracked inline.
 | Severity | Total | Fixed in code | Accepted (documented) | Operational (documented) |
 |---|---:|---:|---:|---:|
 | Critical | 3 | 2 (C-2, C-3) | 1 (C-1) | 0 |
-| High     | 6 | 4 (H-1, H-3, H-5, H-6) | 0 | 2 (H-2 §3.1, H-4 §0.2) |
+| High     | 6 | 4 (H-1, H-3, H-5, H-6) | 0 | 2 (H-2 §3.1; H-4 §0.2 — also has code mitigation, see entry) |
 | Medium   | 9 | 8 (M-1, M-2, M-3, M-4, M-5, M-6, M-7, M-9) | 1 (M-8 calibration) | 0 |
 | Low/Nit  | 6 | 6 (incl. `supportsInterface` now `view` per R-58) | 0 | 0 |
 | **Original total** | **24** | **20** | **2** | **2** |
@@ -51,12 +51,20 @@ Per-round breakdown:
   `view` to keep the inheritance chain extensible.
 - **Round 7 brng1151** (R-59..R-67 + 2 accepted): script 05 first-deploy crash fixed
   via `tryReadAddress`, Makefile `test-e2e` expanded to cover all non-fork suites,
-  RUNBOOK §0.2 fork-validate procedure rewritten to use direct `forge script` + anvil
-  key + healthcheck, §3.1 monitoring step now enumerates both ETH and BSC events,
-  H-2 / H-4 entry status re-labelled to match the operational column, two
-  belated round-6 lower-severity items (R-66 ambiguous pool-transfer log,
-  R-67 test-count phrasing at L308), plus two testnet-mock items accepted as
-  deliberate trade-offs.
+  RUNBOOK §0.2 fork-validate procedure rewritten, §3.1 monitoring step now enumerates
+  both ETH and BSC events, H-2 / H-4 entry status re-labelled to match the
+  operational column, two belated round-6 lower-severity items (R-66 ambiguous
+  pool-transfer log, R-67 test-count phrasing at L308), plus two testnet-mock items
+  accepted as deliberate trade-offs.
+- **Round 7 bao-ninh-orochi** (R-68..R-73): two HIGH operational-mitigation correctness
+  fixes — §0.2 anvil-key procedure replaced with live `cast call` reads (R-68 — the
+  anvil key wasn't the deployer EOA so all path probes always fell through), and the
+  §3.1 / SECURITY.md references to non-existent `RebalancerSet` / `OwnerUpdate` events
+  replaced with real event names + a calldata-trace note for `setRebalancer` (R-69,
+  R-72). Plus script 08 R-49-sibling dead `pendingOwner()` branch removed (R-70),
+  the remaining `readAddress` callsites converted to `tryReadAddress` for full
+  symmetry (R-71), and H-4's status-table cell reworded to make its code mitigation
+  visible at the headline (R-73).
 
 Non-fork tests: **102 total** (98 unit/integration + 4 stateful invariants).
 
@@ -89,8 +97,11 @@ Each entry below: file:line — issue — impact — fix — **Status**.
   - Comment in `script/02_DeployPools.s.sol` rewritten to honestly describe the trust
     model (no more "footgun removed" claim).
   - CLAUDE.md "Trust model: BSC reserve custody" section calls this out explicitly.
-  - RUNBOOK.md monitoring step: alert on every BSC-pool `LiquidityRemoved`,
-    `LiquidityAdded`, `OwnerUpdate`, and any call to `setRebalancer`.
+  - RUNBOOK.md monitoring step: alert on every BSC-pool `LiquidityRemoved` /
+    `LiquidityAdded` event, `OwnershipTransferRequested` / `OwnershipTransferred`
+    on the pool, and a calldata trace on `setRebalancer(addr)` (the function is
+    `onlyOwner` and emits no event, so monitoring requires watching calldata
+    rather than an event topic).
 
 ### C-2. `Deployments.writeAddress` silently destroyed prior JSON entries
 **Status: FIXED.** `script/Deployments.sol:25-29` rebuilt the serialization object from scratch on each forge process, so each `vm.writeJson` call overwrote the file and erased previous keys. Switched to the 3-arg `vm.writeJson(value, file, "$.key")` overload that patches a single JSON path; the file is initialized to `{}` on first write so the path target exists.
@@ -142,7 +153,7 @@ Each entry below: file:line — issue — impact — fix — **Status**.
 **Status: FIXED.** New `make handoff-all ETH_RPC=… BSC_RPC=… MULTISIG=…` target runs the handoff sequentially against both chains with the same MULTISIG. Single-chain `make handoff` retained for ops convenience but the runbook now references the multi-chain target. Renounce remains single-chain (wON only exists on ETH).
 
 ### H-6. `_checkOwnershipHandoff` ignored `pendingOwner()`
-**Status: FIXED.** `script/08_PostDeployVerify.s.sol` now distinguishes three states: `owner == multisig` is `[ok]`, `pendingOwner == multisig` reverts `PoolOwnershipPending` (acceptance needed), neither reverts `PoolOwnershipNotHandedOff`.
+**Status: FIXED (with R-49 follow-through to script 08).** `script/08_PostDeployVerify.s.sol` originally tried to distinguish three states (`owner == multisig`, `pendingOwner == multisig` → `PoolOwnershipPending`, neither → `PoolOwnershipNotHandedOff`). The middle branch was the same R-49 footgun — `s_pendingOwner` is `private` on CCIP `TokenPool`, so the `pendingOwner()` staticcall always returned no data and the middle branch was unreachable dead code. Per R-7-3 the dead branch and `PoolOwnershipPending` error were removed; the diagnostic now honestly says both possibilities ("transferOwnership not called yet OR called but multisig hasn't accepted") rather than pretending to disambiguate. The remaining `owner == multisig` check still catches the post-acceptance state correctly.
 
 ---
 
@@ -602,7 +613,7 @@ thread; ten landed as code/doc fixes (R-59 through R-65 plus a few re-labellings
 **Status: FIXED.** §0.2 told operators to run `make deploy-bsc RPC=http://127.0.0.1:8545`, but the Makefile target hard-codes `DEPLOY_FLAGS := --broadcast --verify --private-key $(DEPLOYER_PK)` — `--verify` pollutes BSCScan with fork-only addresses, and `DEPLOYER_PK` defaults to the real deployer key. The procedure now uses direct `forge script` invocations against the local anvil with a well-known anvil pre-funded private key, drops `--verify`, adds an `until cast block-number …` healthcheck instead of an implicit race after the backgrounded `anvil &`, and ends with `rm -f deployments/56.json` so the forked artifact doesn't leak into a real BSC deploy.
 
 ### R-63. RUNBOOK §3.1 monitoring step only enumerated ETH events (round-7 [6])
-**Status: FIXED.** R-62's earlier §3.1 rewrite (H-2 mitigation) listed `RoleGranted(MINTER_ROLE,*)` / `RoleGranted(BURNER_ROLE,*)` for paging but didn't enumerate the symmetric BSC window — between `02_DeployPools` and multisig `acceptOwnership`, the deployer EOA still owns the BSC `LockReleaseTokenPool` and can call `setRebalancer(attacker)` → `withdrawLiquidity` to drain the locked-ON reserve (the C-1 surface). §3.1 step 4 now enumerates both sides explicitly: ETH-side wON `RoleGranted`; BSC-side `RebalancerSet`, `LiquidityRemoved`, pre-acceptance `OwnershipTransferRequested`. Cross-references the trust-model monitoring table.
+**Status: FIXED.** R-62's earlier §3.1 rewrite (H-2 mitigation) listed `RoleGranted(MINTER_ROLE,*)` / `RoleGranted(BURNER_ROLE,*)` for paging but didn't enumerate the symmetric BSC window — between `02_DeployPools` and multisig `acceptOwnership`, the deployer EOA still owns the BSC `LockReleaseTokenPool` and can call `setRebalancer(attacker)` → `withdrawLiquidity` to drain the locked-ON reserve (the C-1 surface). §3.1 step 4 now enumerates both sides explicitly: ETH-side wON `RoleGranted`; BSC-side `LiquidityRemoved`, `OwnershipTransferRequested`, plus a calldata trace on `setRebalancer(addr)` (the function emits no event; R-7-2 follow-up fixed an earlier reference to a non-existent `RebalancerSet` event). Cross-references the trust-model monitoring table.
 
 ### R-64. WrappedON ctor NatSpec referenced removed `DecimalsUnreadable` (round-7 [8])
 **Status: FIXED.** When `fa9f9e0` removed the R-20 try/catch + `DecimalsUnreadable` error per user direction, the constructor NatSpec at `src/WrappedON.sol:85` still listed "decimals-mismatch / unreadable tokens" as ctor rejection cases. Struck "/ unreadable" — only `DecimalsMismatch` remains as a decimals guard.
@@ -615,6 +626,32 @@ thread; ten landed as code/doc fixes (R-59 through R-65 plus a few re-labellings
 
 ### R-67. SECURITY.md test-count phrasing at L308 contradicted R-55's self-attestation (round-6 lower-severity L2, belated)
 **Status: FIXED.** The pre-mainnet checklist item said "98 non-fork tests pass + 4 stateful invariants × 128k calls each" — the `+ 4` form R-55 explicitly removed from `CLAUDE.md` / `README.md` / `RUNBOOK.md` (and whose status note claimed `SECURITY.md` only ever used "Plus" to qualify iteration depth). Rewrote the checklist line to "102 non-fork tests pass — the 4 stateful invariants are part of that total, each iterated 256 runs × 500 calls = 128k assertions" so it matches the post-R-55 phrasing throughout the doc set.
+
+---
+
+## PR #19 round-7 review follow-ups (bao-ninh-orochi)
+
+A parallel round-7 review on commit `4aa2fef` from bao-ninh-orochi raised 6
+additional items — 2 HIGH (both invalidate operational mitigations the audit
+relies on), 1 MEDIUM, 2 LOW, 1 INFO. All addressed below (R-68 through R-73).
+
+### R-68. RUNBOOK §0.2 fork-validate procedure used anvil key, defeating H-4 mitigation (round-7 bao-ninh R7-1)
+**Status: FIXED.** R-62's earlier §0.2 fix used `forge script … --private-key $ANVIL_KEY` against a BSC mainnet anvil fork. Script 04's path probes test whether **the broadcaster** is the BSC ON token's admin holder; the anvil key (address `0xf39F…2266`) is not `$DEPLOYER_ADDR`, so on a fork all three path checks fail and the script always lands on path-4 `CannotResolveCCIPAdmin` — regardless of which path the real deployer would have hit on mainnet. The H-4 mitigation goal (validate which path resolves so we can close the front-running window) was therefore not actually being exercised. Replaced the fork-based procedure with direct `cast call` reads against the live BSC RPC: `getCCIPAdmin()`, `owner()`, and `hasRole(0x00, $DEPLOYER_ADDR)` against the canonical BSC ON token. Read-only, no fork, no broadcast, no anvil key, no leaked deployments JSON. Compare each return value to `$DEPLOYER_ADDR` (or `true` for path 3) to determine which branch script 04 will take on mainnet.
+
+### R-69. RUNBOOK §3.1 step 4 referenced a non-existent `RebalancerSet` event (round-7 bao-ninh R7-2)
+**Status: FIXED.** R-63's earlier §3.1 step 4 enumeration listed `RebalancerSet(*)` as a BSC paging target. `LockReleaseTokenPool.setRebalancer()` is the entire function body `s_rebalancer = rebalancer;` — no event emitted (verified by grep against the entire `lib/ccip/` inheritance chain; the only `*Rebalancer*` events are on `LiquidityManager`, which is a different contract). Operators configuring paging from §3.1 step 4 would have set up an event filter that never fires, leaving the single most critical signal in the BSC reserve drain vector (C-1 surface) unmonitored. Rewrote step 4 to remove `RebalancerSet` and add a calldata trace on `setRebalancer(addr)` with an explicit "no event emitted" note. Also updated R-63's own disposition paragraph to match.
+
+### R-70. Script 08 pending-state branch was dead code (round-7 bao-ninh R7-3 — R-49 sibling)
+**Status: FIXED.** `script/08_PostDeployVerify.s.sol:_checkOwnershipHandoff` had a `pendingOwner()` staticcall + branch carried over from H-6's three-state design. Same R-49 root cause: `s_pendingOwner` is `private` on CCIP `TokenPool` with no public getter, so the staticcall returns no data, `pending = address(0)`, and `pending == multisig` is always false (multisig is non-zero). The `PoolOwnershipPending` branch was therefore unreachable; operators running `make verify-eth` between `make handoff` and the multisig accept saw `PoolOwnershipNotHandedOff(pool, deployer, multisig)` — a misleading diagnostic suggesting the handoff was never started. Removed the dead branch and the `PoolOwnershipPending` error declaration. The remaining `owner == multisig` check still catches the post-acceptance state; the `PoolOwnershipNotHandedOff` revert now honestly says "either transferOwnership wasn't called yet OR it was called but multisig hasn't accepted — we can't tell because s_pendingOwner is private (R-49 / R-7-3)". H-6 disposition rewritten to call out this follow-through.
+
+### R-71. R-61 "last `readAddress` holdout" claim was wrong (round-7 bao-ninh R7-4)
+**Status: FIXED.** R-61's commit message claimed it converted the last `Deployments.readAddress` to `tryReadAddress`. In fact `readAddress` still appeared in scripts 02 (`wrappedON` lookup), 03 (`wrappedON` + `pool`), 04 (`wrappedON` + `pool`), 07 (`localPool`), and 08 (`localPool`, `localToken`, `remotePool`, plus the two-branch `_remoteTokenAddress`). Converted all of them to `tryReadAddress` + `_requireSet` for uniform R-36 recovery-path ergonomics (`"delete the JSON entry to force redeploy"` now surfaces with a friendly diagnostic everywhere, not just in scripts 05 and 06). `Deployments.readAddress` is retained for the `test/Deployments.t.sol` round-trip test which exercises the library directly.
+
+### R-72. SECURITY.md C-1 referenced a non-existent `OwnerUpdate` event (round-7 bao-ninh R7-5)
+**Status: FIXED.** The C-1 "Mitigations applied" section listed `OwnerUpdate` as one of the BSC-pool events to alert on. No `OwnerUpdate` event exists on `LockReleaseTokenPool` or any ancestor — the real names are `OwnershipTransferRequested(from, to)` and `OwnershipTransferred(from, to)` (defined on `ConfirmedOwnerWithProposal`). Replaced `OwnerUpdate` with both real events. Same fix-class as R-69; an operator setting up monitoring from the C-1 paragraph alone would otherwise miss ownership-transfer alerts. Pre-existing bug, fixed alongside R-69.
+
+### R-73. H-4 status-table cell undersold the code mitigation (round-7 bao-ninh R7-6)
+**Status: FIXED.** Round-7 [11] re-labelled H-4's entry header from "FIXED" to "OPERATIONAL (documented)" to match the headline status table. The table cell then placed H-4 in "Operational (documented)" alongside H-2 — but H-2 has no code change while H-4 has both a real code fix (post-registration assertion in script 04) AND operational documentation. A reader scanning the table would conclude H-4 has no code mitigation. Reworded the cell to `"2 (H-2 §3.1; H-4 §0.2 — also has code mitigation, see entry)"` so the asymmetry is visible at the headline level.
 
 ### Round-7 status reconciliation (round-7 [4] + [11])
 **Status: FIXED (doc-only).** Headline "PR #19 reviewer follow-ups span R-1 through R-58" rewritten to "R-1 onward" so each new round doesn't require a hardcoded bump (round-7 [4]). H-2 and H-4 entry headers re-labelled from "Status: FIXED (operational — …)" to "Status: OPERATIONAL (documented — …)" to match the status-summary table at the top of this file — both findings are documented operational mitigations, not in-code fixes (round-7 [11]).

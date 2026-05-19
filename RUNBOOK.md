@@ -27,35 +27,27 @@ The deployer needs to be able to register as admin for the canonical ON on BSC (
 3. OZ `AccessControl.hasRole(DEFAULT_ADMIN_ROLE, deployer)` on the v1.6 registry path — script auto-uses `registerAccessControlDefaultAdmin`.
 4. None of the above — the script reverts with a `CannotResolveCCIPAdmin` diagnostic. Recovery requires either (a) the token's `Ownable.owner` calling `RegistryModuleOwnerCustom.registerAdminViaOwner(token)` themselves, or (b) coordinating with Chainlink to register the admin out-of-band. After admin is set, re-run script 04 — `acceptAdminRole` and `setPool` are idempotent.
 
-**Required: validate the path on a BSC mainnet fork BEFORE broadcasting (audit H-4).** The MEV / front-running window on `TokenAdminRegistry.proposeAdministrator` is closed if you already know the path resolves to a permissionless on-chain branch (1, 2, or 3); it stays open if recovery has to go through path 4. **Do not** use `make deploy-bsc` for this — it adds `--verify` (pollutes BSCScan) and `--broadcast` against the real RPC. Drive `forge script` directly against a local anvil fork instead:
+**Required: validate the path against live BSC state BEFORE broadcasting (audit H-4).** The MEV / front-running window on `TokenAdminRegistry.proposeAdministrator` is closed if you already know the path resolves to a permissionless on-chain branch (1, 2, or 3); it stays open if recovery has to go through path 4.
+
+Use `cast call` to read each path's discriminator against the live BSC RPC and compare against the deployer EOA. This is purely read-only — no fork, no broadcast, no key needed. Script 04's path probes test whether **the broadcaster** is the admin holder, so the question to answer here is "would `$DEPLOYER_ADDR` match any of paths 1/2/3?" (an earlier draft of this section used `anvil --fork-url` with a well-known anvil pre-funded key, but the anvil key isn't `$DEPLOYER_ADDR`, so on a fork the script always fell through to path-4 regardless of which path the real deployer would have hit on mainnet — invalidating the mitigation goal):
 
 ```bash
-# 1. Start a BSC mainnet fork pinned to a recent block, in the background
-anvil --fork-url $BSC_RPC --port 8545 >/tmp/anvil.log 2>&1 &
-ANVIL_PID=$!
+DEPLOYER_ADDR=0x<your deployer EOA, address derived from $DEPLOYER_PK>
+BSC_ON=0x0e4F6209eD984b21EDEA43acE6e09559eD051D48
 
-# 2. Wait until anvil is accepting connections (avoid race on slow hosts)
-until cast block-number --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1; do sleep 1; done
+# Path 1 — does the token expose getCCIPAdmin() and does it return the deployer?
+cast call $BSC_ON 'getCCIPAdmin()(address)' --rpc-url $BSC_RPC 2>&1 || echo "selector absent (path 1 unavailable)"
 
-# 3. Simulate scripts 02 + 04 against the fork using a well-known anvil key
-#    (anvil's default first account — pre-funded with 10000 ETH on the fork)
-ANVIL_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
-forge script script/02_DeployPools.s.sol \
-    --rpc-url http://127.0.0.1:8545 --broadcast --private-key $ANVIL_KEY
-forge script script/04_RegisterAdminAndPool.s.sol \
-    --rpc-url http://127.0.0.1:8545 --broadcast --private-key $ANVIL_KEY
+# Path 2 — is the token Ownable and is owner() the deployer?
+cast call $BSC_ON 'owner()(address)' --rpc-url $BSC_RPC 2>&1 || echo "selector absent (path 2 unavailable)"
 
-# 4. Tear down the fork
-kill $ANVIL_PID
+# Path 3 — does the token use OZ AccessControl, and does the deployer hold DEFAULT_ADMIN_ROLE?
+cast call $BSC_ON 'hasRole(bytes32,address)(bool)' \
+    0x0000000000000000000000000000000000000000000000000000000000000000 \
+    $DEPLOYER_ADDR --rpc-url $BSC_RPC 2>&1 || echo "selector absent (path 3 unavailable)"
 ```
 
-`--broadcast` against the local anvil is required (otherwise script 02's pool-address write to `deployments/56.json` doesn't persist for script 04 to read); `--verify` is omitted so no requests hit BSCScan. Observe the `[path N]` log line from script 04 (R-41) to confirm which branch matched. If the script reverts with `CannotResolveCCIPAdmin`, coordinate path-4 recovery with the ON token owner / Chainlink *before* touching mainnet — do not broadcast script 04 against mainnet hoping it works.
-
-After the fork run, delete any forked `deployments/56.json` so it doesn't leak into a real BSC deploy:
-
-```bash
-rm -f deployments/56.json
-```
+Compare the path-1 / path-2 returns to `$DEPLOYER_ADDR` (case-insensitive) and check path-3 for `true`. If any of the three matches, script 04 will land on that branch on mainnet — no front-running window. If none match, the path-4 fallthrough is your reality: coordinate recovery with the ON token owner (so they call `RegistryModuleOwnerCustom.registerAdminViaOwner(token)` for you) or Chainlink (out-of-band admin set) *before* mainnet broadcast — do not run script 04 against mainnet hoping it works.
 
 ### 0.3 Environment
 
@@ -177,7 +169,7 @@ To reduce exposure:
 1. Have the multisig signers staged and ready before running `make handoff-all`.
 2. Queue the 3.2 accept transactions in the Safe UI immediately after 3.1 completes — **all of them**, both chains. The BSC handoff completes when the multisig accepts `pool.acceptOwnership` in 3.2 (BSC has no separate renounce step; `make renounce` in 3.4 only renounces wON `DEFAULT_ADMIN_ROLE` on ETH).
 3. Run `make renounce` (3.4) as soon as 3.2 + 3.3 confirm. Aim for hours, not days, between grant and renounce on ETH; the BSC window closes earlier (at 3.2 acceptance).
-4. **Monitor while the handoff is in flight on both chains.** ETH-side: page on `RoleGranted(MINTER_ROLE, *)` / `RoleGranted(BURNER_ROLE, *)` on wON whose grantee is not the BurnMintTokenPool. BSC-side: page on `RebalancerSet(*)`, `LiquidityRemoved(*, *)`, and any pre-3.2 `OwnershipTransferRequested` on the LockReleaseTokenPool. See [Trust model](#trust-model-bsc-reserve-custody) for the full monitoring table.
+4. **Monitor while the handoff is in flight on both chains.** ETH-side: page on `RoleGranted(MINTER_ROLE, *)` / `RoleGranted(BURNER_ROLE, *)` on wON whose grantee is not the BurnMintTokenPool. BSC-side: page on `LiquidityRemoved(*, *)` and `OwnershipTransferRequested(*, *)` on the LockReleaseTokenPool, plus a calldata trace on `setRebalancer(addr)` (the function is `onlyOwner` and emits no event, so monitoring requires watching calldata to the pool address — same pattern as the Trust-Model table). See [Trust model](#trust-model-bsc-reserve-custody) for the full monitoring table.
 
 ### 3.2 Multisig accepts (from the Safe UI / SDK)
 

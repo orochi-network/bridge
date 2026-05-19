@@ -14,8 +14,11 @@ contract GrantRoles is Script, Helper {
             revert UnsupportedChain(block.chainid);
         }
 
-        WrappedON won = WrappedON(Deployments.readAddress(block.chainid, "wrappedON"));
-        address pool = Deployments.readAddress(block.chainid, "pool");
+        address wonAddr = Deployments.tryReadAddress(block.chainid, "wrappedON");
+        _requireSet(wonAddr, "wrappedON (run script 01 first)");
+        address pool = Deployments.tryReadAddress(block.chainid, "pool");
+        _requireSet(pool, "pool (run script 02 first)");
+        WrappedON won = WrappedON(wonAddr);
 
         vm.startBroadcast();
         won.grantRole(won.MINTER_ROLE(), pool);

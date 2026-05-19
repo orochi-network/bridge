@@ -35,7 +35,7 @@ contract DeployPools is Script, Helper {
         }
 
         if (block.chainid == 1 || block.chainid == 11_155_111) {
-            address won = Deployments.readAddress(block.chainid, "wrappedON");
+            address won = Deployments.tryReadAddress(block.chainid, "wrappedON");
             _requireSet(won, "wrappedON (run script 01 first)");
             vm.startBroadcast();
             BurnMintTokenPool p = new BurnMintTokenPool(IBurnMintERC20(won), new address[](0), cfg.rmnProxy, cfg.router);

@@ -54,11 +54,11 @@ contract RegisterAdminAndPool is Script, Helper {
         _requireSet(cfg.tokenAdminRegistry, "tokenAdminRegistry");
 
         address token = (block.chainid == 1 || block.chainid == 11_155_111)
-            ? Deployments.readAddress(block.chainid, "wrappedON")
+            ? Deployments.tryReadAddress(block.chainid, "wrappedON")
             : cfg.onToken;
         _requireSet(token, "token (wON or canonical ON)");
 
-        address pool = Deployments.readAddress(block.chainid, "pool");
+        address pool = Deployments.tryReadAddress(block.chainid, "pool");
         _requireSet(pool, "pool (run script 02 first)");
 
         address broadcaster = msg.sender;

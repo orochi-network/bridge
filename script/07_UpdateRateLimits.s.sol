@@ -26,7 +26,7 @@ contract UpdateRateLimits is Script, Helper {
         NetworkConfig memory local = getConfig(block.chainid);
         uint64 remoteSelector = _remoteSelector(block.chainid);
 
-        address localPool = Deployments.readAddress(block.chainid, "pool");
+        address localPool = Deployments.tryReadAddress(block.chainid, "pool");
         _requireSet(localPool, "localPool (run script 02 first)");
 
         RateLimiter.Config memory outbound = RateLimiter.Config({
