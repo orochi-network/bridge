@@ -1,29 +1,33 @@
-node_modules
+# Foundry build artifacts
+cache/
+out/
+
+# Keep broadcast/ TRACKED as the on-chain audit trail of deployments,
+# but ignore the local-only dry-run subdirectories.
+broadcast/**/dry-run/
+
+# Forge deps managed by `forge install`
+# (uncomment if treating lib/ as vendored)
+# lib/
+
+# Environment
 .env
-coverage
-coverage.json
-typechain
-typechain-types
+.env.local
+.env.*.local
 
-# Hardhat files
-cache
-artifacts
-
-
-# LayerZero specific files
-.layerzero
-
-# foundry test compilation files
-out
-
-# yarn 4 (Berry) — yarn binary is provisioned by corepack via the
-# `packageManager` field in package.json, so nothing under .yarn/ is
-# committed. .pnp.* is unused (we run with nodeLinker: node-modules).
-.yarn
-.pnp.*
-yarn-debug.log
-yarn-error.log
-
-# Editor and OS files
+# Editor / OS
+.vscode/
+.idea/
 .DS_Store
-.idea
+*.swp
+*~
+
+# Coverage
+lcov.info
+coverage/
+
+# Deployments (keep committed; uncomment if managed off-repo)
+# deployments/
+
+# test/Deployments.t.sol writes to these chainIds during the suite — never commit them
+deployments/3133700*.json

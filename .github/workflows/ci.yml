@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  FOUNDRY_PROFILE: ci
+
+jobs:
+  test:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # OPS-14: pin the toolchain action to a specific release tag. `v1` is a moving
+      # major-version pointer; a regression on the next CI run would silently alter
+      # build behaviour. SHA-pinning is the next hygiene step before mainnet broadcast.
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1.4.0
+        with:
+          version: stable
+
+      - name: Show forge version
+        run: forge --version
+
+      - name: Patch vendored pragmas (0.8.24 -> ^0.8.24)
+        run: make patch-pragmas
+
+      - name: Forge build (sizes)
+        run: forge build --sizes
+
+      - name: Forge fmt check
+        run: forge fmt --check
+
+      - name: Forge test
+        run: forge test -vvv
+
+      - name: Forge coverage summary
+        run: forge coverage --report summary
+        continue-on-error: true
+
+  slither:
+    name: Slither static analysis
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1.4.0
+        with:
+          version: stable
+
+      # OPS-12: pin slither-analyzer to a tested release. Without a pin, a new detector
+      # or behaviour change upstream silently alters CI output. Refresh deliberately on
+      # bumps. Combined with OPS-8 (gating flipped immediately before mainnet broadcast),
+      # this ensures the same Slither version is used for the pre-mainnet sign-off run as
+      # for every PR in the lead-up.
+      - name: Install Slither
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install slither-analyzer==0.11.0
+
+      - name: Patch vendored pragmas (0.8.24 -> ^0.8.24)
+        run: make patch-pragmas
+
+      # `naming-convention` is excluded because slither treats immutables as regular state
+      # variables and flags our deliberate `IERC20 public immutable ON` for not being mixedCase.
+      # The Solidity style guide allows UPPER_CASE for immutables that reference a constant
+      # external address.
+      - name: Run Slither
+        run: slither src/ --filter-paths "lib/" --exclude-dependencies --exclude naming-convention

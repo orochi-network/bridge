@@ -1,0 +1,114 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.34;
+
+import {Vm} from "forge-std/Vm.sol";
+
+/// @notice Tiny helper for reading/writing per-chain deployment artifacts to
+///         `deployments/<chainId>.json`. All scripts share these keys.
+///
+///         Keys written by this repo:
+///           .wrappedON       (Ethereum / Sepolia only)
+///           .pool            (every chain — BurnMintTokenPool or LockReleaseTokenPool)
+///
+///         Paths are resolved against `vm.projectRoot()` so they work regardless of the
+///         caller's current working directory.
+library Deployments {
+    Vm internal constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
+
+    function path(uint256 chainId) internal view returns (string memory) {
+        return string.concat(vm.projectRoot(), "/deployments/", vm.toString(chainId), ".json");
+    }
+
+    /// @notice True iff the per-chain deployments file is missing OR parses as syntactically
+    ///         valid JSON. False iff the file exists on disk but is corrupt (truncated /
+    ///         partial-write / hand-edit gone wrong). Used by scripts 01 / 02 to refuse a
+    ///         re-deploy on top of a possibly-existing on-chain artefact when the artefact
+    ///         file is unreadable (DEP-13). A missing file is considered "valid" because
+    ///         that's the first-deploy state — script 01 / 02 will create the file.
+    ///
+    ///         The "delete a single key to force re-deploy" recovery path remains supported:
+    ///         deleting `.wrappedON` from a still-syntactically-valid JSON makes
+    ///         `tryReadAddress` return zero AND this function return true, so the deploy
+    ///         proceeds normally.
+    function jsonIsValid(uint256 chainId) internal view returns (bool) {
+        string memory file = path(chainId);
+        if (!vm.exists(file)) {
+            return true;
+        }
+        string memory json = vm.readFile(file);
+        // Probe with a known-bogus key. On valid JSON `keyExistsJson` returns false; on
+        // malformed JSON it reverts inside the cheatcode and we catch.
+        try vm.keyExistsJson(json, ".__deployments_jsonIsValid_probe") returns (bool) {
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    function readAddress(uint256 chainId, string memory key) internal view returns (address) {
+        string memory file = path(chainId);
+        string memory json = vm.readFile(file);
+        return vm.parseJsonAddress(json, string.concat(".", key));
+    }
+
+    /// @notice Like `readAddress` but returns `address(0)` if the deployment file is missing
+    ///         OR the key is absent OR the file is corrupt. Used by scripts 01 / 02 to skip
+    ///         re-deploying an artifact that already has an entry on this chain (round-3
+    ///         review [6]).
+    ///
+    ///         SECURITY: DEP-7 — `vm.keyExistsJson` reverts on malformed JSON before the
+    ///         friendly missing-key branch can fire. Wrap it in try/catch so a corrupt
+    ///         `deployments/<chainId>.json` (e.g. a script broadcast killed mid-write)
+    ///         surfaces as `address(0)` and routes through the calling script's
+    ///         `_requireSet(…)` diagnostic instead of a low-level Foundry panic.
+    function tryReadAddress(uint256 chainId, string memory key) internal view returns (address) {
+        string memory file = path(chainId);
+        if (!vm.exists(file)) {
+            return address(0);
+        }
+        string memory json = vm.readFile(file);
+        string memory jsonPath = string.concat(".", key);
+        try vm.keyExistsJson(json, jsonPath) returns (bool exists) {
+            if (!exists) {
+                return address(0);
+            }
+        } catch {
+            // Malformed JSON. Return zero so the caller's `_requireSet` produces a clear
+            // diagnostic. Recovery: delete `deployments/<chainId>.json` and re-run.
+            return address(0);
+        }
+        try vm.parseJsonAddress(json, jsonPath) returns (address a) {
+            return a;
+        } catch {
+            return address(0);
+        }
+    }
+
+    /// @notice Writes a single key into the deployment JSON without clobbering existing keys.
+    ///
+    /// The 2-arg `vm.writeJson(serialized, file)` overload rebuilds the entire object from the
+    /// in-memory serializer state — so a second call within the same forge process would erase
+    /// any key written by an earlier call (or by a prior run, if the file already had keys we
+    /// didn't re-serialize). The 3-arg overload patches a single JSON path in-place. We
+    /// initialize the file as `{}` on first write so the path-write target exists.
+    ///
+    /// The `serialized` argument must be a fully-formed JSON token. `vm.toString(address)`
+    /// returns a bare hex string (`0x…`) without surrounding quotes — passing that directly
+    /// would write an invalid JSON token into the file. Wrap with quotes so the value is a
+    /// proper JSON string that `vm.parseJsonAddress` can read back. (Per PR #19 review.)
+    ///
+    /// Known limitation (round-2 review [7]): if a prior `forge script` broadcast was killed
+    /// mid-write, the JSON file may be left corrupt (truncated / partially written). This
+    /// helper only seeds the file when it is missing — not when it is present-but-invalid.
+    /// Recovery: delete `deployments/<chainId>.json` and re-run the deploy script. The
+    /// scripts that read this file (`readAddress`) will surface a `vm.parseJsonAddress`
+    /// error on a corrupt file, so the operator gets a clear signal at the next step.
+    function writeAddress(uint256 chainId, string memory key, address value) internal {
+        string memory file = path(chainId);
+        if (!vm.exists(file)) {
+            vm.writeFile(file, "{}");
+        }
+        string memory quoted = string.concat('"', vm.toString(value), '"');
+        vm.writeJson(quoted, file, string.concat(".", key));
+    }
+}
