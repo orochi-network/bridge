@@ -102,9 +102,14 @@ contract TransferOwnership is Script, Helper {
         if (poolIface.owner() == multisig) {
             console.log("Pool ownership already held by multisig - skipping transferOwnership.");
         } else {
+            // CCIP TokenPool inherits ConfirmedOwnerWithProposal where `s_pendingOwner`
+            // is private, so we cannot read it to distinguish first-time vs. re-broadcast.
+            // Round-6 review L1: log both possibilities explicitly rather than the
+            // ambiguous "initiated (or re-broadcast)" wording.
             poolIface.transferOwnership(multisig);
-            console.log("Pool ownership transfer initiated (or re-broadcast):", pool, "->", multisig);
-            console.log("   (multisig must call acceptOwnership)");
+            console.log("Broadcast transferOwnership on pool:", pool, "->", multisig);
+            console.log("   (first-time call OR re-broadcast that overwrites any prior pending owner;");
+            console.log("    multisig must now call acceptOwnership to complete the handoff)");
         }
 
         // After acceptOwnership, the multisig holds custody of the locked-ON reserve via

@@ -49,12 +49,14 @@ Per-round breakdown:
   proposal and `address(this)` (new `InvalidCCIPAdmin` error), `withdraw(0)` matches
   `deposit(0)`'s `ZeroAmount` guard, `supportsInterface` mutability narrowed back to
   `view` to keep the inheritance chain extensible.
-- **Round 7 brng1151** (R-59..R-65 + 2 accepted): script 05 first-deploy crash fixed
+- **Round 7 brng1151** (R-59..R-67 + 2 accepted): script 05 first-deploy crash fixed
   via `tryReadAddress`, Makefile `test-e2e` expanded to cover all non-fork suites,
   RUNBOOK §0.2 fork-validate procedure rewritten to use direct `forge script` + anvil
   key + healthcheck, §3.1 monitoring step now enumerates both ETH and BSC events,
-  H-2 / H-4 entry status re-labelled to match the operational column, plus two
-  testnet-mock items accepted as deliberate trade-offs.
+  H-2 / H-4 entry status re-labelled to match the operational column, two
+  belated round-6 lower-severity items (R-66 ambiguous pool-transfer log,
+  R-67 test-count phrasing at L308), plus two testnet-mock items accepted as
+  deliberate trade-offs.
 
 Non-fork tests: **102 total** (98 unit/integration + 4 stateful invariants).
 
@@ -305,7 +307,8 @@ Each entry below: file:line — issue — impact — fix — **Status**.
 - [x] M-7: 2-step `setCCIPAdmin`.
 - [x] M-9: `nonReentrant` + received-amount accounting on wON.
 - [x] All 8 test-coverage gaps closed (see "Test coverage gaps" section above for the
-      per-gap test list; 98 non-fork tests pass + 4 stateful invariants × 128k calls each).
+      per-gap test list; 102 non-fork tests pass — the 4 stateful invariants are part of
+      that total, each iterated 256 runs × 500 calls = 128k assertions).
 - [ ] Operator action: deploy to Sepolia ⇄ BSC Testnet first (RUNBOOK §1), then mainnet
       (RUNBOOK §2).
 - [ ] Operator action: fill in `script/Helper.sol` placeholder addresses from
@@ -606,6 +609,12 @@ thread; ten landed as code/doc fixes (R-59 through R-65 plus a few re-labellings
 
 ### R-65. RUNBOOK §3.1 step 3 implied `make renounce` closed both chains (round-7 [10])
 **Status: FIXED.** "Run `make renounce` as soon as 3.2 + 3.3 confirm" implied the renounce covered the whole handoff; `make renounce` only runs `RenounceDeployerAdmin` on ETH — BSC has no equivalent renounce step (the BSC window closes when the multisig accepts `pool.acceptOwnership` in 3.2). §3.1 step 2 and step 3 now say this explicitly.
+
+### R-66. Script 06 pool-transfer log conflated first-time vs. re-broadcast (round-6 lower-severity L1, belated)
+**Status: FIXED.** `script/06_TransferOwnership.s.sol:106` logged `"Pool ownership transfer initiated (or re-broadcast):"` — ambiguous between "first-time call" and "re-broadcast that overwrites a prior pending owner." CCIP `TokenPool` inherits `ConfirmedOwnerWithProposal` where `s_pendingOwner` is `private` (R-49), so the script cannot distinguish the two states. Re-worded to log "Broadcast transferOwnership… first-time call OR re-broadcast that overwrites any prior pending owner; multisig must now call acceptOwnership to complete the handoff" with an inline comment naming R-49 as the reason we can't read pending state. Re-run forensics are now unambiguous.
+
+### R-67. SECURITY.md test-count phrasing at L308 contradicted R-55's self-attestation (round-6 lower-severity L2, belated)
+**Status: FIXED.** The pre-mainnet checklist item said "98 non-fork tests pass + 4 stateful invariants × 128k calls each" — the `+ 4` form R-55 explicitly removed from `CLAUDE.md` / `README.md` / `RUNBOOK.md` (and whose status note claimed `SECURITY.md` only ever used "Plus" to qualify iteration depth). Rewrote the checklist line to "102 non-fork tests pass — the 4 stateful invariants are part of that total, each iterated 256 runs × 500 calls = 128k assertions" so it matches the post-R-55 phrasing throughout the doc set.
 
 ### Round-7 status reconciliation (round-7 [4] + [11])
 **Status: FIXED (doc-only).** Headline "PR #19 reviewer follow-ups span R-1 through R-58" rewritten to "R-1 onward" so each new round doesn't require a hardcoded bump (round-7 [4]). H-2 and H-4 entry headers re-labelled from "Status: FIXED (operational — …)" to "Status: OPERATIONAL (documented — …)" to match the status-summary table at the top of this file — both findings are documented operational mitigations, not in-code fixes (round-7 [11]).
