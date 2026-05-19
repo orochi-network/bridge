@@ -33,7 +33,6 @@ import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/ccip/interfaces/IGetCCIPA
 /// out; pool lock/release accounting nets out regardless.
 ///
 /// Safety invariant (mechanical): `lockedON_BSC + reserveON_ETH >= totalSupply(wON)`.
-/// See SECURITY.md C-3 / R-1 / R-14 for the full reasoning.
 ///
 /// @dev `IBurnMintERC20` is NOT inherited — it brings the CCIP-vendored `IERC20`, which
 /// conflicts with OZ `IERC20` linearization. Selectors match the interface exactly so
@@ -125,7 +124,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     /// @dev Does NOT decrement `ccipMintedSupply` — `withdraw` only moves ETH-side reserve
     ///      and never triggers a BSC release, so decrementing would desync from BSC balance.
     ///      Cost: a CCIP-minted holder can drain the deposit reserve (intended arbitrage
-    ///      layer; SECURITY.md C-1 / R-15).
+    ///      layer).
     function withdraw(uint256 amount) external nonReentrant {
         if (amount == 0) {
             revert ZeroAmount();
@@ -230,8 +229,8 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
 
     /// @dev Saturating subtract. Under honest CCIP each burn pairs a BSC `release`, so the
     ///      counter tracks `lockedON_BSC` down in lockstep. Saturation is a defensive floor —
-    ///      only matters if a buggy/compromised pool over-burns. See SECURITY.md R-14 / R-23
-    ///      for why this is not a per-token-provenance counter.
+    ///      only matters if a buggy/compromised pool over-burns. Not a per-token-provenance
+    ///      counter (wON is fungible).
     function _decrementCcipMinted(uint256 amount) internal {
         uint256 current = ccipMintedSupply;
         ccipMintedSupply = amount >= current ? 0 : current - amount;

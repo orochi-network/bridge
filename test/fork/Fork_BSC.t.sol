@@ -122,9 +122,9 @@ contract Fork_BSC is Test {
 
         assertFalse(bscPool.canAcceptLiquidity(), "withdrawLiquidity must be permanently disabled");
 
-        // SECURITY.md gap [7]: `isEnabled = true` with `rate = 0` silently bricks the
-        // limiter — every transfer would be blocked because the bucket never refills.
-        // Assert both rate and capacity are strictly positive in addition to the enabled flag.
+        // `isEnabled = true` with `rate = 0` silently bricks the limiter — every transfer
+        // would be blocked because the bucket never refills. Assert both rate and capacity
+        // are strictly positive in addition to the enabled flag.
         RateLimiter.TokenBucket memory out = bscPool.getCurrentOutboundRateLimiterState(ETH_SELECTOR);
         RateLimiter.TokenBucket memory inb = bscPool.getCurrentInboundRateLimiterState(ETH_SELECTOR);
         assertTrue(out.isEnabled, "outbound limiter enabled");

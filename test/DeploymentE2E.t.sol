@@ -376,15 +376,15 @@ contract DeploymentE2ETest is Test {
         assertEq(ethPool.owner(), multisig);
     }
 
-    // ─── BSC-side ownership handoff (SECURITY.md gap [5]) ────────────────────
+    // ─── BSC-side ownership handoff ──────────────────────────────────────────
 
     /// @notice Sibling to `test_E2E_OwnershipHandoff` — exercises the BSC pool's
     ///         Ownable transfer + TokenAdminRegistry transferAdminRole on the BSC side.
     ///         wON does not exist on BSC, so no DEFAULT_ADMIN_ROLE handoff here — but the
     ///         two two-step transitions (pool Ownable, registry admin) must both go
     ///         through correctly, AND the BSC pool's `setRebalancer` / `withdrawLiquidity`
-    ///         path (the Chainlink CCT trust model — SECURITY.md C-1) must move from
-    ///         deployer-controlled to multisig-controlled.
+    ///         path (the Chainlink CCT trust model) must move from deployer-controlled
+    ///         to multisig-controlled.
     function test_E2E_BSCOwnershipHandoff() public {
         // The BSC pool was deployed by `bscTokenOwner` in setUp (see _run02_deployPools).
         assertEq(bscPool.owner(), bscTokenOwner, "initial BSC pool owner == bscTokenOwner");
@@ -416,8 +416,8 @@ contract DeploymentE2ETest is Test {
         assertEq(bscPool.owner(), multisig, "BSC pool ownership == multisig");
         assertEq(bscRegistry.getTokenConfig(address(onBsc)).administrator, multisig);
 
-        // Trust-model verification (SECURITY.md C-1): after handoff the multisig CAN
-        // call setRebalancer + withdrawLiquidity (designed Chainlink CCT pattern).
+        // Trust-model verification: after handoff the multisig CAN call
+        // setRebalancer + withdrawLiquidity (designed Chainlink CCT pattern).
         // Sanity-check: bscTokenOwner cannot, multisig can.
         vm.prank(bscTokenOwner);
         vm.expectRevert(); // owner-only
@@ -428,7 +428,7 @@ contract DeploymentE2ETest is Test {
         assertEq(bscPool.getRebalancer(), multisig, "rebalancer is settable by new owner");
     }
 
-    // ─── Renounce-before-accept negative test (SECURITY.md gap [2]) ──────────
+    // ─── Renounce-before-accept negative test ────────────────────────────────
 
     /// @notice Premature `renounceRole(DEFAULT_ADMIN_ROLE)` before the multisig has
     ///         actually accepted the role must NOT be possible to drive into a state
@@ -437,9 +437,6 @@ contract DeploymentE2ETest is Test {
     ///         `script/06_TransferOwnership.s.sol` precondition-checks that the multisig
     ///         already holds the role. This test reproduces the script's check off-script
     ///         and asserts it would revert.
-    ///
-    ///         Round-1 H-1 fix; the unit coverage was the open gap. Closes SECURITY.md
-    ///         test-coverage gap [2].
     function test_E2E_RenounceBeforeMultisigAcceptIsBlocked() public {
         bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
 

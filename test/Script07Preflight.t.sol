@@ -30,8 +30,7 @@ contract CcipRateLimiterValidator {
 
 /// @notice Verifies that `_validateBucket` agrees with CCIP `RateLimiter._validateTokenBucketConfig`
 ///         on every boundary. A mismatch lets an operator broadcast a config that the protocol
-///         then rejects mid-tx — which is exactly the failure mode SECURITY.md M-4 was
-///         designed to prevent. This is a Chainlink-compliance regression test.
+///         then rejects mid-tx. This is a Chainlink-compliance regression test.
 contract Script07PreflightTest is Test {
     UpdateRateLimitsHarness internal h;
     CcipRateLimiterValidator internal ccipValidator;

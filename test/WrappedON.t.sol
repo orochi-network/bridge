@@ -515,7 +515,7 @@ contract WrappedONTest is Test {
         assertEq(won.symbol(), "wON");
     }
 
-    // ─── Fuzz tests (SECURITY.md gap [6]) ─────────────────────────────────────
+    // ─── Fuzz tests ───────────────────────────────────────────────────────────
 
     /// @notice Deposit-then-withdraw must round-trip exactly. Catches any 1:1 accounting
     ///         drift in the deposit/withdraw pair (e.g. if a fee or rounding crept into

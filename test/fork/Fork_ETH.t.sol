@@ -107,9 +107,9 @@ contract Fork_ETH is Test {
 
         assertEq(abi.decode(ethPool.getRemotePool(BSC_SELECTOR), (address)), fakeRemoteBscPool);
 
-        // SECURITY.md gap [7]: `isEnabled = true` with `rate = 0` silently bricks the
-        // limiter — every transfer would be blocked because the bucket never refills.
-        // Assert both rate and capacity are strictly positive in addition to the enabled flag.
+        // `isEnabled = true` with `rate = 0` silently bricks the limiter — every transfer
+        // would be blocked because the bucket never refills. Assert both rate and capacity
+        // are strictly positive in addition to the enabled flag.
         RateLimiter.TokenBucket memory out = ethPool.getCurrentOutboundRateLimiterState(BSC_SELECTOR);
         RateLimiter.TokenBucket memory inb = ethPool.getCurrentInboundRateLimiterState(BSC_SELECTOR);
         assertTrue(out.isEnabled, "outbound limiter enabled");

@@ -65,7 +65,7 @@ BSCSCAN_API_KEY=...
 
 Then `source .env`.
 
-**Key-handling note:** the Makefile passes `--private-key $(DEPLOYER_PK)` on the command line, which means the key is visible in `ps aux` and shell history while the broadcast is running. For mainnet broadcasts prefer Foundry's encrypted keystore (`cast wallet import deployer --interactive`, then run scripts with `--account deployer` instead of `--private-key`). The deployer EOA holds critical authority throughout the handoff window — see SECURITY.md H-2.
+**Key-handling note:** the Makefile passes `--private-key $(DEPLOYER_PK)` on the command line, which means the key is visible in `ps aux` and shell history while the broadcast is running. For mainnet broadcasts prefer Foundry's encrypted keystore (`cast wallet import deployer --interactive`, then run scripts with `--account deployer` instead of `--private-key`). The deployer EOA holds critical authority throughout the handoff window.
 
 ### 0.4 Build & test locally
 
@@ -263,7 +263,7 @@ Chainlink's `LockReleaseTokenPool` is built around a trusted-operator pattern. A
 - Call `setRebalancer(addr)` (`onlyOwner`) — designates which address may move the locked-ON reserve.
 - The designated rebalancer can call `provideLiquidity(amount)` (only when `acceptLiquidity=true`; we deploy with `false`, so this path is blocked) and `withdrawLiquidity(amount)` / `transferLiquidity(from, amount)`.
 
-This means the multisig effectively has custody of the BSC-side locked-ON reserve. This is the **documented Chainlink CCT pattern** for `LockReleaseTokenPool` and is intentional. See `SECURITY.md` C-1 for the full discussion.
+This means the multisig effectively has custody of the BSC-side locked-ON reserve. This is the **documented Chainlink CCT pattern** for `LockReleaseTokenPool` and is intentional.
 
 **Required monitoring** (set up an off-chain alert before mainnet handoff):
 

@@ -14,7 +14,7 @@ A Chainlink CCIP **Cross-Chain Token (CCT)** bridge for the Orochi Network **ON*
 
 Production CCIP versions on both chains: Router 1.2.0, ARMProxy 1.0.0, TokenAdminRegistry 1.5.0, RegistryModuleOwnerCustom 1.6.0. This repo pins `lib/ccip` to **`v2.17.0-ccip1.5.16`** to match.
 
-For the deep operator playbook, see [`RUNBOOK.md`](RUNBOOK.md). For audit findings + status, see [`SECURITY.md`](SECURITY.md). For project conventions, see [`CLAUDE.md`](CLAUDE.md).
+For the deep operator playbook, see [`RUNBOOK.md`](RUNBOOK.md). For project conventions, see [`CLAUDE.md`](CLAUDE.md).
 
 ---
 
@@ -228,10 +228,10 @@ deployments/<chainId>.json              written by scripts, read by subsequent s
 
 ## Security
 
-See [`SECURITY.md`](SECURITY.md) for the full audit and the disposition of every finding. Trust-model TL;DR:
+Trust-model TL;DR:
 
 - The BSC pool's owner (the ops multisig) has custody of the locked-ON reserve via Chainlink's standard `setRebalancer` / `withdrawLiquidity` flow. This is the documented Chainlink CCT pattern; subclassing to disable it was considered and rejected.
-- wON's CCIP-mint path is hard-capped at 100M ether (the BSC ON canonical supply, the absolute upper bound on what the bridge can ever reflect onto Ethereum). The `deposit` wrap path is intentionally uncapped — bounded naturally by the ETH-side ON supply — so heavy wrap usage cannot starve inbound CCIP messages. The safety invariant `lockedON_BSC + reserveON_ETH >= totalSupply(wON)` is preserved by mechanics (CCIP mint ↔ BSC lock pairing; deposit ↔ reserve lockstep), not by a `totalSupply` cap. See SECURITY.md C-3 / R-1 / R-14.
+- wON's CCIP-mint path is hard-capped at 100M ether (the BSC ON canonical supply, the absolute upper bound on what the bridge can ever reflect onto Ethereum). The `deposit` wrap path is intentionally uncapped — bounded naturally by the ETH-side ON supply — so heavy wrap usage cannot starve inbound CCIP messages. The safety invariant `lockedON_BSC + reserveON_ETH >= totalSupply(wON)` is preserved by mechanics (CCIP mint ↔ BSC lock pairing; deposit ↔ reserve lockstep), not by a `totalSupply` cap.
 - `setCCIPAdmin` on wON is two-step (propose + accept).
 
 For incident response, see [`RUNBOOK.md`](RUNBOOK.md#4-post-launch-operations).

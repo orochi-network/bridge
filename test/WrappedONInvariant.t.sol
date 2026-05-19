@@ -24,13 +24,13 @@ contract InvariantMockON is ERC20 {
 ///         observe it, but for accounting purposes the locked-ON balance is what
 ///         `ccipMintedSupply` is tracking.
 ///
-///         The invariant under test is the audit safety invariant from SECURITY.md C-3:
+///         The invariant under test is the bridge safety invariant:
 ///
 ///             lockedON_BSC + reserveON_ETH >= totalSupply(wON)
 ///
-///         Round-2 review R-14 reframed `ccipMintedSupply` as a BSC-pool-balance
-///         approximation rather than a "circulating CCIP-minted" counter. This fuzz test
-///         continuously checks the actual safety property the cap was supposed to protect.
+///         `ccipMintedSupply` is a BSC-pool-balance approximation rather than a
+///         "circulating CCIP-minted" counter. This fuzz test continuously checks the
+///         actual safety property the cap was supposed to protect.
 contract WrappedONHandler is Test {
     WrappedON internal immutable WON;
     InvariantMockON internal immutable ON;
@@ -196,7 +196,7 @@ contract WrappedONInvariantTest is StdInvariant, Test {
         targetSelector(StdInvariant.FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
-    /// @notice The audit safety property (SECURITY.md C-3): every outstanding wON token
+    /// @notice The bridge safety property: every outstanding wON token
     ///         must be redeemable, either against the BSC pool's locked ON (via a CCIP
     ///         outbound burn → BSC release) or against the deposit reserve (via withdraw).
     ///

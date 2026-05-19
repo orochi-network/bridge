@@ -113,7 +113,7 @@ contract TransferOwnership is Script, Helper {
         }
 
         // After acceptOwnership, the multisig holds custody of the locked-ON reserve via
-        // setRebalancer/withdrawLiquidity — see SECURITY.md C-1 for the trust model.
+        // setRebalancer/withdrawLiquidity (the standard Chainlink CCT trust model).
 
         if (block.chainid == 1 || block.chainid == 11_155_111) {
             WrappedON won = WrappedON(token);

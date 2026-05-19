@@ -29,7 +29,7 @@ A Foundry project implementing a **Chainlink CCIP Cross-Chain Token (CCT) bridge
 
 - **Solidity 0.8.34, optimizer 200, evm_version = cancun.** `lib/` is git submodules (see `.gitmodules`); `lib/ccip` is pinned to **`v2.17.0-ccip1.5.16`** to match the deployed production CCIP 1.5.x ABI on both ETH + BSC mainnet.
 - **Pragma patch**: vendored Chainlink + OZ sources pin `pragma solidity 0.8.24;`; our project pins 0.8.34. `make patch-pragmas` rewrites them to `^0.8.24`. This runs automatically as part of `make install` and as a CI step after submodule checkout. Re-run manually if you do `git submodule update`.
-- **Use stock Chainlink contracts** for `BurnMintTokenPool` and `LockReleaseTokenPool`. Do NOT subclass — extra inheritance increases audit surface for zero functional gain. (Subclassing was considered and rejected for SECURITY.md C-1; the Chainlink trust model is documented instead.)
+- **Use stock Chainlink contracts** for `BurnMintTokenPool` and `LockReleaseTokenPool`. Do NOT subclass — extra inheritance increases audit surface for zero functional gain. Subclassing was considered and rejected; the Chainlink trust model is documented instead.
 - **Only one custom contract**: `src/WrappedON.sol`. Keep it small. New custom contracts require justification.
 - **Decimals**: ON and wON are both 18. CCIP 1.5.x pools do not store `localTokenDecimals`; off-chain registration in the CCIP directory records 18/18 for both.
 - **Roles on wON**: `MINTER_ROLE` and `BURNER_ROLE` go ONLY to the `BurnMintTokenPool` on Ethereum. `DEFAULT_ADMIN_ROLE` starts on deployer, then transfers to the ops multisig after wiring.
@@ -45,11 +45,11 @@ There are TWO mint paths for wON; both produce identical fungible tokens but bac
 
 Conceptual invariant (NOT tracked as on-chain state — `wrapBackedSupply` is a term, not a storage variable): `{wON minted via deposit and still circulating} <= ON.balanceOf(WrappedON)`. Enforcement is via `withdraw` reverting when `ON.balanceOf(this) < amount`, plus the received-amount accounting in `deposit` that adds to the reserve and `totalSupply` in lockstep. CCIP-bridged users who want native ETH ON depend on someone else having wrapped — this is an arbitrage layer, not a guaranteed redemption.
 
-**CCIP mint cap**: `WrappedON.MAX_CCIP_MINTED = 100_000_000 ether` bounds `ccipMintedSupply` — the counter incremented in `mint(...)` and saturating-decremented in every burn entrypoint. `mint` reverts `CCIPMintCapExceeded(cap, wouldBe)` when `ccipMintedSupply + amount` would exceed the cap; `deposit` is intentionally uncapped (bounded by ETH-side ON supply) so heavy wrap usage cannot starve inbound CCIP messages. The cap matches the canonical ON supply on BSC, which is the absolute upper bound on what the bridge can ever reflect onto Ethereum — see `SECURITY.md` C-3 / R-1 / R-14 for the full reasoning on why the counter is a BSC-pool-balance approximation, not a circulating-CCIP-minted accounting.
+**CCIP mint cap**: `WrappedON.MAX_CCIP_MINTED = 100_000_000 ether` bounds `ccipMintedSupply` — the counter incremented in `mint(...)` and saturating-decremented in every burn entrypoint. `mint` reverts `CCIPMintCapExceeded(cap, wouldBe)` when `ccipMintedSupply + amount` would exceed the cap; `deposit` is intentionally uncapped (bounded by ETH-side ON supply) so heavy wrap usage cannot starve inbound CCIP messages. The cap matches the canonical ON supply on BSC, which is the absolute upper bound on what the bridge can ever reflect onto Ethereum. The counter is a BSC-pool-balance approximation, not a circulating-CCIP-minted accounting.
 
 ## Trust model: BSC reserve custody
 
-`LockReleaseTokenPool` is constructed with `acceptLiquidity = false`, which disables **only** `provideLiquidity`. By design, the pool owner (the ops multisig after handoff) keeps full custody of the locked-ON reserve via `setRebalancer` → `withdrawLiquidity`. This is Chainlink's CCT pattern and is not a bug — but it does mean the multisig is a custody-grade authority on BSC. See `SECURITY.md` C-1 and `RUNBOOK.md` for monitoring guidance.
+`LockReleaseTokenPool` is constructed with `acceptLiquidity = false`, which disables **only** `provideLiquidity`. By design, the pool owner (the ops multisig after handoff) keeps full custody of the locked-ON reserve via `setRebalancer` → `withdrawLiquidity`. This is Chainlink's CCT pattern and is not a bug — but it does mean the multisig is a custody-grade authority on BSC. See `RUNBOOK.md` for monitoring guidance.
 
 ## Layout
 
@@ -113,12 +113,11 @@ Final step on both chains: transfer pool `Ownable` ownership and wON `DEFAULT_AD
 
 - BSC ON token CCIP-admin hook: confirm whether `0x0e4F6209eD984b21EDEA43acE6e09559eD051D48` exposes `getCCIPAdmin`, is `Ownable`, or uses OZ `AccessControl.DEFAULT_ADMIN_ROLE`. `script/04_RegisterAdminAndPool.s.sol` probes all three paths (with the AccessControl path routing through a local interface for the 1.6.0 registry on prod), then reverts with a clear instruction if none match. Resolve on a private fork before mainnet rollout (audit H-4).
 - **CCIP infrastructure addresses in `script/Helper.sol` are intentionally `address(0)` placeholders.** Fill them in from https://docs.chain.link/ccip/directory before broadcasting. Scripts call `_requireSet` on every address they consume.
-- ~~Test coverage gaps~~ — **closed**. All 8 gaps tracked in `SECURITY.md` "Test coverage gaps" are now covered (reserve-invariant stateful fuzz, renounce-before-accept negative, rate-limit exhaustion/refill, script 04 admin-dispatch on all four paths, BSC-side ownership handoff, property fuzz on deposit + cap boundary, fork tests assert non-zero rate/capacity, AccessControl v1.6 success path via `MockRegistryModuleV16`).
+- ~~Test coverage gaps~~ — **closed**. All 8 previously tracked gaps are now covered (reserve-invariant stateful fuzz, renounce-before-accept negative, rate-limit exhaustion/refill, script 04 admin-dispatch on all four paths, BSC-side ownership handoff, property fuzz on deposit + cap boundary, fork tests assert non-zero rate/capacity, AccessControl v1.6 success path via `MockRegistryModuleV16`).
 
 ## Reference
 
 - `README.md` — operator-facing step-by-step (clone → deploy → handoff → ops).
 - `RUNBOOK.md` — deep dive on each step + trust model + required monitoring.
-- `SECURITY.md` — audit ledger; every finding has a Status (fixed / accepted / operational).
 - Chainlink CCIP CCT docs: https://docs.chain.link/ccip/concepts/cross-chain-token/overview
 - Reference repo: https://github.com/smartcontractkit/ccip-starter-kit-foundry

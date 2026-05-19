@@ -247,7 +247,7 @@ contract PoolRoundtripTest is Test {
         bscPool.lockOrBurn(inLock);
     }
 
-    // ─── Rate-limit exhaustion (SECURITY.md gap [3]) ───────────────────────────
+    // ─── Rate-limit exhaustion ─────────────────────────────────────────────────
 
     /// @notice An over-capacity `lockOrBurn` reverts with `TokenMaxCapacityExceeded`. With
     ///         the test rig's 100k-ether capacity and 10-ether-per-second refill, a single
@@ -312,8 +312,7 @@ contract PoolRoundtripTest is Test {
     }
 
     /// @notice Outbound-rate-limit disabled means transfers above capacity flow through —
-    ///         locking the SECURITY.md M-8 calibration behaviour into a test (operator can
-    ///         disable a single direction independently).
+    ///         the operator can disable a single direction independently.
     function test_RateLimitDisabledAllowsLargeTransfer() public {
         // Owner disables outbound only.
         RateLimiter.Config memory off = RateLimiter.Config({isEnabled: false, capacity: 0, rate: 0});

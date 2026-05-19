@@ -131,8 +131,8 @@ contract MockRegistryModuleV16 {
 }
 
 /// @notice Coverage for `script/04_RegisterAdminAndPool.s.sol` admin-discovery dispatch.
-///         Closes SECURITY.md test coverage gaps [4] (neither-path revert) and [8]
-///         (`registerAdminViaOwner` / `registerAccessControlDefaultAdmin` path coverage).
+///         Exercises the neither-path revert plus the `registerAdminViaOwner` /
+///         `registerAccessControlDefaultAdmin` paths.
 contract Script04PathsTest is Test {
     RegisterAdminAndPoolHarness internal harness;
     TokenAdminRegistry internal registry;

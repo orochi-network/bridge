@@ -48,7 +48,7 @@ contract DeployPools is Script, Helper {
             // acceptLiquidity=false blocks `provideLiquidity` ONLY. By Chainlink's CCT design,
             // `withdrawLiquidity` and `setRebalancer` remain operator-controlled: the pool
             // owner (the ops multisig after handoff) has custody of the locked-ON reserve.
-            // This is the documented Chainlink trust model — see SECURITY.md C-1.
+            // This is the documented Chainlink trust model.
             LockReleaseTokenPool p =
                 new LockReleaseTokenPool(IERC20(cfg.onToken), new address[](0), cfg.rmnProxy, false, cfg.router);
             vm.stopBroadcast();
