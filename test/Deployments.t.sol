@@ -24,7 +24,9 @@ contract DeploymentsTest is Test {
 
     function _cleanup(uint256 chainId) internal {
         string memory file = string.concat(vm.projectRoot(), "/deployments/", vm.toString(chainId), ".json");
-        if (vm.exists(file)) vm.removeFile(file);
+        if (vm.exists(file)) {
+            vm.removeFile(file);
+        }
     }
 
     function test_WriteThenReadRoundTrip() public {

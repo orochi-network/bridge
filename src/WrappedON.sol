@@ -84,13 +84,19 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     ///      hand off to the multisig (two-step each) before the deployer renounces. Rejects
     ///      zero-address, self-reserve, and decimals-mismatch / unreadable tokens.
     constructor(IERC20 onToken, address admin) ERC20("Wrapped Orochi Network", "wON") {
-        if (address(onToken) == address(0) || admin == address(0)) revert ZeroAddress();
+        if (address(onToken) == address(0) || admin == address(0)) {
+            revert ZeroAddress();
+        }
         // Self-reserve would make the wrap invariant circular (own ERC20 balance double-counts).
-        if (address(onToken) == address(this)) revert SelfReserve();
+        if (address(onToken) == address(this)) {
+            revert SelfReserve();
+        }
         // 1:1 wrap accounting requires matching decimals. Canonical ON is a standard ERC20Metadata
         // on both chains; rejects mis-wired testnet tokens.
         uint8 onDecimals = IERC20Metadata(address(onToken)).decimals();
-        if (onDecimals != decimals()) revert DecimalsMismatch(decimals(), onDecimals);
+        if (onDecimals != decimals()) {
+            revert DecimalsMismatch(decimals(), onDecimals);
+        }
         ON = onToken;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         s_ccipAdmin = admin;
@@ -105,7 +111,9 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     ///      hook-bearing tokens. Uncapped — bounded by ETH-side ON supply; independent of
     ///      `MAX_CCIP_MINTED` so heavy wrap usage can't starve inbound CCIP.
     function deposit(uint256 amount) external nonReentrant {
-        if (amount == 0) revert ZeroAmount();
+        if (amount == 0) {
+            revert ZeroAmount();
+        }
         uint256 before = ON.balanceOf(address(this));
         ON.safeTransferFrom(msg.sender, address(this), amount);
         uint256 received = ON.balanceOf(address(this)) - before;
@@ -119,9 +127,13 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     ///      Cost: a CCIP-minted holder can drain the deposit reserve (intended arbitrage
     ///      layer; SECURITY.md C-1 / R-15).
     function withdraw(uint256 amount) external nonReentrant {
-        if (amount == 0) revert ZeroAmount();
+        if (amount == 0) {
+            revert ZeroAmount();
+        }
         uint256 reserve = ON.balanceOf(address(this));
-        if (reserve < amount) revert InsufficientReserve(amount, reserve);
+        if (reserve < amount) {
+            revert InsufficientReserve(amount, reserve);
+        }
         _burn(msg.sender, amount);
         ON.safeTransfer(msg.sender, amount);
         emit Unwrapped(msg.sender, amount);
@@ -134,7 +146,9 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     ///         does not consume it.
     function mint(address account, uint256 amount) external onlyRole(MINTER_ROLE) {
         uint256 wouldBe = ccipMintedSupply + amount;
-        if (wouldBe > MAX_CCIP_MINTED) revert CCIPMintCapExceeded(MAX_CCIP_MINTED, wouldBe);
+        if (wouldBe > MAX_CCIP_MINTED) {
+            revert CCIPMintCapExceeded(MAX_CCIP_MINTED, wouldBe);
+        }
         ccipMintedSupply = wouldBe;
         _mint(account, amount);
     }
@@ -178,9 +192,15 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     ///      `address(this)` (would write an unreachable pending, soft-locking the role).
     ///      Both via `InvalidCCIPAdmin` — R-56.
     function setCCIPAdmin(address newAdmin) external {
-        if (msg.sender != s_ccipAdmin) revert OnlyCCIPAdmin();
-        if (newAdmin == address(0)) revert ZeroAddress();
-        if (newAdmin == s_ccipAdmin || newAdmin == address(this)) revert InvalidCCIPAdmin();
+        if (msg.sender != s_ccipAdmin) {
+            revert OnlyCCIPAdmin();
+        }
+        if (newAdmin == address(0)) {
+            revert ZeroAddress();
+        }
+        if (newAdmin == s_ccipAdmin || newAdmin == address(this)) {
+            revert InvalidCCIPAdmin();
+        }
         s_pendingCcipAdmin = newAdmin;
         emit CCIPAdminTransferProposed(s_ccipAdmin, newAdmin);
     }
@@ -188,7 +208,9 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     /// @notice Completes the two-step CCIP admin transfer. Caller must equal the pending
     ///         address; pending slot is cleared on success.
     function acceptCCIPAdmin() external {
-        if (msg.sender != s_pendingCcipAdmin) revert OnlyPendingCCIPAdmin();
+        if (msg.sender != s_pendingCcipAdmin) {
+            revert OnlyPendingCCIPAdmin();
+        }
         emit CCIPAdminTransferred(s_ccipAdmin, msg.sender);
         s_ccipAdmin = msg.sender;
         s_pendingCcipAdmin = address(0);

@@ -85,6 +85,8 @@ abstract contract Helper {
     }
 
     function _requireSet(address a, string memory what) internal pure {
-        if (a == address(0)) revert MissingAddress(what);
+        if (a == address(0)) {
+            revert MissingAddress(what);
+        }
     }
 }

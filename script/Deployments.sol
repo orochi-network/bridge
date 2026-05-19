@@ -30,10 +30,14 @@ library Deployments {
     ///         that already has an entry on this chain (round-3 review [6]).
     function tryReadAddress(uint256 chainId, string memory key) internal view returns (address) {
         string memory file = path(chainId);
-        if (!vm.exists(file)) return address(0);
+        if (!vm.exists(file)) {
+            return address(0);
+        }
         string memory json = vm.readFile(file);
         string memory jsonPath = string.concat(".", key);
-        if (!vm.keyExistsJson(json, jsonPath)) return address(0);
+        if (!vm.keyExistsJson(json, jsonPath)) {
+            return address(0);
+        }
         return vm.parseJsonAddress(json, jsonPath);
     }
 
@@ -58,7 +62,9 @@ library Deployments {
     /// error on a corrupt file, so the operator gets a clear signal at the next step.
     function writeAddress(uint256 chainId, string memory key, address value) internal {
         string memory file = path(chainId);
-        if (!vm.exists(file)) vm.writeFile(file, "{}");
+        if (!vm.exists(file)) {
+            vm.writeFile(file, "{}");
+        }
         string memory quoted = string.concat('"', vm.toString(value), '"');
         vm.writeJson(quoted, file, string.concat(".", key));
     }

@@ -74,10 +74,18 @@ contract UpdateRateLimits is Script, Helper {
     }
 
     function _remoteSelector(uint256 chainId) internal pure returns (uint64) {
-        if (chainId == 1) return BSC_MAINNET_SELECTOR;
-        if (chainId == 56) return ETH_MAINNET_SELECTOR;
-        if (chainId == 11_155_111) return BSC_TESTNET_SELECTOR;
-        if (chainId == 97) return SEPOLIA_SELECTOR;
+        if (chainId == 1) {
+            return BSC_MAINNET_SELECTOR;
+        }
+        if (chainId == 56) {
+            return ETH_MAINNET_SELECTOR;
+        }
+        if (chainId == 11_155_111) {
+            return BSC_TESTNET_SELECTOR;
+        }
+        if (chainId == 97) {
+            return SEPOLIA_SELECTOR;
+        }
         revert UnsupportedChain(chainId);
     }
 }

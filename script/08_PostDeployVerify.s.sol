@@ -74,16 +74,22 @@ contract PostDeployVerify is Script, Helper {
 
     function _checkRegistry(address registry, address token, address expectedPool) internal view {
         address actualPool = ITokenAdminRegistry(registry).getPool(token);
-        if (actualPool != expectedPool) revert PoolNotRegistered(token, expectedPool, actualPool);
+        if (actualPool != expectedPool) {
+            revert PoolNotRegistered(token, expectedPool, actualPool);
+        }
         console.log("[ok] TokenAdminRegistry.getPool(%s) == %s", token, expectedPool);
     }
 
     function _checkPoolWiring(address pool, address expectedRouter, address expectedRmn) internal view {
         address router = TokenPool(pool).getRouter();
-        if (router != expectedRouter) revert RouterMismatch(expectedRouter, router);
+        if (router != expectedRouter) {
+            revert RouterMismatch(expectedRouter, router);
+        }
 
         address rmn = TokenPool(pool).getRmnProxy();
-        if (rmn != expectedRmn) revert RmnMismatch(expectedRmn, rmn);
+        if (rmn != expectedRmn) {
+            revert RmnMismatch(expectedRmn, rmn);
+        }
 
         console.log("[ok] pool.getRouter() == %s", expectedRouter);
         console.log("[ok] pool.getRmnProxy() == %s", expectedRmn);
@@ -101,7 +107,9 @@ contract PostDeployVerify is Script, Helper {
 
         bytes memory remotePoolBytes = TokenPool(pool).getRemotePool(remoteSelector);
         address remotePool = abi.decode(remotePoolBytes, (address));
-        if (remotePool != expectedRemotePool) revert RemotePoolNotLinked(remoteSelector, expectedRemotePool);
+        if (remotePool != expectedRemotePool) {
+            revert RemotePoolNotLinked(remoteSelector, expectedRemotePool);
+        }
 
         bytes memory remoteTokenBytes = TokenPool(pool).getRemoteToken(remoteSelector);
         address remoteToken = abi.decode(remoteTokenBytes, (address));
@@ -133,15 +141,21 @@ contract PostDeployVerify is Script, Helper {
     ///      `make verify-*` catches the misconfiguration BEFORE the first user transfer.
     ///      Round-3 review [3].
     function _assertEnabledAndConfigured(string memory direction, RateLimiter.TokenBucket memory bucket) internal pure {
-        if (!bucket.isEnabled) revert RateLimitDisabled(direction);
+        if (!bucket.isEnabled) {
+            revert RateLimitDisabled(direction);
+        }
         if (bucket.rate == 0 || bucket.capacity == 0) {
             revert RateLimitMisconfigured(direction, bucket.capacity, bucket.rate);
         }
     }
 
     function _checkWonRoles(WrappedON won, address pool) internal view {
-        if (!won.hasRole(won.MINTER_ROLE(), pool)) revert RoleMissing("MINTER_ROLE", pool);
-        if (!won.hasRole(won.BURNER_ROLE(), pool)) revert RoleMissing("BURNER_ROLE", pool);
+        if (!won.hasRole(won.MINTER_ROLE(), pool)) {
+            revert RoleMissing("MINTER_ROLE", pool);
+        }
+        if (!won.hasRole(won.BURNER_ROLE(), pool)) {
+            revert RoleMissing("BURNER_ROLE", pool);
+        }
 
         console.log("[ok] wON.hasRole(MINTER_ROLE, %s)", pool);
         console.log("[ok] wON.hasRole(BURNER_ROLE, %s)", pool);
@@ -170,18 +184,32 @@ contract PostDeployVerify is Script, Helper {
 
     function _checkDeployerRenounced(WrappedON won, address multisig) internal view {
         bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
-        if (!won.hasRole(adminRole, multisig)) revert RoleMissing("DEFAULT_ADMIN_ROLE", multisig);
-        if (won.hasRole(adminRole, msg.sender)) revert RoleNotRenounced("DEFAULT_ADMIN_ROLE", msg.sender);
-        if (won.getCCIPAdmin() != multisig) revert RoleMissing("ccipAdmin", multisig);
+        if (!won.hasRole(adminRole, multisig)) {
+            revert RoleMissing("DEFAULT_ADMIN_ROLE", multisig);
+        }
+        if (won.hasRole(adminRole, msg.sender)) {
+            revert RoleNotRenounced("DEFAULT_ADMIN_ROLE", msg.sender);
+        }
+        if (won.getCCIPAdmin() != multisig) {
+            revert RoleMissing("ccipAdmin", multisig);
+        }
         console.log("[ok] wON DEFAULT_ADMIN_ROLE held only by multisig %s", multisig);
         console.log("[ok] wON ccipAdmin == multisig %s", multisig);
     }
 
     function _remoteChainId(uint256 chainId) internal pure returns (uint256) {
-        if (chainId == 1) return 56;
-        if (chainId == 56) return 1;
-        if (chainId == 11_155_111) return 97;
-        if (chainId == 97) return 11_155_111;
+        if (chainId == 1) {
+            return 56;
+        }
+        if (chainId == 56) {
+            return 1;
+        }
+        if (chainId == 11_155_111) {
+            return 97;
+        }
+        if (chainId == 97) {
+            return 11_155_111;
+        }
         revert UnsupportedChain(chainId);
     }
 

@@ -10,7 +10,9 @@ import {Deployments} from "./Deployments.sol";
 /// @notice Grants MINTER_ROLE and BURNER_ROLE on wON to the BurnMintTokenPool. Ethereum side only.
 contract GrantRoles is Script, Helper {
     function run() external {
-        if (block.chainid != 1 && block.chainid != 11_155_111) revert UnsupportedChain(block.chainid);
+        if (block.chainid != 1 && block.chainid != 11_155_111) {
+            revert UnsupportedChain(block.chainid);
+        }
 
         WrappedON won = WrappedON(Deployments.readAddress(block.chainid, "wrappedON"));
         address pool = Deployments.readAddress(block.chainid, "pool");

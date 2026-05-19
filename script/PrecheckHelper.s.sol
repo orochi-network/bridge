@@ -44,18 +44,30 @@ contract PrecheckHelper is Script, Helper {
         // non-zero address(0) on testnet here makes every Sepolia deploy revert in
         // precheck (round-3 review [1]). ETH-side (chainId 1 / 11_155_111) reads
         // `wrappedON` from Deployments JSON, not Helper, so its `onToken` stays zero.
-        if (chainId == 56) _check(chainId, cfg.onToken, "onToken");
+        if (chainId == 56) {
+            _check(chainId, cfg.onToken, "onToken");
+        }
     }
 
     function _check(uint256 chainId, address a, string memory field) internal pure {
-        if (a == address(0)) revert PlaceholderField(chainId, field);
+        if (a == address(0)) {
+            revert PlaceholderField(chainId, field);
+        }
     }
 
     function _remoteChainId(uint256 chainId) internal pure returns (uint256) {
-        if (chainId == 1) return 56;
-        if (chainId == 56) return 1;
-        if (chainId == 11_155_111) return 97;
-        if (chainId == 97) return 11_155_111;
+        if (chainId == 1) {
+            return 56;
+        }
+        if (chainId == 56) {
+            return 1;
+        }
+        if (chainId == 11_155_111) {
+            return 97;
+        }
+        if (chainId == 97) {
+            return 11_155_111;
+        }
         revert UnsupportedChain(chainId);
     }
 }

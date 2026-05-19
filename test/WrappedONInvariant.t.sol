@@ -63,7 +63,9 @@ contract WrappedONHandler is Test {
 
     /// @dev Bound the amount so we don't routinely overflow or trivially blow the cap.
     function _boundAmt(uint256 raw, uint256 max) internal pure returns (uint256) {
-        if (max == 0) return 0;
+        if (max == 0) {
+            return 0;
+        }
         return bound(raw, 1, max);
     }
 
@@ -84,7 +86,9 @@ contract WrappedONHandler is Test {
         uint256 userBal = WON.balanceOf(user);
         uint256 reserve = ON.balanceOf(address(WON));
         uint256 cap = userBal < reserve ? userBal : reserve;
-        if (cap == 0) return;
+        if (cap == 0) {
+            return;
+        }
         amount = _boundAmt(amount, cap);
         vm.prank(user);
         WON.withdraw(amount);
@@ -96,7 +100,9 @@ contract WrappedONHandler is Test {
         address user = _actor(actorSeed);
         uint256 cap = WON.MAX_CCIP_MINTED();
         uint256 headroom = cap - WON.ccipMintedSupply();
-        if (headroom == 0) return;
+        if (headroom == 0) {
+            return;
+        }
         amount = _boundAmt(amount, headroom);
         // Simulated BSC lock — caps at BSC supply (MAX_CCIP_MINTED).
         bscLocked += amount;
@@ -109,8 +115,12 @@ contract WrappedONHandler is Test {
     function ccipBurn(uint256 actorSeed, uint256 amount) external {
         address user = _actor(actorSeed);
         uint256 userBal = WON.balanceOf(user);
-        if (userBal == 0) return;
-        if (bscLocked == 0) return; // BSC pool can't release more than it has
+        if (userBal == 0) {
+            return;
+        }
+        if (bscLocked == 0) {
+            return; // BSC pool can't release more than it has
+        }
         uint256 capAmt = userBal < bscLocked ? userBal : bscLocked;
         amount = _boundAmt(amount, capAmt);
         vm.prank(user);
@@ -142,7 +152,9 @@ contract WrappedONHandler is Test {
     function adversarialPoolBurn(uint256 actorSeed, uint256 amount) external {
         address user = _actor(actorSeed);
         uint256 userBal = WON.balanceOf(user);
-        if (userBal == 0) return;
+        if (userBal == 0) {
+            return;
+        }
         amount = _boundAmt(amount, userBal);
         vm.prank(user);
         WON.transfer(POOL, amount);

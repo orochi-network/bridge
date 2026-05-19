@@ -230,7 +230,9 @@ contract Fork_Bridge is Test {
     function _findOffRamp(address router, uint64 sourceChain) internal view returns (address offRamp) {
         IRouterFull.OffRamp[] memory all = IRouterFull(router).getOffRamps();
         for (uint256 i; i < all.length; ++i) {
-            if (all[i].sourceChainSelector == sourceChain) return all[i].offRamp;
+            if (all[i].sourceChainSelector == sourceChain) {
+                return all[i].offRamp;
+            }
         }
         revert(string.concat("no offRamp found for selector ", vm.toString(sourceChain)));
     }
