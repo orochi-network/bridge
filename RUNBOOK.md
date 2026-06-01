@@ -50,6 +50,17 @@ The deployer needs to be able to register as admin for the canonical ON on BSC (
 
 **Required: validate the path against live BSC state BEFORE broadcasting (`TEST-7` — legacy audit tag H-4).** The MEV / front-running window on `TokenAdminRegistry.proposeAdministrator` is closed if you already know the path resolves to a permissionless on-chain branch (1, 2, or 3); it stays open if recovery has to go through path 4.
 
+One-command probe (issue #22) — runs the same path resolution as script 04, read-only, no broadcast:
+
+```bash
+DEPLOYER=0x<your deployer EOA> make validate-bsc-admin RPC=<bsc rpc>
+# testnet: point at your mock ON — BSC_ON=0x<mock> DEPLOYER=0x<eoa> make validate-bsc-admin RPC=<bsc_testnet rpc>
+```
+
+It prints each path and, with `DEPLOYER` set, reverts on the path-4 fallthrough so it can gate a deploy. The raw `cast` equivalents below remain for manual checks.
+
+> **Confirmed live result (BSC mainnet `0x0e4F…1D48`, probed 2026-06-01):** the canonical ON token resolves to **path 4** *for any deployer* — `getCCIPAdmin()` is absent, `owner()` returns the **zero address** (ownership renounced, so `registerAdminViaOwner` is unusable — there is no owner to call it), and OZ `AccessControl.hasRole` is absent. **Script 04 will revert (`CannotResolveCCIPAdmin`) on BSC mainnet.** CCIP-admin registration for the BSC ON token therefore requires coordinating with Chainlink (the `TokenAdminRegistry` owner) to register the administrator out-of-band *before* the BSC deploy — there is no permissionless on-chain branch available. Re-confirm with `make validate-bsc-admin` at deploy time in case the token's ownership/roles change. See SECURITY `TEST-7`.
+
 Use `cast call` to read each path's discriminator against the live BSC RPC and compare against the deployer EOA. This is purely read-only — no fork, no broadcast, no key needed. Script 04's path probes test whether **the broadcaster** is the admin holder, so the question to answer here is "would `$DEPLOYER_ADDR` match any of paths 1/2/3?" (an earlier draft of this section used `anvil --fork-url` with a well-known anvil pre-funded key, but the anvil key isn't `$DEPLOYER_ADDR`, so on a fork the script always fell through to path-4 regardless of which path the real deployer would have hit on mainnet — invalidating the mitigation goal):
 
 ```bash

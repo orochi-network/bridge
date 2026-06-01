@@ -1,5 +1,5 @@
 .PHONY: help install patch-pragmas build test test-unit test-e2e test-fork fmt fmt-check coverage clean check-links \
-        precheck-helper validate-config deploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce update-limits
+        precheck-helper validate-config validate-bsc-admin deploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce update-limits
 
 # ─── Defaults ──────────────────────────────────────────────────────────────────
 SHELL := /bin/bash
@@ -25,6 +25,7 @@ help:
 	@echo ""
 	@echo "  make precheck-helper RPC=...                         # Helper.sol non-zero placeholder check (pure)"
 	@echo "  make validate-config RPC=...                         # live staticcall check of CCIP infra addrs (#21)"
+	@echo "  make validate-bsc-admin RPC=bsc DEPLOYER=0x..        # probe BSC ON CCIP-admin path (#22)"
 	@echo "  make deploy-eth      RPC=sepolia                     # 01-03 + 04 + 05"
 	@echo "  make deploy-bsc      RPC=bsc_testnet                 # 02 + 04 + 05"
 	@echo "  make verify-eth      RPC=sepolia                     # script 08 view-only"
@@ -119,6 +120,15 @@ precheck-helper:
 validate-config:
 	@test -n "$(RPC)" || (echo "RPC required (target chain RPC)"; exit 1)
 	forge script script/ValidateConfig.s.sol --rpc-url $(RPC)
+
+# Read-only probe of the BSC ON token's CCIP-admin registration path (issue #22).
+# Runs the same path-resolution as script 04 WITHOUT broadcasting, so the operator
+# can confirm on live BSC which path (1 getCCIPAdmin / 2 owner / 3 AccessControl)
+# script 04 will take before mainnet — or catch the path-4 blocker early. Reads the
+# deployer EOA from the DEPLOYER env var; on testnet point at a mock via BSC_ON=0x..
+validate-bsc-admin:
+	@test -n "$(RPC)" || (echo "RPC required (BSC RPC)"; exit 1)
+	forge script script/ValidateBscAdmin.s.sol --rpc-url $(RPC)
 
 # Ethereum sequence (Sepolia or mainnet).
 deploy-eth: precheck-helper
