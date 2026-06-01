@@ -223,9 +223,19 @@ script/05_ApplyChainUpdates.s.sol       both chains — wires remote pool + rate
 script/06_TransferOwnership.s.sol       handoff (TransferOwnership) + final renounce
 script/07_UpdateRateLimits.s.sol        ops — adjust setChainRateLimiterConfig
 script/08_PostDeployVerify.s.sol        view-only — programmatic wiring check
+script/PrecheckHelper.s.sol             pure non-zero placeholder check for Helper.sol
+script/ValidateConfig.s.sol             live RPC staticcall check of CCIP infra addresses
+script/ValidateBscAdmin.s.sol           read-only probe of the BSC ON CCIP-admin path
 test/WrappedON.t.sol                    unit tests
+test/WrappedONInvariant.t.sol           4 stateful invariants over 9 handler actions
 test/PoolRoundtrip.t.sol                pool wiring + lockOrBurn / releaseOrMint
 test/DeploymentE2E.t.sol                full sequence simulation
+test/Deployments.t.sol                  deployment-artifact JSON round-trip
+test/Script04Paths.t.sol                script 04 admin-dispatch path coverage
+test/Script06Guards.t.sol               handoff env-var + multisig guard coverage
+test/Script06Renounce.t.sol             renounce precondition assertions
+test/Script07Preflight.t.sol            rate-limit preflight checks
+test/Script08Verify.t.sol               post-deploy verification coverage
 test/fork/Fork_ETH.t.sol                ETH mainnet fork
 test/fork/Fork_BSC.t.sol                BSC mainnet fork
 test/fork/Fork_Bridge.t.sol             dual-fork BSC→ETH→BSC roundtrip

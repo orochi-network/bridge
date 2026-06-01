@@ -89,4 +89,40 @@ abstract contract Helper {
             revert MissingAddress(what);
         }
     }
+
+    /// @notice Chain id of the CCIP counterpart (ETH <-> BSC, Sepolia <-> BSC testnet).
+    /// @dev Shared by the deploy/ops scripts that wire or verify the remote side. Reverts
+    ///      `UnsupportedChain` for any chain the bridge is not configured for.
+    function _remoteChainId(uint256 chainId) internal pure returns (uint256) {
+        if (chainId == 1) {
+            return 56;
+        }
+        if (chainId == 56) {
+            return 1;
+        }
+        if (chainId == 11_155_111) {
+            return 97;
+        }
+        if (chainId == 97) {
+            return 11_155_111;
+        }
+        revert UnsupportedChain(chainId);
+    }
+
+    /// @notice CCIP chain *selector* of the remote counterpart. Pairs with `_remoteChainId`.
+    function _remoteSelector(uint256 chainId) internal pure returns (uint64) {
+        if (chainId == 1) {
+            return BSC_MAINNET_SELECTOR;
+        }
+        if (chainId == 56) {
+            return ETH_MAINNET_SELECTOR;
+        }
+        if (chainId == 11_155_111) {
+            return BSC_TESTNET_SELECTOR;
+        }
+        if (chainId == 97) {
+            return SEPOLIA_SELECTOR;
+        }
+        revert UnsupportedChain(chainId);
+    }
 }

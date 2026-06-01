@@ -3,7 +3,7 @@ pragma solidity 0.8.34;
 
 import {Test} from "forge-std/Test.sol";
 
-import {TransferOwnership, RenounceDeployerAdmin} from "../script/06_TransferOwnership.s.sol";
+import {TransferOwnership, RenounceDeployerAdmin, MultisigEqualsDeployer} from "../script/06_TransferOwnership.s.sol";
 
 /// @notice Locks the `MultisigEqualsDeployer` guard added to both `TransferOwnership.run()`
 ///         and `RenounceDeployerAdmin.run()` (PR #19 round-2 finding [3], R-16). Without
@@ -37,14 +37,14 @@ contract Script06GuardsTest is Test {
     function test_TransferOwnership_RevertsWhenMultisigEqualsDeployer() public {
         TransferOwnership script = new TransferOwnership();
         vm.prank(deployer);
-        vm.expectRevert(abi.encodeWithSelector(TransferOwnership.MultisigEqualsDeployer.selector, deployer));
+        vm.expectRevert(abi.encodeWithSelector(MultisigEqualsDeployer.selector, deployer));
         script.run();
     }
 
     function test_RenounceDeployerAdmin_RevertsWhenMultisigEqualsDeployer() public {
         RenounceDeployerAdmin script = new RenounceDeployerAdmin();
         vm.prank(deployer);
-        vm.expectRevert(abi.encodeWithSelector(RenounceDeployerAdmin.MultisigEqualsDeployer.selector, deployer));
+        vm.expectRevert(abi.encodeWithSelector(MultisigEqualsDeployer.selector, deployer));
         script.run();
     }
 }

@@ -267,7 +267,8 @@ contract WrappedONTest is Test {
         won.deposit(100 ether);
         vm.stopPrank();
 
-        address bob = makeAddr("bob");
+        // `bob` is the class-level address (declared in the state-variable block); he holds
+        // zero wON, so the reserve check passes and `_burn` reverts.
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, bob, 0, 1 ether));
         won.withdraw(1 ether);
