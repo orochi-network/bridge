@@ -25,13 +25,25 @@ import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/ccip/interfaces/IGetCCIPA
 /// circulating} <= ON.balanceOf(this)`. Enforced by `withdraw` reverting when reserve is
 /// insufficient, plus `deposit`'s received-amount accounting.
 ///
-/// `MAX_CCIP_MINTED = 100M` caps `ccipMintHeadroomUsed` — a LOCAL counter of how much
-/// CCIP mint-cap headroom is currently consumed (M1 / #23 renamed it from the misleading
-/// `ccipMintedSupply`). It is NOT a gauge of BSC-locked liquidity: every CCIP `mint` here
-/// pairs a BSC `lock` and every CCIP burn a BSC `release`, but the saturating-decrement
-/// (below) and operator-seeded BSC liquidity make the counter drift from the true BSC
-/// balance. The cap bounds damage from a compromised pool; it does NOT bound `totalSupply()`
-/// (the `deposit` path is uncapped). Not a per-token-provenance counter — wON is fungible.
+/// CCIP CONSERVATION (Chainlink-enforced, exact): every CCIP `mint` here is paired 1:1 with
+/// a `lock` on the BSC `LockReleaseTokenPool`, and every CCIP burn here with a BSC
+/// `release`. So the ON moved into the BSC pool BY CCIP always equals the wON minted on
+/// Ethereum BY CCIP, message-for-message. That equality is upheld by the CCIP transport
+/// layer (the DON + RMN), NOT by this contract: Ethereum has NO way to read the BSC pool's
+/// balance, so the bridge TRUSTS Chainlink to deliver each message once and honour the
+/// pairing. `mint` executes whenever the trusted CCIP off-ramp calls `releaseOrMint`; it
+/// cannot independently verify that the matching BSC `lock` occurred. See SECURITY: CCIP-7
+/// and the §3 trust model.
+///
+/// `MAX_CCIP_MINTED = 100M` caps `ccipMintHeadroomUsed` — a LOCAL ETH-side counter of how
+/// much CCIP mint-cap headroom is consumed (M1 / #23 renamed it from the misleading
+/// `ccipMintedSupply`). It exists only because the real CCIP-locked figure lives on BSC and
+/// is unreadable from here, and it is NOT a gauge of BSC-locked liquidity: the
+/// saturating-decrement (below) and operator-seeded BSC liquidity make it drift from the true
+/// BSC balance. The cap bounds damage from a compromised pool; it does NOT bound
+/// `totalSupply()` (the `deposit` path is uncapped). Not a per-token-provenance counter — wON
+/// is fungible. Saturating-subtract on burn handles deposit-backed wON being bridged out;
+/// pool lock/release accounting nets out regardless.
 ///
 /// CAP REPLENISHMENT (SECURITY: M1 #23 / CCIP-7 / WON-3): the cap is NOT a lifetime
 /// CCIP-mint bound. Deposit-backed wON cycled OUT through the bridge burns and
@@ -158,6 +170,9 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         uint256 before = ON.balanceOf(address(this));
         ON.safeTransferFrom(msg.sender, address(this), amount);
         uint256 received = ON.balanceOf(address(this)) - before;
+        // `received` is a balance delta; `== 0` is the intended zero-received guard (WON-14),
+        // not an exact-balance comparison. Safe strict equality — Slither false positive.
+        // slither-disable-next-line incorrect-equality
         if (received == 0) {
             revert ZeroAmount();
         }

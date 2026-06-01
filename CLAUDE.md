@@ -90,6 +90,8 @@ Everything goes through the `Makefile`. The full sequence is documented in `RUNB
 - `make test-unit`             — WrappedON.t.sol unit tests only.
 - `make test-e2e`              — PoolRoundtrip + DeploymentE2E integration tests.
 - `make test-fork ETH_RPC=... BSC_RPC=...` — fork tests against live mainnet (9 tests).
+- `make validate-config RPC=...` — live staticcall check that `Helper.sol` CCIP infra addresses are genuine on the target chain (script `ValidateConfig.s.sol`; pairs with the pure `precheck-helper`).
+- `make check-links`           — verify Chainlink `docs.chain.link` URLs in tracked sources still resolve (pre-release gate; not in PR CI — see RUNBOOK §0.5).
 - `make deploy-eth RPC=...`    — scripts 01→05 on the Ethereum side.
 - `make deploy-bsc RPC=...`    — scripts 02 + 04 + 05 on the BSC side.
 - `make verify-eth/bsc RPC=...` — script 08 view-only verification. Post-handoff renounce check needs `DEPLOYER=0x..` (SECURITY: DEP-8); pre-handoff or `MULTISIG`-unset runs don't.
@@ -117,7 +119,7 @@ Final step on both chains: transfer pool `Ownable` ownership and wON `DEFAULT_AD
 
 ## Known open items (operational, pre-mainnet)
 
-- BSC ON token CCIP-admin hook: confirm whether `0x0e4F6209eD984b21EDEA43acE6e09559eD051D48` exposes `getCCIPAdmin`, is `Ownable`, or uses OZ `AccessControl.DEFAULT_ADMIN_ROLE`. `script/04_RegisterAdminAndPool.s.sol` probes all three paths (with the AccessControl path routing through a local interface for the 1.6.0 registry on prod), then reverts with a clear instruction if none match. Resolve on a private fork before mainnet rollout (`TEST-7` / Known open items — formerly legacy audit tag `H-4`).
+- BSC ON token CCIP-admin hook: **CONFIRMED path-4 (probed live 2026-06-01 via `make validate-bsc-admin`, #22).** `0x0e4F6209eD984b21EDEA43acE6e09559eD051D48` exposes no `getCCIPAdmin`, has `owner() == address(0)` (renounced), and is not OZ `AccessControl` — so `script/04_RegisterAdminAndPool.s.sol` will revert `CannotResolveCCIPAdmin` on BSC mainnet for any deployer. CCIP-admin registration must be arranged out-of-band with Chainlink (the `TokenAdminRegistry` owner) before the BSC deploy. Re-confirm at deploy time with `make validate-bsc-admin RPC=<bsc> DEPLOYER=0x..`. (`TEST-7` / formerly legacy audit tag `H-4`.)
 - **CCIP infrastructure addresses in `script/Helper.sol` are intentionally `address(0)` placeholders.** Fill them in from https://docs.chain.link/ccip/directory before broadcasting. Scripts call `_requireSet` on every address they consume.
 - ~~Test coverage gaps~~ — **closed**. See SECURITY.md `TEST-1` through `TEST-20` per-finding entries (the originally-HIGH `TEST-1` and `TEST-2` are FIXED; `TEST-7` LOW is deferred pending the BSC admin-path resolution above).
 - **Security review (`SECURITY.md`)**: post 2026-05-19 remediation pass — all six originally HIGH findings (`DEP-1`, `CCIP-1`, `TEST-1`, `TEST-2`, `OPS-1`, `OPS-2`) are FIXED; only `TEST-7` and `OPS-8` remain DEFERRED (both LOW). See SECURITY.md for per-finding status.
