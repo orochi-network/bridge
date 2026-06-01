@@ -367,12 +367,16 @@ This means the multisig effectively has custody of the BSC-side locked-ON reserv
   not currently expose `_setRoleAdmin` externally (OZ AccessControl 5.x internal), so
   not an active vector — but if a future redeploy ever does, the monitor is in place.
 
-**Note on `ccipMintedSupply` monitoring** (SECURITY: WON-3 / CCIP-7). The contract-side
-`ccipMintedSupply` counter approximates BSC locked balance but saturating-decrements on
-burns of deposit-backed wON, so it can drift below the true BSC exposure. Source the
-cross-chain risk signal from `IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` as the
-authoritative locked-balance read; treat `ccipMintedSupply` as a useful local indicator
-but not the ground truth for "how much value is in flight."
+**Note on `ccipEstimatedUsedHeadroom` monitoring** (SECURITY: Report M1 / WON-3 / CCIP-7).
+The contract-side `ccipEstimatedUsedHeadroom` counter — renamed from `ccipMintedSupply`
+per Report M1 so the name no longer implies an authoritative CCIP-minted-supply tally —
+estimates how much of `MAX_CCIP_MINTED` is consumed (remaining headroom =
+`MAX_CCIP_MINTED - ccipEstimatedUsedHeadroom`). It approximates BSC locked balance but
+saturating-decrements on burns of deposit-backed wON, so it can drift below the true BSC
+exposure. Source the cross-chain risk signal from
+`IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` as the authoritative locked-balance read;
+treat `ccipEstimatedUsedHeadroom` as a useful local indicator but not the ground truth for
+"how much value is in flight."
 
 Source the events in `lib/ccip/contracts/src/v0.8/ccip/pools/LockReleaseTokenPool.sol` and `src/WrappedON.sol`. Page the on-call rotation on Critical lines.
 
