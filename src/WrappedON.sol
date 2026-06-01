@@ -25,9 +25,21 @@ import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/ccip/interfaces/IGetCCIPA
 /// circulating} <= ON.balanceOf(this)`. Enforced by `withdraw` reverting when reserve is
 /// insufficient, plus `deposit`'s received-amount accounting.
 ///
-/// `MAX_CCIP_MINTED = 100M` caps `ccipMintedSupply`, which approximates the BSC pool's
-/// locked-ON balance (every CCIP `mint` here pairs a BSC `lock`; every CCIP burn pairs a
-/// BSC `release`). The cap bounds damage from a compromised pool; it does NOT bound
+/// CCIP CONSERVATION (Chainlink-enforced, exact): every CCIP `mint` here is paired 1:1 with
+/// a `lock` on the BSC `LockReleaseTokenPool`, and every CCIP burn here with a BSC
+/// `release`. So the ON moved into the BSC pool BY CCIP always equals the wON minted on
+/// Ethereum BY CCIP, message-for-message. That equality is upheld by the CCIP transport
+/// layer (the DON + RMN), NOT by this contract: Ethereum has NO way to read the BSC pool's
+/// balance, so the bridge TRUSTS Chainlink to deliver each message once and honour the
+/// pairing. `mint` executes whenever the trusted CCIP off-ramp calls `releaseOrMint`; it
+/// cannot independently verify that the matching BSC `lock` occurred. See SECURITY: CCIP-7
+/// and the §3 trust model.
+///
+/// `MAX_CCIP_MINTED = 100M` caps `ccipMintedSupply` — a LOCAL ETH-side counter that exists
+/// only because that real CCIP-locked figure lives on BSC and is unreadable from here. It
+/// approximates the figure but is NOT it: it saturates at 0 (see CAP REPLENISHMENT) and
+/// reflects neither the BSC pool's operator-seeded rebalancer liquidity nor any live
+/// cross-chain read. The cap bounds damage from a compromised pool; it does NOT bound
 /// `totalSupply()` (the `deposit` path is uncapped). Not a per-token-provenance counter —
 /// wON is fungible. Saturating-subtract on burn handles deposit-backed wON being bridged
 /// out; pool lock/release accounting nets out regardless.
