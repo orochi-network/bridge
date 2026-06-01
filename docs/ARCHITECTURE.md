@@ -289,6 +289,28 @@ balance; under buggy behaviour it bounds the upside.
 > Treat `ccipEstimatedUsedHeadroom` as a useful local indicator, not the authoritative
 > "value in flight" number.
 
+#### Cross-chain visibility limitation (`SECURITY: Report M2 / WON-3`)
+
+`WrappedON` is deployed on **Ethereum** and **cannot access the amount of
+canonical ON locked on the BSC `LockReleaseTokenPool`**. That balance lives on
+a different chain; there is no synchronous, atomic way for an EVM call on
+Ethereum to read it. Two consequences follow directly:
+
+1. **`ccipEstimatedUsedHeadroom` is an estimate, never a mirror.** It is the
+   only on-chain proxy for BSC-locked ON, and — because it saturating-decrements
+   on burns of deposit-backed wON — it can read *below* the true BSC-locked
+   balance. It is not a source of truth.
+2. **Burns cannot prove destination liquidity.** When the CCIP pool calls
+   `burn` / `burnFrom` for an ETH→BSC transfer, `WrappedON` destroys wON without
+   any on-chain check that BSC holds enough ON to release. If BSC liquidity is
+   short, the source-side burn still succeeds and the user's transfer is stuck
+   until liquidity is restored.
+
+Because neither can be enforced on Ethereum, ETH→BSC redemption safety is an
+**operational** guarantee, not a contract-level one: bound it with CCIP rate
+limits sized to current BSC liquidity, and monitor
+`IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` off-chain (see RUNBOOK.md).
+
 ---
 
 ## 5. End-to-end flows

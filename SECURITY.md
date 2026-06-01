@@ -93,10 +93,10 @@ on this repository.
 |-------|---------:|-----:|-------:|----:|-----:|------:|
 | WON   |        0 |    0 |      1 |  10 |    7 |    18 |
 | DEP   |        0 |    2 |      4 |  12 |    4 |    22 |
-| CCIP  |        0 |    1 |      6 |   4 |    3 |    14 |
+| CCIP  |        0 |    1 |      7 |   4 |    3 |    15 |
 | TEST  |        0 |    2 |      9 |   9 |    0 |    20 |
 | OPS   |        0 |    2 |      4 |  18 |    6 |    30 |
-| **Total** | **0** | **7** | **24** | **53** | **20** | **104** |
+| **Total** | **0** | **7** | **25** | **53** | **20** | **105** |
 
 **Headline:** no CRITICAL findings. The custom contract surface (`WrappedON.sol`)
 is clean — the highest WON finding is LOW. The bulk of the actionable risk
@@ -562,6 +562,15 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Description:** Compromised owner can redirect source-pool validation or re-wire rate limits without surfacing on the alert path.
 - **Impact:** Allows forged inbound mints or attacker-favourable rate-limit reconfigurations.
 - **Recommendation:** Add to monitoring table.
+
+### CCIP-15: `WrappedON` on Ethereum cannot access BSC-locked ON — burns can't prove destination liquidity
+- **Severity:** MEDIUM (operational / inherent CCT limitation)
+- **External ref:** QuillAudits *Wrapped ON Token* report finding **M2** (Medium, Likelihood: High) — "ETH-to-BSC Burns Can Proceed Without Local Proof of BSC Release Liquidity" (tracked as GitHub issue #24). Foundational to M1/WON-3 as well: the counter is only an *estimate* precisely because of this limitation.
+- **Status:** DOC ADDED / DESIGN ACK — `WrappedON.sol` NatSpec now carries a dedicated **CROSS-CHAIN VISIBILITY** note, and `docs/ARCHITECTURE.md` §4.4 a "Cross-chain visibility limitation" subsection, both stating explicitly that the Ethereum contract cannot read `ON.balanceOf(BSC_LockReleaseTokenPool)` and therefore (a) `ccipEstimatedUsedHeadroom` is an estimate, never a mirror, and (b) burn entrypoints cannot verify BSC release liquidity before destroying wON. No on-chain fix is possible (different chain, no synchronous read); enforcement is operational.
+- **Location:** `src/WrappedON.sol` (burn entrypoints + contract NatSpec); `docs/ARCHITECTURE.md` §4.4
+- **Description:** `WrappedON` lives on Ethereum and has no synchronous, atomic way to observe the canonical ON locked on the BSC `LockReleaseTokenPool`. When the CCIP pool calls `burn`/`burnFrom` for an ETH→BSC transfer, wON is destroyed with no on-chain check that BSC holds enough ON to release. If BSC liquidity is short, the source-side burn still succeeds and the user's transfer is stuck until liquidity is restored.
+- **Impact:** Stuck or delayed ETH→BSC transfers when destination liquidity is insufficient. No loss of aggregate backing (the safety invariant still holds); the affected user's redemption is delayed, not destroyed.
+- **Recommendation:** Bound ETH→BSC throughput with CCIP rate limits sized to current BSC liquidity (scripts 05/07) and monitor `IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` off-chain (RUNBOOK §3) so the limit can be tightened before liquidity is exhausted.
 
 ---
 

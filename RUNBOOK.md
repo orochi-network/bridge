@@ -367,13 +367,18 @@ This means the multisig effectively has custody of the BSC-side locked-ON reserv
   not currently expose `_setRoleAdmin` externally (OZ AccessControl 5.x internal), so
   not an active vector — but if a future redeploy ever does, the monitor is in place.
 
-**Note on `ccipEstimatedUsedHeadroom` monitoring** (SECURITY: Report M1 / WON-3 / CCIP-7).
-The contract-side `ccipEstimatedUsedHeadroom` counter — renamed from `ccipMintedSupply`
-per Report M1 so the name no longer implies an authoritative CCIP-minted-supply tally —
-estimates how much of `MAX_CCIP_MINTED` is consumed (remaining headroom =
+**Note on `ccipEstimatedUsedHeadroom` monitoring** (SECURITY: Report M1 / M2 / WON-3 / CCIP-7 / CCIP-15).
+The `WrappedON` contract lives on Ethereum and **cannot read the amount of canonical ON
+locked on the BSC `LockReleaseTokenPool`** — that balance is on a different chain and is
+not observable from a synchronous EVM call on Ethereum. The contract-side
+`ccipEstimatedUsedHeadroom` counter — renamed from `ccipMintedSupply` per Report M1 so the
+name no longer implies an authoritative CCIP-minted-supply tally — is therefore only a
+*local estimate* of how much of `MAX_CCIP_MINTED` is consumed (remaining headroom =
 `MAX_CCIP_MINTED - ccipEstimatedUsedHeadroom`). It approximates BSC locked balance but
 saturating-decrements on burns of deposit-backed wON, so it can drift below the true BSC
-exposure. Source the cross-chain risk signal from
+exposure. Because the ETH side cannot see BSC liquidity, burn entrypoints cannot prove a
+BSC release will succeed (Report M2 / CCIP-15) — so this monitoring is the safeguard, not
+the contract. Source the cross-chain risk signal from
 `IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` as the authoritative locked-balance read;
 treat `ccipEstimatedUsedHeadroom` as a useful local indicator but not the ground truth for
 "how much value is in flight."

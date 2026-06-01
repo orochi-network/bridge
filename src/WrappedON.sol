@@ -54,6 +54,17 @@ import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/ccip/interfaces/IGetCCIPA
 ///
 /// Safety invariant (mechanical): `lockedON_BSC + reserveON_ETH >= totalSupply(wON)`.
 ///
+/// CROSS-CHAIN VISIBILITY (SECURITY: Report M2 / WON-3): this contract lives on Ethereum
+/// and has NO way to read the canonical ON locked on the BSC `LockReleaseTokenPool` —
+/// that balance lives on a different chain and cannot be observed synchronously from an
+/// EVM call here. Consequently `ccipEstimatedUsedHeadroom` is only a local ESTIMATE of
+/// that locked amount, never a mirror of it, and the burn entrypoints CANNOT verify that
+/// BSC holds enough ON to release before destroying wON. The `lockedON_BSC` term in the
+/// safety invariant above is therefore an off-chain quantity, not something enforced on
+/// this chain. ETH→BSC redemption safety is enforced operationally: CCIP rate limits on
+/// the pools plus off-chain monitoring of `ON.balanceOf(BSC_LockReleaseTokenPool)`. See
+/// RUNBOOK.md and `docs/ARCHITECTURE.md` §4.4.
+///
 /// @dev `IBurnMintERC20` is NOT inherited — it brings the CCIP-vendored `IERC20`, which
 /// conflicts with OZ `IERC20` linearization. Selectors match the interface exactly so
 /// pool calls succeed; `type(IBurnMintERC20).interfaceId` is still reported by
