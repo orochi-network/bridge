@@ -18,6 +18,27 @@ Edit `script/Helper.sol` for **each chain** you'll deploy on. The address fields
 
 Chain selectors are already committed and should not need changes.
 
+**Directory lookup.** Open the [CCIP directory](https://docs.chain.link/ccip/directory),
+select the **Mainnet** (or Testnet) tab and the target network (e.g. *Ethereum*,
+*BNB Smart Chain*). Each network page lists the **Router**, **RMN/ARM proxy**,
+**TokenAdminRegistry**, **RegistryModuleOwnerCustom**, **LINK token**, and the
+**chain selector**. Copy those into the matching `chainId` branch of `Helper.sol`.
+Cross-check the chain selector against the constant already committed there.
+
+**Validate before broadcasting (issue #21).** Two layered checks:
+
+```bash
+make precheck-helper RPC=<target>   # pure: every Helper address for this chain + its remote is non-zero
+make validate-config RPC=<target>   # live: staticcalls each address on-chain to confirm it is the
+                                    #       expected CCIP contract (typeAndVersion), that the router
+                                    #       supports the remote lane (chain selector is real), and that
+                                    #       LINK / canonical-ON look right. Reverts listing any mismatch.
+```
+
+`validate-config` is view-only and never broadcasts. Run it once per chain after
+filling `Helper.sol`; a green result means the addresses point at genuine CCIP
+infrastructure on the target network before you spend gas.
+
 ### 0.2 Confirm the BSC ON token admin path
 
 The deployer needs to be able to register as admin for the canonical ON on BSC (`0x0e4F6209eD984b21EDEA43acE6e09559eD051D48`). `script/04_RegisterAdminAndPool.s.sol` probes four paths in order:
@@ -166,7 +187,7 @@ Script 08 (`PostDeployVerify`) is view-only and reverts loudly on any wiring mis
 
 ### 2.1 Re-verify infrastructure addresses
 
-CCIP infrastructure addresses on mainnet can change. Re-confirm against the [CCIP directory](https://docs.chain.link/ccip/directory) and update `Helper.sol` if needed.
+CCIP infrastructure addresses on mainnet can change. Re-confirm against the [CCIP directory](https://docs.chain.link/ccip/directory) and update `Helper.sol` if needed, then re-run `make validate-config RPC=<mainnet>` (see §0.1) so the live staticcall check passes against mainnet before broadcasting.
 
 ### 2.2 Calibrate rate limits
 

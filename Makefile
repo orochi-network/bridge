@@ -1,5 +1,5 @@
 .PHONY: help install patch-pragmas build test test-unit test-e2e test-fork fmt fmt-check coverage clean check-links \
-        precheck-helper deploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce update-limits
+        precheck-helper validate-config deploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce update-limits
 
 # ─── Defaults ──────────────────────────────────────────────────────────────────
 SHELL := /bin/bash
@@ -23,7 +23,8 @@ help:
 	@echo "Deployment (load .env first; values in capitals come from env):"
 	@echo "  ETH_RPC, BSC_RPC, SEPOLIA_RPC, BSC_TESTNET_RPC, DEPLOYER_PK, DEPLOYER, MULTISIG"
 	@echo ""
-	@echo "  make precheck-helper RPC=...                         # validate Helper.sol placeholders"
+	@echo "  make precheck-helper RPC=...                         # Helper.sol non-zero placeholder check (pure)"
+	@echo "  make validate-config RPC=...                         # live staticcall check of CCIP infra addrs (#21)"
 	@echo "  make deploy-eth      RPC=sepolia                     # 01-03 + 04 + 05"
 	@echo "  make deploy-bsc      RPC=bsc_testnet                 # 02 + 04 + 05"
 	@echo "  make verify-eth      RPC=sepolia                     # script 08 view-only"
@@ -109,6 +110,15 @@ clean:
 precheck-helper:
 	@test -n "$(RPC)" || (echo "RPC required"; exit 1)
 	forge script script/PrecheckHelper.s.sol --rpc-url $(RPC)
+
+# Live (RPC-backed) validation of the filled-in CCIP infra addresses in Helper.sol
+# (issue #21). Unlike `precheck-helper` (pure, non-zero only) this staticcalls each
+# address on the TARGET chain to confirm it is the expected CCIP contract
+# (typeAndVersion), that the router supports the remote lane (chain selector is real),
+# and that LINK / canonical-ON look right. Run after filling Helper.sol, before deploy.
+validate-config:
+	@test -n "$(RPC)" || (echo "RPC required (target chain RPC)"; exit 1)
+	forge script script/ValidateConfig.s.sol --rpc-url $(RPC)
 
 # Ethereum sequence (Sepolia or mainnet).
 deploy-eth: precheck-helper
