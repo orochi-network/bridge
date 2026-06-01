@@ -91,12 +91,12 @@ on this repository.
 
 | Area  | CRITICAL | HIGH | MEDIUM | LOW | INFO | Total |
 |-------|---------:|-----:|-------:|----:|-----:|------:|
-| WON   |        0 |    0 |      1 |  10 |    7 |    18 |
+| WON   |        0 |    0 |      2 |  10 |    7 |    19 |
 | DEP   |        0 |    2 |      4 |  12 |    4 |    22 |
 | CCIP  |        0 |    1 |      6 |   4 |    3 |    14 |
 | TEST  |        0 |    2 |      9 |   9 |    0 |    20 |
 | OPS   |        0 |    2 |      4 |  18 |    6 |    30 |
-| **Total** | **0** | **7** | **24** | **53** | **20** | **104** |
+| **Total** | **0** | **7** | **25** | **53** | **20** | **105** |
 
 **Headline:** no CRITICAL findings. The custom contract surface (`WrappedON.sol`)
 is clean — the highest WON finding is LOW. The bulk of the actionable risk
@@ -264,6 +264,14 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Description:** No malicious-burner-pool mock exercises a same-tx reentry from `burn → mint` or vice versa.
 - **Impact:** Forward-compat only.
 - **Recommendation:** Defer to redeploy if the bridge is ever wired to a hookable ON variant.
+
+### WON-19: public uncapped `deposit` could grow wON supply past sized launch liquidity (QuillAudits M3)
+- **Severity:** MEDIUM
+- **Status:** FIXED — `deposit` is now gated to `LIQUIDITY_MANAGER_ROLE` (issue [#25](https://github.com/orochi-network/bridge/issues/25)). The constructor seeds the role to the bootstrap admin (so the reserve can be funded at deploy), script 06 `TransferOwnership` grants it to the multisig at handoff, and `RenounceDeployerAdmin` renounces the deployer's grant. `DEFAULT_ADMIN_ROLE` is the role admin, so the multisig can re-delegate to a dedicated liquidity manager and revoke. Tests: `test_DepositRevertsWithoutLiquidityManagerRole`, `test_DepositSucceedsWithLiquidityManagerRole`, `test_ConstructorGrantsLiquidityManagerRoleToAdmin`, `test_AdminCanRevokeLiquidityManagerRole` (WrappedON.t.sol); the invariant handler and DeploymentE2E grant the role to their depositors.
+- **Location:** `src/WrappedON.sol` (`deposit`, `LIQUIDITY_MANAGER_ROLE`); `script/06_TransferOwnership.s.sol`.
+- **Description:** QuillAudits *Wrapped ON* Finding M3. `deposit()` was public and uncapped: any ETH-ON holder could mint wON 1:1. The team intends to seed a *limited* ETH-side reserve (≈10M, up to 100M). A public wrap lets anyone convert ETH ON → wON freely, which does not break the aggregate supply invariant but can grow wON supply — and therefore ETH→BSC redemption demand — beyond the BSC liquidity and rate limits the launch was sized for (compounding M2 / CCIP-2 stuck-message pressure).
+- **Impact:** A limited-liquidity launch would otherwise expose a public, uncapped conversion path; redemption demand toward BSC could exceed available BSC pool liquidity.
+- **Recommendation:** (Implemented) restrict `deposit` to a protocol-managed `LIQUIDITY_MANAGER_ROLE`. Per-window ETH→BSC redemption is then bounded by what the role-holder wraps plus the BSC inbound rate limits (see RUNBOOK §4.4).
 
 ---
 

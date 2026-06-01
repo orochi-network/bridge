@@ -61,6 +61,12 @@ contract WrappedONHandler is Test {
         return actors[seed % actors.length];
     }
 
+    /// @notice The fixed actor pool, exposed so the invariant test can grant each the
+    ///         LIQUIDITY_MANAGER_ROLE that `deposit` now requires (M3 / #25).
+    function getActors() external view returns (address[] memory) {
+        return actors;
+    }
+
     /// @dev Bound the amount so we don't routinely overflow or trivially blow the cap.
     function _boundAmt(uint256 raw, uint256 max) internal pure returns (uint256) {
         if (max == 0) {
@@ -278,6 +284,15 @@ contract WrappedONInvariantTest is StdInvariant, Test {
         vm.stopPrank();
 
         handler = new WrappedONHandler(won, onToken, pool);
+        // M3 (#25): deposit is gated to LIQUIDITY_MANAGER_ROLE. The handler pranks one of its
+        // fixed actors as the depositor, so grant the role to each actor.
+        bytes32 lmRole = won.LIQUIDITY_MANAGER_ROLE();
+        address[] memory acts = handler.getActors();
+        vm.startPrank(admin);
+        for (uint256 i = 0; i < acts.length; i++) {
+            won.grantRole(lmRole, acts[i]);
+        }
+        vm.stopPrank();
         // TEST-14: seed the handler's tracked ccipAdmin with the deployer-time admin so
         // the `setCCIPAdminRace` selector has a valid current admin to prank from.
         handler.seedCcipAdmin(admin);

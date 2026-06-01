@@ -53,6 +53,13 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
 
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
+    /// @notice Gates `deposit` (the wrap path). SECURITY: M3 (#25) — `deposit` is the
+    ///         protocol-managed reserve seed, NOT a public arbitrage layer; an uncapped
+    ///         permissionless wrap could grow wON supply (and ETH→BSC redemption demand)
+    ///         past the BSC liquidity / rate limits a launch was sized for. `DEFAULT_ADMIN_ROLE`
+    ///         is the role admin (OZ default), so the admin (deployer, then multisig) grants
+    ///         it to whoever manages the reserve. Granted to the bootstrap `admin` at deploy.
+    bytes32 public constant LIQUIDITY_MANAGER_ROLE = keccak256("LIQUIDITY_MANAGER_ROLE");
 
     /// @notice Cap on `ccipMintedSupply`. Matches canonical BSC ON supply — the upper bound
     ///         on ON that can ever be locked on the BSC pool.
@@ -131,6 +138,9 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         }
         ON = onToken;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        // M3 (#25): seed the reserve manager. Admin can re-delegate / revoke; the multisig
+        // takes it over at handoff (script 06) and the deployer renounces it on renounce.
+        _grantRole(LIQUIDITY_MANAGER_ROLE, admin);
         s_ccipAdmin = admin;
         emit CCIPAdminTransferred(address(0), admin);
     }
@@ -147,7 +157,10 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     ///      would otherwise let a `deposit(N)` call mint 0 wON and emit `Wrapped(_, 0)`.
     ///      Canonical ON cannot hit this, but the received-amount guard is what mints the
     ///      defensive accounting; rejecting `received == 0` matches the WON-1 mint guard.
-    function deposit(uint256 amount) external nonReentrant {
+    /// @dev M3 (#25): `onlyRole(LIQUIDITY_MANAGER_ROLE)`. The wrap path is the protocol-managed
+    ///      reserve, not a public arbitrage layer — restricting it bounds wON supply growth
+    ///      (and ETH→BSC redemption demand) to what the launch liquidity / rate limits support.
+    function deposit(uint256 amount) external nonReentrant onlyRole(LIQUIDITY_MANAGER_ROLE) {
         if (amount == 0) {
             revert ZeroAmount();
         }

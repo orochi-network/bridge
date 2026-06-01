@@ -46,8 +46,10 @@ Two chains, one canonical asset family:
   this repo deploys. CCIP-bridged value lives as wON.
 - **BSC side** uses a **lock/release** pool against the **existing** ON token.
   Outbound transfers lock ON in the pool; inbound transfers release it.
-- **wON** is also a 1:1 wrapper around native ETH-side ON: anyone can `deposit`
-  ON to mint wON, and `withdraw` to redeem (subject to reserve availability).
+- **wON** is also a 1:1 wrapper around native ETH-side ON: a `LIQUIDITY_MANAGER_ROLE`
+  holder can `deposit` ON to mint wON (M3 / #25 — the reserve is protocol-managed,
+  not a public wrap), and anyone holding wON can `withdraw` to redeem (subject to
+  reserve availability).
 
 This is **not a generic message bridge** — it transfers only tokens. There is no
 arbitrary cross-chain calldata routed through this repo.
@@ -151,7 +153,8 @@ pool's `staticcall`-based interface probes succeed.
 
 | Role | Held by | Purpose |
 |---|---|---|
-| `DEFAULT_ADMIN_ROLE` | deployer → multisig (handoff) | OZ AccessControl admin. Can grant/revoke `MINTER_ROLE` / `BURNER_ROLE`. |
+| `DEFAULT_ADMIN_ROLE` | deployer → multisig (handoff) | OZ AccessControl admin. Can grant/revoke `MINTER_ROLE` / `BURNER_ROLE` / `LIQUIDITY_MANAGER_ROLE`. |
+| `LIQUIDITY_MANAGER_ROLE` | deployer → multisig (handoff) | Gates `deposit` (the reserve wrap path). M3 (#25). Role admin is `DEFAULT_ADMIN_ROLE`. |
 | `MINTER_ROLE` | Ethereum `BurnMintTokenPool` only | CCIP inbound — calls `mint(account, amount)`. |
 | `BURNER_ROLE` | Ethereum `BurnMintTokenPool` only | CCIP outbound — calls one of three `burn` overloads. |
 | (logical) `s_ccipAdmin` | deployer → multisig (separate two-step) | Independent of `DEFAULT_ADMIN_ROLE`. Read by registry. |
@@ -160,7 +163,7 @@ pool's `staticcall`-based interface probes succeed.
 
 | Function | Caller | Effect |
 |---|---|---|
-| `deposit(amount)` | anyone | Pulls ON, mints wON 1:1. Received-amount accounting. `nonReentrant`. Uncapped. |
+| `deposit(amount)` | `LIQUIDITY_MANAGER_ROLE` | Pulls ON, mints wON 1:1. Received-amount accounting. `nonReentrant`. Uncapped in amount, role-gated (M3 / #25). |
 | `withdraw(amount)` | anyone | Burns wON, returns ON from reserve. Reverts on `InsufficientReserve`. `nonReentrant`. |
 | `mint(account, amount)` | `MINTER_ROLE` (pool) | CCIP-inbound mint. Increments `ccipMintedSupply` and reverts if cap exceeded. Emits `CCIPMinted`. |
 | `burn(amount)` / `burn(account, amount)` / `burnFrom(account, amount)` | `BURNER_ROLE` (pool) | CCIP-outbound burn. Saturating-decrements `ccipMintedSupply`. Emits `CCIPBurned`. |
@@ -247,9 +250,10 @@ contract while:
 
 Both mint paths produce **fungible** wON. They are backed differently:
 
-- **`deposit(amount)`** — user pulls native ETH ON; wON minted is backed by ON
-  held in the wON contract's own reserve. Uncapped (bounded naturally by
-  ETH-side ON supply). Independent of CCIP.
+- **`deposit(amount)`** — a `LIQUIDITY_MANAGER_ROLE` holder pulls native ETH ON;
+  wON minted is backed by ON held in the wON contract's own reserve. Role-gated
+  (M3 / #25 — protocol-managed reserve, not a public wrap), uncapped in amount,
+  independent of CCIP.
 - **`mint(...)`** — the Ethereum `BurnMintTokenPool` calls this on inbound CCIP
   messages. Backed by ON locked on the BSC `LockReleaseTokenPool`.
 

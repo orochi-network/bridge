@@ -152,6 +152,17 @@ contract TransferOwnership is Script, Helper {
                 console.log("wON DEFAULT_ADMIN_ROLE granted to:", multisig);
             }
 
+            // M3 (#25): hand the reserve-manager role to the multisig too, so post-handoff it
+            // can run/delegate `deposit`. DEFAULT_ADMIN_ROLE is its role admin, so the multisig
+            // can later re-delegate to a dedicated liquidity manager and revoke this grant.
+            bytes32 liquidityRole = won.LIQUIDITY_MANAGER_ROLE();
+            if (won.hasRole(liquidityRole, multisig)) {
+                console.log("wON LIQUIDITY_MANAGER_ROLE already held by multisig - skipping grant.");
+            } else {
+                won.grantRole(liquidityRole, multisig);
+                console.log("wON LIQUIDITY_MANAGER_ROLE granted to:", multisig);
+            }
+
             // Two-step CCIP admin handoff (see WrappedON M-7): propose now; multisig must
             // call `acceptCCIPAdmin` to take possession. Keeps a typo'd MULTISIG from
             // permanently stranding the role.
@@ -236,12 +247,20 @@ contract RenounceDeployerAdmin is Script, Helper {
 
         _assertReadyToRenounce(won, multisig, deployer, pool, cfg.tokenAdminRegistry);
 
+        bytes32 liquidityRole = won.LIQUIDITY_MANAGER_ROLE();
+
         vm.startBroadcast();
         won.renounceRole(adminRole, deployer);
+        // M3 (#25): also drop the reserve-manager role the constructor seeded to the deployer.
+        // `renounceRole` is a no-op if not held, so this is safe regardless of prior grants.
+        if (won.hasRole(liquidityRole, deployer)) {
+            won.renounceRole(liquidityRole, deployer);
+        }
         vm.stopBroadcast();
 
         require(!won.hasRole(adminRole, deployer), "renounce failed: deployer still has role");
-        console.log("Deployer", deployer, "renounced DEFAULT_ADMIN_ROLE on wON", address(won));
+        require(!won.hasRole(liquidityRole, deployer), "renounce failed: deployer still has liquidity role");
+        console.log("Deployer", deployer, "renounced DEFAULT_ADMIN_ROLE + LIQUIDITY_MANAGER_ROLE on wON");
         // SECURITY: DEP-3 — renounce is ETH-only; BSC pool ownership is enforced on a
         // separate chain. Remind the operator to independently verify the BSC handoff
         // before treating the renounce as a full surrender of authority.
