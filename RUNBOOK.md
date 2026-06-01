@@ -314,6 +314,50 @@ These contracts are non-upgradeable. To replace a pool:
 4. Multisig: `applyChainUpdates` on the new pool to link the remote.
 5. Drain the old pool. The locked-ON reserve on the BSC `LockReleaseTokenPool` is movable by the pool owner via `setRebalancer` → `withdrawLiquidity` (see [Trust model](#trust-model-bsc-reserve-custody) below). Either rebalance manually under multisig governance, or — preferred — plan migrations such that net positions are zero before swapping so no reserve movement is needed.
 
+### 4.4 Stuck or delayed ETH→BSC transfers (insufficient BSC liquidity)
+
+**This is the QuillAudits M2 scenario** (SECURITY: CCIP-2 / M2). An ETH→BSC
+transfer burns wON on Ethereum the moment the source message is accepted; the
+matching ON is only released on BSC when CCIP executes `releaseOrMint` on the
+BSC `LockReleaseTokenPool`. That release is a plain `ON.safeTransfer` out of the
+pool's own balance, so if the pool's releasable ON balance is below the transfer
+amount the **destination execution reverts on insufficient liquidity** and the
+message does not complete. The Ethereum burn has already happened, so the user's
+value is *in flight*, not lost — it completes once liquidity is restored and the
+message is re-executed. The aggregate invariant
+`lockedON_BSC + reserveON_ETH >= totalSupply(wON)` holds throughout.
+
+Because the Ethereum contracts cannot read BSC balances synchronously (see
+[Trust model](#trust-model-bsc-reserve-custody)), there is **no on-chain fix on
+the Ethereum side** — this is enforced operationally.
+
+**Prevention (at launch and on every rate-limit change):**
+- Size the **ETH→BSC (BSC-inbound) rate-limit** bucket so its capacity never
+  exceeds the BSC pool's releasable ON balance minus a safety buffer — the
+  outbound burst the ETH side will accept must be releasable on BSC. This is the
+  asymmetry `CCIP-2` warns about; do not leave limits symmetric if BSC liquidity
+  is thin. Tune via `make update-limits` (§4.1).
+- Keep the §3 monitoring alert live: page when
+  `BSC_ON.balanceOf(BSC_LockReleaseTokenPool)` falls below the configured ETH→BSC
+  rate-limit capacity plus buffer.
+
+**Recovery (a transfer is already stuck):**
+1. Confirm on the [CCIP Explorer](https://ccip.chain.link/) — a stuck ETH→BSC
+   message shows the destination execution failing on an insufficient-liquidity
+   revert.
+2. Replenish the BSC pool. **`provideLiquidity` is disabled on this deployment**
+   (`acceptLiquidity = false` → reverts `LiquidityNotAccepted`), so the rebalancer
+   cannot use it. Restore releasable liquidity by transferring ON **directly to
+   the BSC `LockReleaseTokenPool` address** from the operator reserve / multisig:
+   `releaseOrMint` and `withdrawLiquidity` both read the pool's raw `balanceOf`,
+   so a direct ERC-20 transfer is immediately releasable and remains withdrawable
+   later. (Organic BSC→ETH bridging also refills the pool.)
+3. Re-run the message via CCIP [manual execution](https://docs.chain.link/ccip/concepts/manual-execution)
+   from the Explorer once liquidity is present; the pending `releaseOrMint` then
+   succeeds and the receiver gets their ON.
+4. Post-incident: lower the ETH→BSC rate-limit capacity (§4.1) so accepted
+   outbound volume cannot again outrun BSC liquidity.
+
 ---
 
 ## Trust model: BSC reserve custody
@@ -343,6 +387,7 @@ This means the multisig effectively has custody of the BSC-side locked-ON reserv
 | `CCIPAdminTransferProposed` / `CCIPAdminTransferred` | wON | High |
 | `AdministratorTransferRequested` / `AdministratorTransferred` (registry — OPS-28) | TokenAdminRegistry | High |
 | `CCIPMinted` cumulative > BSC `IERC20(ON).balanceOf(LockReleaseTokenPool)` | wON ↔ BSC pool | **Critical** |
+| `BSC_ON.balanceOf(BSC pool)` < ETH→BSC rate-limit capacity + buffer (M2 / CCIP-2 — stuck-transfer precursor; see §4.4) | BSC pool ↔ ETH pool config | High |
 | `CCIPAdminProposalCancelled` | wON | High |
 | Outbound / inbound rate-limit bucket exhausted | both pools | Medium |
 
