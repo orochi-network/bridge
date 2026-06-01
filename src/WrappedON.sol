@@ -35,24 +35,26 @@ import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/ccip/interfaces/IGetCCIPA
 /// cannot independently verify that the matching BSC `lock` occurred. See SECURITY: CCIP-7
 /// and the §3 trust model.
 ///
-/// `MAX_CCIP_MINTED = 100M` caps `ccipMintedSupply` — a LOCAL ETH-side counter that exists
-/// only because that real CCIP-locked figure lives on BSC and is unreadable from here. It
-/// approximates the figure but is NOT it: it saturates at 0 (see CAP REPLENISHMENT) and
-/// reflects neither the BSC pool's operator-seeded rebalancer liquidity nor any live
-/// cross-chain read. The cap bounds damage from a compromised pool; it does NOT bound
-/// `totalSupply()` (the `deposit` path is uncapped). Not a per-token-provenance counter —
-/// wON is fungible. Saturating-subtract on burn handles deposit-backed wON being bridged
-/// out; pool lock/release accounting nets out regardless.
+/// `MAX_CCIP_MINTED = 100M` caps `ccipMintHeadroomUsed` — a LOCAL ETH-side counter of how
+/// much CCIP mint-cap headroom is consumed (M1 / #23 renamed it from the misleading
+/// `ccipMintedSupply`). It exists only because the real CCIP-locked figure lives on BSC and
+/// is unreadable from here, and it is NOT a gauge of BSC-locked liquidity: the
+/// saturating-decrement (below) and operator-seeded BSC liquidity make it drift from the true
+/// BSC balance. The cap bounds damage from a compromised pool; it does NOT bound
+/// `totalSupply()` (the `deposit` path is uncapped). Not a per-token-provenance counter — wON
+/// is fungible. Saturating-subtract on burn handles deposit-backed wON being bridged out;
+/// pool lock/release accounting nets out regardless.
 ///
-/// CAP REPLENISHMENT (SECURITY: CCIP-7): the cap is a live BSC-balance approximation, NOT
-/// a lifetime CCIP-mint bound. Deposit-backed wON cycled OUT through the bridge will burn
-/// and saturating-decrement `ccipMintedSupply` toward 0 even though the underlying mint
-/// was never CCIP-sourced — refilling cap headroom for subsequent CCIP inbound mints. The
-/// safety invariant (`lockedON_BSC + reserveON_ETH >= totalSupply(wON)`) is preserved
-/// regardless, because every CCIP mint here still pairs a BSC lock at the cap-checked
-/// moment, and burns reverse both sides in lockstep. Monitor `ccipMintedSupply` AS A
-/// FRACTION OF CURRENT BSC LOCKED BALANCE — not as a fraction of MAX_CCIP_MINTED — for an
-/// accurate live-exposure read.
+/// CAP REPLENISHMENT (SECURITY: M1 #23 / CCIP-7 / WON-3): the cap is NOT a lifetime
+/// CCIP-mint bound. Deposit-backed wON cycled OUT through the bridge burns and
+/// saturating-decrements `ccipMintHeadroomUsed` toward 0 even though the underlying mint was
+/// never CCIP-sourced — refilling cap headroom for subsequent CCIP inbound mints. Because of
+/// that saturation the counter can read BELOW the true BSC-locked balance, so it must NOT be
+/// treated as a BSC-liquidity proxy. The safety invariant
+/// (`lockedON_BSC + reserveON_ETH >= totalSupply(wON)`) holds regardless, because every CCIP
+/// mint still pairs a BSC lock at the cap-checked moment and burns reverse both sides in
+/// lockstep. For real cross-chain exposure read `IERC20(ON).balanceOf(BSC_pool)` as ground
+/// truth — NOT this counter.
 ///
 /// Safety invariant (mechanical): `lockedON_BSC + reserveON_ETH >= totalSupply(wON)`.
 ///
@@ -66,18 +68,20 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
 
-    /// @notice Cap on `ccipMintedSupply`. Matches canonical BSC ON supply — the upper bound
+    /// @notice Cap on `ccipMintHeadroomUsed`. Matches canonical BSC ON supply — the upper bound
     ///         on ON that can ever be locked on the BSC pool.
     uint256 public constant MAX_CCIP_MINTED = 100_000_000 ether;
 
     /// @notice Canonical ON on this chain (non-mintable ERC20).
     IERC20 public immutable ON;
 
-    /// @notice Approximates BSC pool's locked-ON balance. Incremented by CCIP `mint`,
-    ///         saturating-decremented by CCIP burns. Cap bounds damage from a buggy pool
-    ///         minting without a matching BSC lock. See contract NatSpec for why this is
-    ///         not a per-token-provenance counter.
-    uint256 public ccipMintedSupply;
+    /// @notice CCIP mint-cap headroom currently consumed, bounded by `MAX_CCIP_MINTED`.
+    ///         Incremented by CCIP `mint`, saturating-decremented by CCIP burns. The cap
+    ///         bounds damage from a buggy pool minting without a matching BSC lock. NOT a
+    ///         BSC-locked-liquidity gauge — it saturates at 0 and ignores operator-seeded
+    ///         liquidity (M1 / #23; renamed from `ccipMintedSupply`). Read
+    ///         `IERC20(ON).balanceOf(BSC_pool)` for true cross-chain exposure. See NatSpec.
+    uint256 public ccipMintHeadroomUsed;
 
     /// @notice CCIP admin read by `RegistryModuleOwnerCustom.registerAdminViaGetCCIPAdmin`.
     /// @dev Independent of `DEFAULT_ADMIN_ROLE`. Two-step rotation (propose + accept) so a
@@ -99,12 +103,12 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     event Unwrapped(address indexed account, uint256 amount);
     /// @notice Emitted by the CCIP `releaseOrMint` path. Lets indexers distinguish CCIP-inbound
     ///         mints from `deposit`-wrap mints (which emit `Wrapped`). Reports the post-call
-    ///         `ccipMintedSupply` so monitors don't need a second `eth_call`. SECURITY: WON-4.
-    event CCIPMinted(address indexed account, uint256 amount, uint256 ccipMintedSupply);
+    ///         `ccipMintHeadroomUsed` so monitors don't need a second `eth_call`. SECURITY: WON-4.
+    event CCIPMinted(address indexed account, uint256 amount, uint256 ccipMintHeadroomUsed);
     /// @notice Emitted by every CCIP burn entrypoint. Sibling to `CCIPMinted` — gives indexers
     ///         a named event in addition to the inherited ERC20 `Transfer(account, 0, amount)`.
     ///         SECURITY: WON-4.
-    event CCIPBurned(address indexed account, uint256 amount, uint256 ccipMintedSupply);
+    event CCIPBurned(address indexed account, uint256 amount, uint256 ccipMintHeadroomUsed);
     event CCIPAdminTransferProposed(address indexed currentAdmin, address indexed proposed);
     event CCIPAdminTransferred(address indexed previousAdmin, address indexed newAdmin);
     /// @notice Emitted when an in-flight `setCCIPAdmin` proposal is overwritten by a new
@@ -177,7 +181,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     }
 
     /// @notice Burns `amount` wON from `msg.sender` and returns `amount` ON from the reserve.
-    /// @dev Does NOT decrement `ccipMintedSupply` — `withdraw` only moves ETH-side reserve
+    /// @dev Does NOT decrement `ccipMintHeadroomUsed` — `withdraw` only moves ETH-side reserve
     ///      and never triggers a BSC release, so decrementing would desync from BSC balance.
     ///      Cost: a CCIP-minted holder can drain the deposit reserve (intended arbitrage
     ///      layer).
@@ -197,7 +201,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     // ─── IBurnMintERC20 (pool-only) ───────────────────────────────────────────
 
     /// @notice CCIP `BurnMintTokenPool.releaseOrMint` entrypoint.
-    /// @dev Capped at `MAX_CCIP_MINTED` via `ccipMintedSupply`. See the contract-level
+    /// @dev Capped at `MAX_CCIP_MINTED` via `ccipMintHeadroomUsed`. See the contract-level
     ///      CAP REPLENISHMENT block (CCIP-7) for the cycling-refill semantics — the cap
     ///      is a live BSC-balance approximation, not a lifetime CCIP-mint ceiling.
     ///      WON-17: `nonReentrant` is defensive — OZ 5.x ERC20 has no hooks, so re-entry
@@ -210,11 +214,11 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         if (amount == 0) {
             revert ZeroAmount();
         }
-        uint256 wouldBe = ccipMintedSupply + amount;
+        uint256 wouldBe = ccipMintHeadroomUsed + amount;
         if (wouldBe > MAX_CCIP_MINTED) {
             revert CCIPMintCapExceeded(MAX_CCIP_MINTED, wouldBe);
         }
-        ccipMintedSupply = wouldBe;
+        ccipMintHeadroomUsed = wouldBe;
         _mint(account, amount);
         emit CCIPMinted(account, amount, wouldBe);
     }
@@ -228,7 +232,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         if (amount == 0) {
             revert ZeroAmount();
         }
-        uint256 newSupply = _decrementCcipMinted(amount);
+        uint256 newSupply = _decrementCcipMintHeadroom(amount);
         _burn(msg.sender, amount);
         emit CCIPBurned(msg.sender, amount, newSupply);
     }
@@ -242,7 +246,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         if (amount == 0) {
             revert ZeroAmount();
         }
-        uint256 newSupply = _decrementCcipMinted(amount);
+        uint256 newSupply = _decrementCcipMintHeadroom(amount);
         _burn(account, amount);
         emit CCIPBurned(account, amount, newSupply);
     }
@@ -253,7 +257,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
             revert ZeroAmount();
         }
         _spendAllowance(account, msg.sender, amount);
-        uint256 newSupply = _decrementCcipMinted(amount);
+        uint256 newSupply = _decrementCcipMintHeadroom(amount);
         _burn(account, amount);
         emit CCIPBurned(account, amount, newSupply);
     }
@@ -333,9 +337,9 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     /// @dev WON-13: returns the new supply so each burn entrypoint can emit `CCIPBurned`
     ///      with the local variable instead of re-reading storage (saves one SLOAD per burn
     ///      and matches the `mint` path's local-variable pattern).
-    function _decrementCcipMinted(uint256 amount) internal returns (uint256 newSupply) {
-        uint256 current = ccipMintedSupply;
+    function _decrementCcipMintHeadroom(uint256 amount) internal returns (uint256 newSupply) {
+        uint256 current = ccipMintHeadroomUsed;
         newSupply = amount >= current ? 0 : current - amount;
-        ccipMintedSupply = newSupply;
+        ccipMintHeadroomUsed = newSupply;
     }
 }

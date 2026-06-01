@@ -460,16 +460,16 @@ This means the multisig effectively has custody of the BSC-side locked-ON reserv
   not currently expose `_setRoleAdmin` externally (OZ AccessControl 5.x internal), so
   not an active vector — but if a future redeploy ever does, the monitor is in place.
 
-**Note on `ccipMintedSupply` monitoring** (SECURITY: WON-3 / CCIP-7). CCIP pairs every
+**Note on `ccipMintHeadroomUsed` monitoring** (SECURITY: WON-3 / CCIP-7). CCIP pairs every
 BSC `lock`/`release` 1:1 with an Ethereum `mint`/`burn`, so the ON locked on BSC *via CCIP*
 equals the wON minted on Ethereum *via CCIP* — but that equality is enforced by Chainlink
 (the DON + RMN), not by the wON contract: **Ethereum cannot read the BSC pool's balance.**
-The contract-side `ccipMintedSupply` counter is only a *local* proxy for that off-chain
-figure; it saturating-decrements on burns of deposit-backed wON, so it can drift below the
-true BSC exposure. Source the cross-chain risk signal from
-`IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` as the authoritative locked-balance read;
-treat `ccipMintedSupply` as a useful local indicator but not the ground truth for "how much
-value is in flight."
+The contract-side `ccipMintHeadroomUsed` counter (renamed from `ccipMintedSupply` per M1 / #23)
+is only a *local* proxy for that off-chain figure; it saturating-decrements on burns of
+deposit-backed wON, so it can drift below the true BSC exposure. Source the cross-chain risk
+signal from `IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` as the authoritative
+locked-balance read; treat `ccipMintHeadroomUsed` as a useful local indicator but not the
+ground truth for "how much value is in flight."
 
 Source the events in `lib/ccip/contracts/src/v0.8/ccip/pools/LockReleaseTokenPool.sol` and `src/WrappedON.sol`. Page the on-call rotation on Critical lines.
 

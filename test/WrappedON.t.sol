@@ -517,7 +517,7 @@ contract WrappedONTest is Test {
         won.mint(alice, 0);
     }
 
-    /// @notice WON-4: `mint` emits the named `CCIPMinted(account, amount, ccipMintedSupply)`
+    /// @notice WON-4: `mint` emits the named `CCIPMinted(account, amount, ccipMintHeadroomUsed)`
     ///         event in addition to the inherited ERC20 `Transfer`, so indexers can
     ///         distinguish CCIP inbound from deposit-backed mints.
     function test_MintEmitsCCIPMinted() public {
@@ -597,42 +597,42 @@ contract WrappedONTest is Test {
     }
 
     /// @notice TEST-12: `mint(address(0), amount)` must revert and must NOT inflate
-    ///         `ccipMintedSupply`. `_mintCapped` writes the counter BEFORE `_mint`; in OZ 5.x
+    ///         `ccipMintHeadroomUsed`. `_mintCapped` writes the counter BEFORE `_mint`; in OZ 5.x
     ///         `_mint(address(0), …)` reverts `ERC20InvalidReceiver`, which the EVM rolls
     ///         back along with the counter write — so the contract is safe today, but the
     ///         ordering is a load-bearing assumption worth pinning. A future refactor that
     ///         decoupled increment and mint could leave the counter permanently inflated.
     function test_MintToZeroAddressRevertsAndDoesNotInflate() public {
-        uint256 before = won.ccipMintedSupply();
+        uint256 before = won.ccipMintHeadroomUsed();
         vm.prank(pool);
         vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InvalidReceiver.selector, address(0)));
         won.mint(address(0), 5 ether);
-        assertEq(won.ccipMintedSupply(), before, "counter must not move on revert");
+        assertEq(won.ccipMintHeadroomUsed(), before, "counter must not move on revert");
     }
 
     /// @notice TEST-12 (companion to mint-zero, per Chiro's review question): the
     ///         `burn(address, uint256)` overload against `address(0)` must revert with the
-    ///         OZ `ERC20InvalidSender` and must NOT desync `ccipMintedSupply`. Unlike the
-    ///         mint path, the burn entrypoints call `_decrementCcipMinted` BEFORE `_burn`;
+    ///         OZ `ERC20InvalidSender` and must NOT desync `ccipMintHeadroomUsed`. Unlike the
+    ///         mint path, the burn entrypoints call `_decrementCcipMintHeadroom` BEFORE `_burn`;
     ///         the EVM rolls the counter change back when `_burn` reverts. Pin the
     ///         ordering with a test so a future refactor can't quietly desync the counter.
     function test_BurnAddressOverloadZeroAddressRevertsAndDoesNotDesync() public {
-        // Seed `ccipMintedSupply` so a desync would be observable.
+        // Seed `ccipMintHeadroomUsed` so a desync would be observable.
         vm.prank(pool);
         won.mint(alice, 50 ether);
-        uint256 before = won.ccipMintedSupply();
+        uint256 before = won.ccipMintHeadroomUsed();
 
         vm.prank(pool);
         vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InvalidSender.selector, address(0)));
         won.burn(address(0), 10 ether);
-        assertEq(won.ccipMintedSupply(), before, "counter must not move on revert");
+        assertEq(won.ccipMintHeadroomUsed(), before, "counter must not move on revert");
     }
 
     function test_MintRevertsAtCCIPMintCap() public {
         uint256 cap = won.MAX_CCIP_MINTED();
         vm.prank(pool);
         won.mint(alice, cap);
-        assertEq(won.ccipMintedSupply(), cap);
+        assertEq(won.ccipMintHeadroomUsed(), cap);
         assertEq(won.totalSupply(), cap);
 
         vm.prank(pool);
@@ -646,7 +646,7 @@ contract WrappedONTest is Test {
         uint256 cap = won.MAX_CCIP_MINTED();
         vm.prank(pool);
         won.mint(bob, cap);
-        assertEq(won.ccipMintedSupply(), cap);
+        assertEq(won.ccipMintHeadroomUsed(), cap);
 
         vm.startPrank(alice);
         on.approve(address(won), 100 ether);
@@ -655,22 +655,22 @@ contract WrappedONTest is Test {
 
         assertEq(won.balanceOf(alice), 100 ether);
         assertEq(won.totalSupply(), cap + 100 ether);
-        assertEq(won.ccipMintedSupply(), cap, "deposit must not move ccipMintedSupply");
+        assertEq(won.ccipMintHeadroomUsed(), cap, "deposit must not move ccipMintHeadroomUsed");
     }
 
     function test_BurnDecrementsCCIPMintedSupply() public {
         vm.prank(pool);
         won.mint(pool, 80 ether);
-        assertEq(won.ccipMintedSupply(), 80 ether);
+        assertEq(won.ccipMintHeadroomUsed(), 80 ether);
 
         vm.prank(pool);
         won.burn(30 ether);
-        assertEq(won.ccipMintedSupply(), 50 ether, "burn frees cap headroom");
+        assertEq(won.ccipMintHeadroomUsed(), 50 ether, "burn frees cap headroom");
 
         // Cap should be re-mintable now.
         vm.prank(pool);
         won.mint(alice, 30 ether);
-        assertEq(won.ccipMintedSupply(), 80 ether);
+        assertEq(won.ccipMintHeadroomUsed(), 80 ether);
     }
 
     function test_BurnSaturatesCCIPMintedAtZero() public {
@@ -680,13 +680,13 @@ contract WrappedONTest is Test {
         won.deposit(100 ether);
         won.transfer(pool, 100 ether);
         vm.stopPrank();
-        assertEq(won.ccipMintedSupply(), 0);
+        assertEq(won.ccipMintHeadroomUsed(), 0);
 
         // Pool burns its own 100 wON (via outbound CCIP send of deposit-backed wON).
-        // ccipMintedSupply must NOT underflow — it stays at 0.
+        // ccipMintHeadroomUsed must NOT underflow — it stays at 0.
         vm.prank(pool);
         won.burn(100 ether);
-        assertEq(won.ccipMintedSupply(), 0);
+        assertEq(won.ccipMintHeadroomUsed(), 0);
     }
 
     function test_BurnAddressOverloadDecrementsCCIPMinted() public {
@@ -694,7 +694,7 @@ contract WrappedONTest is Test {
         won.mint(alice, 50 ether);
         vm.prank(pool);
         won.burn(alice, 20 ether);
-        assertEq(won.ccipMintedSupply(), 30 ether);
+        assertEq(won.ccipMintHeadroomUsed(), 30 ether);
     }
 
     function test_BurnFromDecrementsCCIPMinted() public {
@@ -706,7 +706,7 @@ contract WrappedONTest is Test {
 
         vm.prank(pool);
         won.burnFrom(alice, 25 ether);
-        assertEq(won.ccipMintedSupply(), 25 ether);
+        assertEq(won.ccipMintHeadroomUsed(), 25 ether);
     }
 
     /// @notice WON-11: every burn entrypoint rejects zero-amount calls (mirrors the
@@ -850,12 +850,12 @@ contract WrappedONTest is Test {
 
         vm.prank(pool);
         won.mint(alice, firstMint);
-        assertEq(won.ccipMintedSupply(), firstMint);
+        assertEq(won.ccipMintHeadroomUsed(), firstMint);
 
         // Filling exactly to the cap must succeed.
         vm.prank(pool);
         won.mint(alice, underBy);
-        assertEq(won.ccipMintedSupply(), cap);
+        assertEq(won.ccipMintHeadroomUsed(), cap);
 
         // One wei over must revert.
         vm.prank(pool);
@@ -871,15 +871,15 @@ contract WrappedONTest is Test {
 
         vm.prank(pool);
         won.mint(pool, amount);
-        assertEq(won.ccipMintedSupply(), amount);
+        assertEq(won.ccipMintHeadroomUsed(), amount);
 
         vm.prank(pool);
         won.burn(amount);
-        assertEq(won.ccipMintedSupply(), 0, "burn frees cap");
+        assertEq(won.ccipMintHeadroomUsed(), 0, "burn frees cap");
 
         // Cap is now fully re-mintable.
         vm.prank(pool);
         won.mint(alice, cap);
-        assertEq(won.ccipMintedSupply(), cap);
+        assertEq(won.ccipMintHeadroomUsed(), cap);
     }
 }

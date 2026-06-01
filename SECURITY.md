@@ -137,21 +137,21 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Impact:** Single-pool deployment is safe; multi-grantee deployment is not.
 - **Recommendation:** Add a `getRoleMemberCount(BURNER_ROLE) <= 1` post-deploy assertion to `script/08_PostDeployVerify.s.sol`, and document the constraint in the multisig handoff runbook.
 
-### WON-3: `ccipMintedSupply` can be depressed below true BSC-locked balance
+### WON-3: `ccipMintHeadroomUsed` can be depressed below true BSC-locked balance
 - **Severity:** LOW
-- **Status:** FIXED — RUNBOOK monitoring table now keys on `IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` as the authoritative locked-balance read with an explicit note that `ccipMintedSupply` is a local indicator only.
-- **Location:** `src/WrappedON.sol:234-237`
-- **Description:** The saturating-decrement in `_decrementCcipMinted` is intentional: it handles deposit-backed wON being bridged outbound without underflowing. The consequence is that `ccipMintedSupply` can read zero while a non-trivial amount of BSC-locked ON exists. Monitoring alerts keyed only to `ccipMintedSupply` approaching `MAX_CCIP_MINTED` may produce false negatives. (Closely related to CCIP-7.)
-- **Impact:** `ccipMintedSupply` is not a reliable real-time BSC-exposure gauge. Operational/monitoring risk only.
-- **Recommendation:** RUNBOOK monitoring guidance should key on the BSC `LockReleaseTokenPool` locked balance (on-chain call or event index) alongside `ccipMintedSupply`.
+- **Status:** FIXED — RUNBOOK monitoring table now keys on `IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` as the authoritative locked-balance read with an explicit note that `ccipMintHeadroomUsed` is a local indicator only. **M1 / #23:** the counter was additionally renamed `ccipMintedSupply` → `ccipMintHeadroomUsed` (and `_decrementCcipMinted` → `_decrementCcipMintHeadroom`) so the name no longer implies it tracks BSC-side minted/locked supply — it is a CCIP mint-cap *headroom* counter. This is the chosen alignment for QuillAudits **M1** (the "soft headroom counter" option): keep the saturating subtract, rename so no name/doc presents it as a BSC-liquidity proxy; authoritative exposure stays `BSC_ON.balanceOf(BSC_pool)`.
+- **Location:** `src/WrappedON.sol` (`ccipMintHeadroomUsed`, `_decrementCcipMintHeadroom`)
+- **Description:** The saturating-decrement in `_decrementCcipMintHeadroom` is intentional: it handles deposit-backed wON being bridged outbound without underflowing. The consequence is that `ccipMintHeadroomUsed` can read zero while a non-trivial amount of BSC-locked ON exists. Monitoring alerts keyed only to `ccipMintHeadroomUsed` approaching `MAX_CCIP_MINTED` may produce false negatives. (Closely related to CCIP-7.)
+- **Impact:** `ccipMintHeadroomUsed` is not a reliable real-time BSC-exposure gauge. Operational/monitoring risk only.
+- **Recommendation:** RUNBOOK monitoring guidance should key on the BSC `LockReleaseTokenPool` locked balance (on-chain call or event index) alongside `ccipMintHeadroomUsed`.
 
 ### WON-4: No named event emitted on `mint` / `burn` paths
 - **Severity:** LOW
-- **Status:** FIXED — `CCIPMinted(account, amount, ccipMintedSupply)` emitted from `mint`; `CCIPBurned(account, amount, ccipMintedSupply)` emitted from all three burn entrypoints. Tests: `test_MintEmitsCCIPMinted`, `test_BurnEmitsCCIPBurned_*`.
+- **Status:** FIXED — `CCIPMinted(account, amount, ccipMintHeadroomUsed)` emitted from `mint`; `CCIPBurned(account, amount, ccipMintHeadroomUsed)` emitted from all three burn entrypoints. Tests: `test_MintEmitsCCIPMinted`, `test_BurnEmitsCCIPBurned_*`.
 - **Location:** `src/WrappedON.sol:146-153`, burn entrypoints
 - **Description:** `deposit` emits `Wrapped`, `withdraw` emits `Unwrapped`, but the CCIP `mint` path emits only the inherited ERC20 `Transfer(address(0), account, amount)`. Burns are similar. Indexers cannot distinguish CCIP-inbound mints from deposit wraps by event topic alone.
 - **Impact:** Cross-chain reconciliation tooling must correlate with pool-level CCIP events.
-- **Recommendation:** Add `CCIPMinted(address indexed account, uint256 amount, uint256 ccipMintedSupply)` (and optionally `CCIPBurned`) for direct on-chain auditability.
+- **Recommendation:** Add `CCIPMinted(address indexed account, uint256 amount, uint256 ccipMintHeadroomUsed)` (and optionally `CCIPBurned`) for direct on-chain auditability.
 
 ### WON-5: Overwriting pending CCIP admin produces no cancellation event
 - **Severity:** LOW
@@ -217,13 +217,13 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Impact:** None for funds; potential indexer race only.
 - **Recommendation:** Reorder to state-write-then-emit.
 
-### WON-13: `CCIPBurned` re-reads `ccipMintedSupply` from storage
+### WON-13: `CCIPBurned` re-reads `ccipMintHeadroomUsed` from storage
 - **Severity:** LOW
-- **Status:** FIXED — `_decrementCcipMinted` now returns the new supply; each burn path emits the local return value (saves one SLOAD per burn × 3 sites, matches the `mint` path's `wouldBe`-local pattern).
+- **Status:** FIXED — `_decrementCcipMintHeadroom` now returns the new supply; each burn path emits the local return value (saves one SLOAD per burn × 3 sites, matches the `mint` path's `wouldBe`-local pattern).
 - **Location:** `src/WrappedON.sol:189-211, 275-282`
 - **Description:** Asymmetric with the `mint` path which emits the local `wouldBe`. Identical pattern in three places was a refactor smell.
 - **Impact:** Gas only.
-- **Recommendation:** Return-value refactor on `_decrementCcipMinted`.
+- **Recommendation:** Return-value refactor on `_decrementCcipMintHeadroom`.
 
 ### WON-14: `deposit` admits a `received == 0` no-op path
 - **Severity:** LOW
@@ -251,7 +251,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 
 ### WON-17: CCIP `mint`/`burn` entrypoints lack `nonReentrant`
 - **Severity:** LOW
-- **Status:** FIXED — added `nonReentrant` to `mint`, `burn(uint256)`, `burn(address,uint256)`, `burnFrom`. Defence-in-depth: OZ 5.x ERC20 has no hooks, so reentry via `_mint`/`_burn` cannot happen against the current code — but a future OZ release or a subclass override adding an `_update` hook would expose a `ccipMintedSupply` desync window. The `deposit`/`withdraw` paths already carry `nonReentrant`; consistency was worth the ~2.5k gas/call.
+- **Status:** FIXED — added `nonReentrant` to `mint`, `burn(uint256)`, `burn(address,uint256)`, `burnFrom`. Defence-in-depth: OZ 5.x ERC20 has no hooks, so reentry via `_mint`/`_burn` cannot happen against the current code — but a future OZ release or a subclass override adding an `_update` hook would expose a `ccipMintHeadroomUsed` desync window. The `deposit`/`withdraw` paths already carry `nonReentrant`; consistency was worth the ~2.5k gas/call.
 - **Location:** `src/WrappedON.sol:173, 191, 199, 206`
 - **Description:** The CCIP-side entrypoints didn't carry the same modifier as the wrap-side, so a hookable-token redeploy or a future OZ subclass change could open a same-tx reentry. Existing invariants pass under the new modifier.
 - **Impact:** No active exploit path against current OZ ERC20; forward-compat hardening.
@@ -500,11 +500,11 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 
 ### CCIP-7: `MAX_CCIP_MINTED` cap is not a lifetime bound — bridge cycling can refill headroom
 - **Severity:** MEDIUM
-- **Status:** DOC ADDED — `WrappedON.sol` NatSpec now contains a dedicated CAP REPLENISHMENT paragraph spelling out the cycling-refills-headroom behaviour, the preserved safety invariant, and the operational consequence (monitor `ccipMintedSupply` relative to current BSC locked balance, not relative to `MAX_CCIP_MINTED`). The monotone-counter alternative is left as a redeploy option if a true lifetime CCIP-mint bound becomes a requirement.
+- **Status:** DOC ADDED — `WrappedON.sol` NatSpec now contains a dedicated CAP REPLENISHMENT paragraph spelling out the cycling-refills-headroom behaviour, the preserved safety invariant, and the operational consequence (monitor `ccipMintHeadroomUsed` relative to current BSC locked balance, not relative to `MAX_CCIP_MINTED`). The monotone-counter alternative is left as a redeploy option if a true lifetime CCIP-mint bound becomes a requirement. **M1 / #23:** the counter was renamed `ccipMintedSupply` → `ccipMintHeadroomUsed` to make the "headroom used, not BSC-minted-supply" semantics explicit at the identifier level (see WON-3).
 - **External audit:** Maps to QuillAudits *Wrapped ON* Initial Audit Report — Finding I4 (Informational, reviewed at `b9de6da`), tracked as repo issue [#26](https://github.com/orochi-network/bridge/issues/26). Closed by a doc-consistency sweep of `README.md`, `RUNBOOK.md`, and `docs/ARCHITECTURE.md` confirming no wording presents `MAX_CCIP_MINTED` as a `totalSupply()` ceiling. Canonical phrasing: *MAX_CCIP_MINTED caps the local CCIP mint counter, not aggregate wON supply.*
-- **Clarification (the exact invariant vs. the local counter):** The genuine cross-chain invariant is enforced by CCIP, not by this contract: every CCIP message pairs one BSC `lock`/`release` with one Ethereum `mint`/`burn`, so the ON locked on BSC *via CCIP* equals the wON minted on Ethereum *via CCIP*, message-for-message. **Ethereum cannot read the BSC pool's balance**, so that equality rests on a Chainlink trust assumption (the DON + RMN delivering each message once and honouring the pairing) — `mint` fires when the trusted off-ramp calls `releaseOrMint` and cannot verify the matching BSC lock itself. `ccipMintedSupply` is only a *local* proxy that exists because the real figure is off-chain: it saturates at 0 (hence WON-3) and reflects neither operator-seeded rebalancer liquidity nor any live cross-chain read. Do not conflate the exact protocol pairing with the approximate local counter.
+- **Clarification (the exact invariant vs. the local counter):** The genuine cross-chain invariant is enforced by CCIP, not by this contract: every CCIP message pairs one BSC `lock`/`release` with one Ethereum `mint`/`burn`, so the ON locked on BSC *via CCIP* equals the wON minted on Ethereum *via CCIP*, message-for-message. **Ethereum cannot read the BSC pool's balance**, so that equality rests on a Chainlink trust assumption (the DON + RMN delivering each message once and honouring the pairing) — `mint` fires when the trusted off-ramp calls `releaseOrMint` and cannot verify the matching BSC lock itself. `ccipMintHeadroomUsed` is only a *local* proxy that exists because the real figure is off-chain: it saturates at 0 (hence WON-3) and reflects neither operator-seeded rebalancer liquidity nor any live cross-chain read. Do not conflate the exact protocol pairing with the approximate local counter.
 - **Location:** `src/WrappedON.sol:234-237` (saturating decrement)
-- **Description:** wON is fungible. A user can `deposit` native ETH-side ON (deposit-backed wON, `ccipMintedSupply` untouched), then bridge that wON to BSC (`burn` saturating-decrements `ccipMintedSupply` toward zero). After cycling, the 100M cap is fully replenished, even though no CCIP-minted supply was burned. In the extreme: 100M deposit → 100M bridge-out → counter resets to 0 → another 100M CCIP-mint available. The safety invariant `lockedON_BSC + reserveON_ETH >= totalSupply(wON)` still holds, but the cap's intent (bounding damage from a compromised pool) is weakened: compromised-pool damage is bounded by *current* `ccipMintedSupply` headroom, which may exceed 100M cumulatively over time.
+- **Description:** wON is fungible. A user can `deposit` native ETH-side ON (deposit-backed wON, `ccipMintHeadroomUsed` untouched), then bridge that wON to BSC (`burn` saturating-decrements `ccipMintHeadroomUsed` toward zero). After cycling, the 100M cap is fully replenished, even though no CCIP-minted supply was burned. In the extreme: 100M deposit → 100M bridge-out → counter resets to 0 → another 100M CCIP-mint available. The safety invariant `lockedON_BSC + reserveON_ETH >= totalSupply(wON)` still holds, but the cap's intent (bounding damage from a compromised pool) is weakened: compromised-pool damage is bounded by *current* `ccipMintHeadroomUsed` headroom, which may exceed 100M cumulatively over time.
 - **Impact:** The cap is an approximation, not a hard CCIP-mint lifetime ceiling. The contract NatSpec already states this; the SECURITY-relevant point is that monitoring should not assume cap-fraction-used equals risk-fraction-used.
 - **Recommendation:** Document the cycling scenario explicitly in `WrappedON.sol` NatSpec. If a true lifetime CCIP-mint bound is desired, use a monotone non-decrementing counter (with a parallel cap higher than 100M to permit honest cycling).
 
@@ -610,9 +610,9 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 
 ### TEST-6: Invariant handler exercises only `burn(amount)` — `burnFrom` and `burn(address,uint256)` omitted
 - **Severity:** MEDIUM
-- **Status:** FIXED — added `ccipBurnFrom` (approves pool, then `burnFrom`) and `ccipBurnAddress` (pool calls `burn(address,uint256)`) as handler actions; both included in `targetSelector`. Every burn overload's `_decrementCcipMinted` branch is now fuzzer-reachable.
+- **Status:** FIXED — added `ccipBurnFrom` (approves pool, then `burnFrom`) and `ccipBurnAddress` (pool calls `burn(address,uint256)`) as handler actions; both included in `targetSelector`. Every burn overload's `_decrementCcipMintHeadroom` branch is now fuzzer-reachable.
 - **Location:** `test/WrappedONInvariant.t.sol:113-132,152-166`
-- **Description:** Both invariant burn actions call the single-argument overload. The other two overloads each independently call `_decrementCcipMinted`. Multi-step sequences involving them (including allowance interactions) are invisible to the property-based engine.
+- **Description:** Both invariant burn actions call the single-argument overload. The other two overloads each independently call `_decrementCcipMintHeadroom`. Multi-step sequences involving them (including allowance interactions) are invisible to the property-based engine.
 - **Impact:** Path-specific saturating-decrement bugs in `burnFrom` or `burn(address,uint256)` would be missed.
 - **Recommendation:** Add `ccipBurnFrom` and `ccipBurnAddress` handler actions and include them in `targetSelector`.
 
@@ -659,10 +659,10 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 
 ### TEST-12: `mint(address(0))` and `burn(address(0))` ordering not pinned
 - **Severity:** LOW
-- **Status:** FIXED — added two tests in `test/WrappedON.t.sol`: `test_MintToZeroAddressRevertsAndDoesNotInflate` asserts `ERC20InvalidReceiver` AND `ccipMintedSupply` unchanged; `test_BurnAddressOverloadZeroAddressRevertsAndDoesNotDesync` asserts `ERC20InvalidSender` AND `ccipMintedSupply` unchanged. The mint-path test pins the WriteCounter→Mint ordering (OZ rolls the counter write back on the `_mint(0)` revert); the burn-path test pins the WriteCounter→Burn ordering (OZ rolls the saturating-decrement back on the `_burn(0)` revert). Two complementary halves cover the symmetric class — a future refactor that decoupled counter and ERC20 path on either side would break one of them.
+- **Status:** FIXED — added two tests in `test/WrappedON.t.sol`: `test_MintToZeroAddressRevertsAndDoesNotInflate` asserts `ERC20InvalidReceiver` AND `ccipMintHeadroomUsed` unchanged; `test_BurnAddressOverloadZeroAddressRevertsAndDoesNotDesync` asserts `ERC20InvalidSender` AND `ccipMintHeadroomUsed` unchanged. The mint-path test pins the WriteCounter→Mint ordering (OZ rolls the counter write back on the `_mint(0)` revert); the burn-path test pins the WriteCounter→Burn ordering (OZ rolls the saturating-decrement back on the `_burn(0)` revert). Two complementary halves cover the symmetric class — a future refactor that decoupled counter and ERC20 path on either side would break one of them.
 - **Location:** `test/WrappedON.t.sol`
-- **Description:** `ccipMintedSupply` is incremented BEFORE `_mint`; on OZ 5.x `ERC20InvalidReceiver` the EVM rolls back, so it's safe today. No test pinned the ordering.
-- **Impact:** A refactor decoupling the increment from the mint could leave `ccipMintedSupply` permanently inflated.
+- **Description:** `ccipMintHeadroomUsed` is incremented BEFORE `_mint`; on OZ 5.x `ERC20InvalidReceiver` the EVM rolls back, so it's safe today. No test pinned the ordering.
+- **Impact:** A refactor decoupling the increment from the mint could leave `ccipMintHeadroomUsed` permanently inflated.
 - **Recommendation:** Add `test_MintToZeroAddressRevertsAndDoesNotInflate` (and symmetric `burn(address(0))` test).
 
 ### TEST-13: Script-04 path-3 silent-revert disambiguation lacks dedicated mock
