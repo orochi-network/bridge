@@ -88,6 +88,22 @@ make test                 # all 130 non-fork tests (126 unit/integration + 4 sta
 make fmt-check
 ```
 
+### 0.5 Verify external documentation links (issue #20)
+
+Chainlink restructures `docs.chain.link` periodically — pages move and the old
+URLs 404 silently (this happened to the legacy
+`/ccip/concepts/cross-chain-token/{token-pools,tokens,registration-and-administration}`
+paths). Before tagging a release, confirm every Chainlink URL referenced in the
+tracked docs and scripts still resolves:
+
+```bash
+make check-links          # curls each https://docs.chain.link/... URL; exits non-zero on any non-200
+```
+
+If a link fails, find the current page from the [CCIP docs](https://docs.chain.link/ccip)
+and update the referencing source file. This check is network-dependent and is
+deliberately **not** part of PR CI (it would be flaky); treat it as a release gate.
+
 ---
 
 ## 1. Testnet deployment
