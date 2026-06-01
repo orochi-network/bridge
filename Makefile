@@ -1,5 +1,5 @@
-.PHONY: help install patch-pragmas build test test-unit test-e2e test-fork fmt fmt-check coverage clean \
-        precheck-helper deploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce update-limits
+.PHONY: help install patch-pragmas build test test-unit test-e2e test-fork fmt fmt-check coverage clean check-links \
+        precheck-helper validate-config validate-bsc-admin deploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce update-limits
 
 # ─── Defaults ──────────────────────────────────────────────────────────────────
 SHELL := /bin/bash
@@ -17,12 +17,15 @@ help:
 	@echo "  make fmt             forge fmt"
 	@echo "  make fmt-check       forge fmt --check"
 	@echo "  make coverage        forge coverage --report summary"
+	@echo "  make check-links     verify Chainlink doc URLs in tracked sources still resolve (pre-release)"
 	@echo "  make clean           remove cache/, out/, broadcast/"
 	@echo ""
 	@echo "Deployment (load .env first; values in capitals come from env):"
 	@echo "  ETH_RPC, BSC_RPC, SEPOLIA_RPC, BSC_TESTNET_RPC, DEPLOYER_PK, DEPLOYER, MULTISIG"
 	@echo ""
-	@echo "  make precheck-helper RPC=...                         # validate Helper.sol placeholders"
+	@echo "  make precheck-helper RPC=...                         # Helper.sol non-zero placeholder check (pure)"
+	@echo "  make validate-config RPC=...                         # live staticcall check of CCIP infra addrs (#21)"
+	@echo "  make validate-bsc-admin RPC=bsc DEPLOYER=0x..        # probe BSC ON CCIP-admin path (#22)"
 	@echo "  make deploy-eth      RPC=sepolia                     # 01-03 + 04 + 05"
 	@echo "  make deploy-bsc      RPC=bsc_testnet                 # 02 + 04 + 05"
 	@echo "  make verify-eth      RPC=sepolia                     # script 08 view-only"
@@ -51,6 +54,24 @@ install:
 patch-pragmas:
 	find lib -name "*.sol" -print0 | xargs -0 sed -i.bak 's/^pragma solidity 0\.8\.24;/pragma solidity ^0.8.24;/'
 	find lib -name "*.sol.bak" -delete
+
+# Verify every Chainlink docs URL referenced in tracked sources still resolves
+# (issue #20). docs.chain.link restructures periodically and moved pages 404
+# silently — e.g. the old `/ccip/concepts/cross-chain-token/{token-pools,tokens,
+# registration-and-administration}` paths. Run this as a pre-release gate
+# (RUNBOOK §0.0). Network-dependent and external-service-flaky by nature, so it
+# is intentionally NOT wired into PR CI; it is an operator/release check.
+# Requires `curl`. Exits non-zero if any link does not return HTTP 200.
+check-links:
+	@urls=$$(git grep -hoE 'https://docs\.chain\.link[^ )>"`]*' -- '*.md' '*.sol' | sed 's/[.,]*$$//' | sort -u); \
+	fail=0; \
+	for u in $$urls; do \
+	  code=$$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 25 --retry 2 "$$u" 2>/dev/null); \
+	  if [ "$$code" = "200" ]; then printf '  ok    %s\n' "$$u"; \
+	  else printf '  FAIL  %s (HTTP %s)\n' "$$u" "$$code"; fail=1; fi; \
+	done; \
+	if [ $$fail -ne 0 ]; then echo "One or more Chainlink doc links are broken — update the source files."; exit 1; fi; \
+	echo "All Chainlink doc links resolve."
 
 build:
 	forge build --sizes
@@ -90,6 +111,24 @@ clean:
 precheck-helper:
 	@test -n "$(RPC)" || (echo "RPC required"; exit 1)
 	forge script script/PrecheckHelper.s.sol --rpc-url $(RPC)
+
+# Live (RPC-backed) validation of the filled-in CCIP infra addresses in Helper.sol
+# (issue #21). Unlike `precheck-helper` (pure, non-zero only) this staticcalls each
+# address on the TARGET chain to confirm it is the expected CCIP contract
+# (typeAndVersion), that the router supports the remote lane (chain selector is real),
+# and that LINK / canonical-ON look right. Run after filling Helper.sol, before deploy.
+validate-config:
+	@test -n "$(RPC)" || (echo "RPC required (target chain RPC)"; exit 1)
+	forge script script/ValidateConfig.s.sol --rpc-url $(RPC)
+
+# Read-only probe of the BSC ON token's CCIP-admin registration path (issue #22).
+# Runs the same path-resolution as script 04 WITHOUT broadcasting, so the operator
+# can confirm on live BSC which path (1 getCCIPAdmin / 2 owner / 3 AccessControl)
+# script 04 will take before mainnet — or catch the path-4 blocker early. Reads the
+# deployer EOA from the DEPLOYER env var; on testnet point at a mock via BSC_ON=0x..
+validate-bsc-admin:
+	@test -n "$(RPC)" || (echo "RPC required (BSC RPC)"; exit 1)
+	forge script script/ValidateBscAdmin.s.sol --rpc-url $(RPC)
 
 # Ethereum sequence (Sepolia or mainnet).
 deploy-eth: precheck-helper

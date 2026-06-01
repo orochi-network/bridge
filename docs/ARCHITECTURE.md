@@ -19,7 +19,7 @@ custom contract in this repo is [`src/WrappedON.sol`](../src/WrappedON.sol).
         ┌─────────────┐         ┌─────────────────────┐          ┌───────────────┐
         │  ON (600M)  │ ◀─────▶ │   WrappedON (wON)   │ ◀──────▶ │ BurnMintPool  │
         │ non-mintable│ deposit │  reserve + ERC20    │  mint /  │ (stock CCIP)  │
-        └─────────────┘ withdraw│  ccipMintedSupply   │  burn    │ MINTER/BURNER │
+        └─────────────┘ withdraw│  ccipMintHeadroomUsed   │  burn    │ MINTER/BURNER │
                                 └─────────────────────┘          └───────┬───────┘
                                                                          │ lockOrBurn /
                                                                          │ releaseOrMint
@@ -145,7 +145,7 @@ pool's `staticcall`-based interface probes succeed.
 | Slot | Field | Purpose |
 |---|---|---|
 | immutable | `ON` | Canonical ETH-side ON ERC20 used for `deposit`/`withdraw`. |
-| state | `ccipMintedSupply` | Approximates BSC pool's locked-ON balance. Capped at `MAX_CCIP_MINTED = 100M`. |
+| state | `ccipMintHeadroomUsed` | Approximates BSC pool's locked-ON balance. Capped at `MAX_CCIP_MINTED = 100M`. |
 | state | `s_ccipAdmin` | Current CCIP admin (read by `RegistryModuleOwnerCustom`). |
 | state | `s_pendingCcipAdmin` | Two-step handoff target. Reverts on `address(0)`, self, or `address(this)` proposals. |
 
@@ -165,8 +165,8 @@ pool's `staticcall`-based interface probes succeed.
 |---|---|---|
 | `deposit(amount)` | `LIQUIDITY_MANAGER_ROLE` | Pulls ON, mints wON 1:1. Received-amount accounting. `nonReentrant`. Uncapped in amount, role-gated (M3 / #25). |
 | `withdraw(amount)` | anyone | Burns wON, returns ON from reserve. Reverts on `InsufficientReserve`. `nonReentrant`. |
-| `mint(account, amount)` | `MINTER_ROLE` (pool) | CCIP-inbound mint. Increments `ccipMintedSupply` and reverts if cap exceeded. Emits `CCIPMinted`. |
-| `burn(amount)` / `burn(account, amount)` / `burnFrom(account, amount)` | `BURNER_ROLE` (pool) | CCIP-outbound burn. Saturating-decrements `ccipMintedSupply`. Emits `CCIPBurned`. |
+| `mint(account, amount)` | `MINTER_ROLE` (pool) | CCIP-inbound mint. Increments `ccipMintHeadroomUsed` and reverts if cap exceeded. Emits `CCIPMinted`. |
+| `burn(amount)` / `burn(account, amount)` / `burnFrom(account, amount)` | `BURNER_ROLE` (pool) | CCIP-outbound burn. Saturating-decrements `ccipMintHeadroomUsed`. Emits `CCIPBurned`. |
 | `setCCIPAdmin(addr)` / `acceptCCIPAdmin()` | current / pending admin | Two-step CCIP admin rotation. |
 | `getCCIPAdmin()` / `pendingCCIPAdmin()` | view | Registry probes + handoff verification. |
 
@@ -243,7 +243,7 @@ contract while:
                      │ mint / burn — capped at 100M, pool-only
                      │
         ┌────────────▼─────────────┐
-        │   wON.ccipMintedSupply   │  approximates BSC locked-ON balance
+        │   wON.ccipMintHeadroomUsed   │  approximates BSC locked-ON balance
         │   (BurnMintTokenPool)    │
         └──────────────────────────┘
 ```
@@ -278,8 +278,18 @@ every CCIP burn pairs with a `release`. The reserve side is independent
 ### 4.4 `MAX_CCIP_MINTED` cap
 
 `MAX_CCIP_MINTED = 100_000_000 ether` (matches canonical BSC ON supply).
-`ccipMintedSupply` is incremented in `mint(...)` (reverts on cap breach) and
+`ccipMintHeadroomUsed` is incremented in `mint(...)` (reverts on cap breach) and
 **saturating-decremented** on every burn entry-point.
+
+**The real invariant is enforced by CCIP, not by this contract.** Each CCIP
+message pairs exactly one BSC `lock`/`release` with one Ethereum `mint`/`burn`,
+so the ON locked on BSC *via CCIP* equals the wON minted on Ethereum *via CCIP*,
+message-for-message. Ethereum **cannot read the BSC pool's balance**, so that
+equality rests on **trusting Chainlink** (the DON + RMN) to deliver each message
+once and honour the pairing — `mint` fires when the trusted off-ramp calls
+`releaseOrMint`, and cannot verify the matching lock itself. `ccipMintHeadroomUsed`
+is only a *local* proxy for that figure: it saturates at 0 and reflects neither
+the pool's operator-seeded rebalancer liquidity nor any live cross-chain read.
 
 The cap bounds damage from a **buggy or compromised pool** that could mint
 without a matching BSC lock. It is **not** a per-token-provenance counter:
@@ -290,7 +300,7 @@ balance; under buggy behaviour it bounds the upside.
 
 > Monitoring tip (`SECURITY: WON-3 / CCIP-7`): for real cross-chain exposure,
 > read `IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` as ground truth.
-> Treat `ccipMintedSupply` as a useful local indicator, not the authoritative
+> Treat `ccipMintHeadroomUsed` as a useful local indicator, not the authoritative
 > "value in flight" number.
 
 ---
@@ -330,7 +340,7 @@ user                wON contract             ON token
 8. ETH_OffRamp → BurnMintTokenPool.releaseOrMint(receiver, amount, src, ...)
                 ─ checks inbound rate limiter
                 ─ calls wON.mint(receiver, amount)
-                ─ wON checks ccipMintedSupply + amount ≤ MAX_CCIP_MINTED
+                ─ wON checks ccipMintHeadroomUsed + amount ≤ MAX_CCIP_MINTED
                 ─ emits CCIPMinted
 9. receiver holds `amount` wON on Ethereum
 ```
@@ -344,7 +354,7 @@ user                wON contract             ON token
 4. ETH_OnRamp → BurnMintTokenPool.lockOrBurn(amount, sender, dest, ...)
                 ─ pool transfers `amount` wON from user to itself
                 ─ pool calls wON.burn(amount) (one of three overloads)
-                ─ wON saturating-decrements ccipMintedSupply
+                ─ wON saturating-decrements ccipMintHeadroomUsed
                 ─ emits CCIPBurned
                 ─ checks outbound rate limiter
 5. ETH_OnRamp emits CCIPSendRequested
@@ -364,7 +374,7 @@ A user wanting native ETH ON on BSC follows two distinct steps:
 1. `wON.deposit(amount)` — wraps ON to wON on Ethereum.
 2. `ROUTER.ccipSend(wON, amount, bsc_receiver)` — burns wON, releases ON on BSC.
 
-After step 2, `ccipMintedSupply` on wON has saturating-decremented (even
+After step 2, `ccipMintHeadroomUsed` on wON has saturating-decremented (even
 though the original mint was a `deposit`, not a CCIP inbound) — by design,
 because wON is fungible and the BSC-locked balance has correspondingly
 decreased.

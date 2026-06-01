@@ -18,6 +18,27 @@ Edit `script/Helper.sol` for **each chain** you'll deploy on. The address fields
 
 Chain selectors are already committed and should not need changes.
 
+**Directory lookup.** Open the [CCIP directory](https://docs.chain.link/ccip/directory),
+select the **Mainnet** (or Testnet) tab and the target network (e.g. *Ethereum*,
+*BNB Smart Chain*). Each network page lists the **Router**, **RMN/ARM proxy**,
+**TokenAdminRegistry**, **RegistryModuleOwnerCustom**, **LINK token**, and the
+**chain selector**. Copy those into the matching `chainId` branch of `Helper.sol`.
+Cross-check the chain selector against the constant already committed there.
+
+**Validate before broadcasting (issue #21).** Two layered checks:
+
+```bash
+make precheck-helper RPC=<target>   # pure: every Helper address for this chain + its remote is non-zero
+make validate-config RPC=<target>   # live: staticcalls each address on-chain to confirm it is the
+                                    #       expected CCIP contract (typeAndVersion), that the router
+                                    #       supports the remote lane (chain selector is real), and that
+                                    #       LINK / canonical-ON look right. Reverts listing any mismatch.
+```
+
+`validate-config` is view-only and never broadcasts. Run it once per chain after
+filling `Helper.sol`; a green result means the addresses point at genuine CCIP
+infrastructure on the target network before you spend gas.
+
 ### 0.2 Confirm the BSC ON token admin path
 
 The deployer needs to be able to register as admin for the canonical ON on BSC (`0x0e4F6209eD984b21EDEA43acE6e09559eD051D48`). `script/04_RegisterAdminAndPool.s.sol` probes four paths in order:
@@ -28,6 +49,17 @@ The deployer needs to be able to register as admin for the canonical ON on BSC (
 4. None of the above — the script reverts with a `CannotResolveCCIPAdmin` diagnostic. Recovery requires either (a) the token's `Ownable.owner` calling `RegistryModuleOwnerCustom.registerAdminViaOwner(token)` themselves, or (b) coordinating with Chainlink to register the admin out-of-band. After admin is set, re-run script 04 — `acceptAdminRole` and `setPool` are idempotent.
 
 **Required: validate the path against live BSC state BEFORE broadcasting (`TEST-7` — legacy audit tag H-4).** The MEV / front-running window on `TokenAdminRegistry.proposeAdministrator` is closed if you already know the path resolves to a permissionless on-chain branch (1, 2, or 3); it stays open if recovery has to go through path 4.
+
+One-command probe (issue #22) — runs the same path resolution as script 04, read-only, no broadcast:
+
+```bash
+DEPLOYER=0x<your deployer EOA> make validate-bsc-admin RPC=<bsc rpc>
+# testnet: point at your mock ON — BSC_ON=0x<mock> DEPLOYER=0x<eoa> make validate-bsc-admin RPC=<bsc_testnet rpc>
+```
+
+It prints each path and, with `DEPLOYER` set, reverts on the path-4 fallthrough so it can gate a deploy. The raw `cast` equivalents below remain for manual checks.
+
+> **Confirmed live result (BSC mainnet `0x0e4F…1D48`, probed 2026-06-01):** the canonical ON token resolves to **path 4** *for any deployer* — `getCCIPAdmin()` is absent, `owner()` returns the **zero address** (ownership renounced, so `registerAdminViaOwner` is unusable — there is no owner to call it), and OZ `AccessControl.hasRole` is absent. **Script 04 will revert (`CannotResolveCCIPAdmin`) on BSC mainnet.** CCIP-admin registration for the BSC ON token therefore requires coordinating with Chainlink (the `TokenAdminRegistry` owner) to register the administrator out-of-band *before* the BSC deploy — there is no permissionless on-chain branch available. Re-confirm with `make validate-bsc-admin` at deploy time in case the token's ownership/roles change. See SECURITY `TEST-7`.
 
 Use `cast call` to read each path's discriminator against the live BSC RPC and compare against the deployer EOA. This is purely read-only — no fork, no broadcast, no key needed. Script 04's path probes test whether **the broadcaster** is the admin holder, so the question to answer here is "would `$DEPLOYER_ADDR` match any of paths 1/2/3?" (an earlier draft of this section used `anvil --fork-url` with a well-known anvil pre-funded key, but the anvil key isn't `$DEPLOYER_ADDR`, so on a fork the script always fell through to path-4 regardless of which path the real deployer would have hit on mainnet — invalidating the mitigation goal):
 
@@ -87,6 +119,22 @@ make build
 make test                 # all 130 non-fork tests (126 unit/integration + 4 stateful invariants) must pass
 make fmt-check
 ```
+
+### 0.5 Verify external documentation links (issue #20)
+
+Chainlink restructures `docs.chain.link` periodically — pages move and the old
+URLs 404 silently (this happened to the legacy
+`/ccip/concepts/cross-chain-token/{token-pools,tokens,registration-and-administration}`
+paths). Before tagging a release, confirm every Chainlink URL referenced in the
+tracked docs and scripts still resolves:
+
+```bash
+make check-links          # curls each https://docs.chain.link/... URL; exits non-zero on any non-200
+```
+
+If a link fails, find the current page from the [CCIP docs](https://docs.chain.link/ccip)
+and update the referencing source file. This check is network-dependent and is
+deliberately **not** part of PR CI (it would be flaky); treat it as a release gate.
 
 ---
 
@@ -150,7 +198,7 @@ Script 08 (`PostDeployVerify`) is view-only and reverts loudly on any wiring mis
 
 ### 2.1 Re-verify infrastructure addresses
 
-CCIP infrastructure addresses on mainnet can change. Re-confirm against the [CCIP directory](https://docs.chain.link/ccip/directory) and update `Helper.sol` if needed.
+CCIP infrastructure addresses on mainnet can change. Re-confirm against the [CCIP directory](https://docs.chain.link/ccip/directory) and update `Helper.sol` if needed, then re-run `make validate-config RPC=<mainnet>` (see §0.1) so the live staticcall check passes against mainnet before broadcasting.
 
 ### 2.2 Calibrate rate limits
 
@@ -314,6 +362,50 @@ These contracts are non-upgradeable. To replace a pool:
 4. Multisig: `applyChainUpdates` on the new pool to link the remote.
 5. Drain the old pool. The locked-ON reserve on the BSC `LockReleaseTokenPool` is movable by the pool owner via `setRebalancer` → `withdrawLiquidity` (see [Trust model](#trust-model-bsc-reserve-custody) below). Either rebalance manually under multisig governance, or — preferred — plan migrations such that net positions are zero before swapping so no reserve movement is needed.
 
+### 4.4 Stuck or delayed ETH→BSC transfers (insufficient BSC liquidity)
+
+**This is the QuillAudits M2 scenario** (SECURITY: CCIP-2 / M2). An ETH→BSC
+transfer burns wON on Ethereum the moment the source message is accepted; the
+matching ON is only released on BSC when CCIP executes `releaseOrMint` on the
+BSC `LockReleaseTokenPool`. That release is a plain `ON.safeTransfer` out of the
+pool's own balance, so if the pool's releasable ON balance is below the transfer
+amount the **destination execution reverts on insufficient liquidity** and the
+message does not complete. The Ethereum burn has already happened, so the user's
+value is *in flight*, not lost — it completes once liquidity is restored and the
+message is re-executed. The aggregate invariant
+`lockedON_BSC + reserveON_ETH >= totalSupply(wON)` holds throughout.
+
+Because the Ethereum contracts cannot read BSC balances synchronously (see
+[Trust model](#trust-model-bsc-reserve-custody)), there is **no on-chain fix on
+the Ethereum side** — this is enforced operationally.
+
+**Prevention (at launch and on every rate-limit change):**
+- Size the **ETH→BSC (BSC-inbound) rate-limit** bucket so its capacity never
+  exceeds the BSC pool's releasable ON balance minus a safety buffer — the
+  outbound burst the ETH side will accept must be releasable on BSC. This is the
+  asymmetry `CCIP-2` warns about; do not leave limits symmetric if BSC liquidity
+  is thin. Tune via `make update-limits` (§4.1).
+- Keep the §3 monitoring alert live: page when
+  `BSC_ON.balanceOf(BSC_LockReleaseTokenPool)` falls below the configured ETH→BSC
+  rate-limit capacity plus buffer.
+
+**Recovery (a transfer is already stuck):**
+1. Confirm on the [CCIP Explorer](https://ccip.chain.link/) — a stuck ETH→BSC
+   message shows the destination execution failing on an insufficient-liquidity
+   revert.
+2. Replenish the BSC pool. **`provideLiquidity` is disabled on this deployment**
+   (`acceptLiquidity = false` → reverts `LiquidityNotAccepted`), so the rebalancer
+   cannot use it. Restore releasable liquidity by transferring ON **directly to
+   the BSC `LockReleaseTokenPool` address** from the operator reserve / multisig:
+   `releaseOrMint` and `withdrawLiquidity` both read the pool's raw `balanceOf`,
+   so a direct ERC-20 transfer is immediately releasable and remains withdrawable
+   later. (Organic BSC→ETH bridging also refills the pool.)
+3. Re-run the message via CCIP [manual execution](https://docs.chain.link/ccip/concepts/manual-execution)
+   from the Explorer once liquidity is present; the pending `releaseOrMint` then
+   succeeds and the receiver gets their ON.
+4. Post-incident: lower the ETH→BSC rate-limit capacity (§4.1) so accepted
+   outbound volume cannot again outrun BSC liquidity.
+
 ---
 
 ## Trust model: BSC reserve custody
@@ -343,6 +435,7 @@ This means the multisig effectively has custody of the BSC-side locked-ON reserv
 | `CCIPAdminTransferProposed` / `CCIPAdminTransferred` | wON | High |
 | `AdministratorTransferRequested` / `AdministratorTransferred` (registry — OPS-28) | TokenAdminRegistry | High |
 | `CCIPMinted` cumulative > BSC `IERC20(ON).balanceOf(LockReleaseTokenPool)` | wON ↔ BSC pool | **Critical** |
+| `BSC_ON.balanceOf(BSC pool)` < ETH→BSC rate-limit capacity + buffer (M2 / CCIP-2 — stuck-transfer precursor; see §4.4) | BSC pool ↔ ETH pool config | High |
 | `CCIPAdminProposalCancelled` | wON | High |
 | Outbound / inbound rate-limit bucket exhausted | both pools | Medium |
 
@@ -367,12 +460,16 @@ This means the multisig effectively has custody of the BSC-side locked-ON reserv
   not currently expose `_setRoleAdmin` externally (OZ AccessControl 5.x internal), so
   not an active vector — but if a future redeploy ever does, the monitor is in place.
 
-**Note on `ccipMintedSupply` monitoring** (SECURITY: WON-3 / CCIP-7). The contract-side
-`ccipMintedSupply` counter approximates BSC locked balance but saturating-decrements on
-burns of deposit-backed wON, so it can drift below the true BSC exposure. Source the
-cross-chain risk signal from `IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` as the
-authoritative locked-balance read; treat `ccipMintedSupply` as a useful local indicator
-but not the ground truth for "how much value is in flight."
+**Note on `ccipMintHeadroomUsed` monitoring** (SECURITY: WON-3 / CCIP-7). CCIP pairs every
+BSC `lock`/`release` 1:1 with an Ethereum `mint`/`burn`, so the ON locked on BSC *via CCIP*
+equals the wON minted on Ethereum *via CCIP* — but that equality is enforced by Chainlink
+(the DON + RMN), not by the wON contract: **Ethereum cannot read the BSC pool's balance.**
+The contract-side `ccipMintHeadroomUsed` counter (renamed from `ccipMintedSupply` per M1 / #23)
+is only a *local* proxy for that off-chain figure; it saturating-decrements on burns of
+deposit-backed wON, so it can drift below the true BSC exposure. Source the cross-chain risk
+signal from `IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` as the authoritative
+locked-balance read; treat `ccipMintHeadroomUsed` as a useful local indicator but not the
+ground truth for "how much value is in flight."
 
 Source the events in `lib/ccip/contracts/src/v0.8/ccip/pools/LockReleaseTokenPool.sol` and `src/WrappedON.sol`. Page the on-call rotation on Critical lines.
 

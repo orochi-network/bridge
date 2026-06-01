@@ -22,13 +22,13 @@ contract InvariantMockON is ERC20 {
 ///         as a balance counter (`bscLocked`) so the invariant test can read it directly —
 ///         in production the BSC pool lives on a different chain and we cannot atomically
 ///         observe it, but for accounting purposes the locked-ON balance is what
-///         `ccipMintedSupply` is tracking.
+///         `ccipMintHeadroomUsed` is tracking.
 ///
 ///         The invariant under test is the bridge safety invariant:
 ///
 ///             lockedON_BSC + reserveON_ETH >= totalSupply(wON)
 ///
-///         `ccipMintedSupply` is a BSC-pool-balance approximation rather than a
+///         `ccipMintHeadroomUsed` is a BSC-pool-balance approximation rather than a
 ///         "circulating CCIP-minted" counter. This fuzz test continuously checks the
 ///         actual safety property the cap was supposed to protect.
 contract WrappedONHandler is Test {
@@ -105,7 +105,7 @@ contract WrappedONHandler is Test {
     function ccipMint(uint256 actorSeed, uint256 amount) external {
         address user = _actor(actorSeed);
         uint256 cap = WON.MAX_CCIP_MINTED();
-        uint256 headroom = cap - WON.ccipMintedSupply();
+        uint256 headroom = cap - WON.ccipMintHeadroomUsed();
         if (headroom == 0) {
             return;
         }
@@ -143,9 +143,9 @@ contract WrappedONHandler is Test {
     ///      deposit-backed wON through CCIP when bscLocked has already been drained (the
     ///      "deposit→pool-burn cap-bypass" scenario flagged in round-2 review [1]).
     ///
-    ///      Importantly: `bscLocked` is NOT decremented here, so `ccipMintedSupply`
+    ///      Importantly: `bscLocked` is NOT decremented here, so `ccipMintHeadroomUsed`
     ///      drifts BELOW `bscLocked` and the saturating-decrement branch in
-    ///      `_decrementCcipMinted` becomes fuzzer-reachable. The `invariant_BackingCoversSupply`
+    ///      `_decrementCcipMintHeadroom` becomes fuzzer-reachable. The `invariant_BackingCoversSupply`
     ///      property must hold under this path because `totalSupply` shrinks while
     ///      `bscLocked + reserve` does not.
     ///
@@ -164,15 +164,15 @@ contract WrappedONHandler is Test {
         amount = _boundAmt(amount, userBal);
         vm.prank(user);
         WON.transfer(POOL, amount);
-        // Note: `bscLocked` deliberately NOT decremented — pool's `_decrementCcipMinted`
-        // saturates at 0 when `amount > ccipMintedSupply`, which is the property under
+        // Note: `bscLocked` deliberately NOT decremented — pool's `_decrementCcipMintHeadroom`
+        // saturates at 0 when `amount > ccipMintHeadroomUsed`, which is the property under
         // test here.
         vm.prank(POOL);
         WON.burn(amount);
     }
 
     /// @dev SECURITY: TEST-6 — `burnFrom` exercises the allowance-respecting burn path,
-    ///      which independently calls `_decrementCcipMinted`. Without coverage here the
+    ///      which independently calls `_decrementCcipMintHeadroom`. Without coverage here the
     ///      invariant engine never reaches `WrappedON.burnFrom` in stateful sequences.
     function ccipBurnFrom(uint256 actorSeed, uint256 amount) external {
         address user = _actor(actorSeed);
@@ -191,7 +191,7 @@ contract WrappedONHandler is Test {
     }
 
     /// @dev SECURITY: TEST-6 — exercises the `burn(address, uint256)` overload (no
-    ///      allowance check) so its `_decrementCcipMinted` path is fuzzer-reachable.
+    ///      allowance check) so its `_decrementCcipMintHeadroom` path is fuzzer-reachable.
     function ccipBurnAddress(uint256 actorSeed, uint256 amount) external {
         address user = _actor(actorSeed);
         uint256 userBal = WON.balanceOf(user);
@@ -300,7 +300,7 @@ contract WrappedONInvariantTest is StdInvariant, Test {
         targetContract(address(handler));
         // Restrict fuzzer to the handler's operations. Honest paths + adversarial burn +
         // burnFrom / burn(address,uint256) coverage (TEST-6 — every burn overload's
-        // `_decrementCcipMinted` branch is fuzzer-reachable) + two-step CCIP admin
+        // `_decrementCcipMintHeadroom` branch is fuzzer-reachable) + two-step CCIP admin
         // rotation (TEST-14 — interleave admin rotation with mint/burn so the bridge
         // invariants are exercised across the role transition).
         bytes4[] memory selectors = new bytes4[](9);
@@ -329,28 +329,30 @@ contract WrappedONInvariantTest is StdInvariant, Test {
         assertGe(backing, won.totalSupply(), "invariant: BSC lock + ETH reserve < totalSupply");
     }
 
-    /// @notice `ccipMintedSupply` is BOUNDED ABOVE by `bscLocked`. The previous
+    /// @notice `ccipMintHeadroomUsed` is BOUNDED ABOVE by `bscLocked`. The previous
     ///         strict-equality form (round-2 review R-14) held only because the honest
     ///         handler kept both counters in lockstep — making the assertion tautological
     ///         and unable to walk the saturating-decrement branch (round-3 review [2]).
     ///         Under the new `adversarialPoolBurn` path the contract's saturating
-    ///         `_decrementCcipMinted` can push `ccipMintedSupply` strictly below
-    ///         `bscLocked`; the bound `ccipMintedSupply <= bscLocked` still holds because
+    ///         `_decrementCcipMintHeadroom` can push `ccipMintHeadroomUsed` strictly below
+    ///         `bscLocked`; the bound `ccipMintHeadroomUsed <= bscLocked` still holds because
     ///         every mint increments both counters together and saturating-subtract can
     ///         only ever shrink the gap further. If a future change ever lets the counter
     ///         exceed `bscLocked` (i.e. a phantom mint without a matching BSC lock), this
     ///         invariant flags it.
     function invariant_CounterBoundedByBscLocked() public view {
         assertLe(
-            won.ccipMintedSupply(),
+            won.ccipMintHeadroomUsed(),
             handler.bscLocked(),
-            "invariant: ccipMintedSupply exceeds simulated BSC pool balance"
+            "invariant: ccipMintHeadroomUsed exceeds simulated BSC pool balance"
         );
     }
 
     /// @notice The CCIP cap must hold regardless of mint/burn ordering.
     function invariant_CcipMintedSupplyWithinCap() public view {
-        assertLe(won.ccipMintedSupply(), won.MAX_CCIP_MINTED(), "invariant: ccipMintedSupply exceeds MAX_CCIP_MINTED");
+        assertLe(
+            won.ccipMintHeadroomUsed(), won.MAX_CCIP_MINTED(), "invariant: ccipMintHeadroomUsed exceeds MAX_CCIP_MINTED"
+        );
     }
 
     /// @notice The reserve accounting is a 1:1 invariant: ON balance of the wON contract
