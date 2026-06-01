@@ -166,6 +166,9 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         uint256 before = ON.balanceOf(address(this));
         ON.safeTransferFrom(msg.sender, address(this), amount);
         uint256 received = ON.balanceOf(address(this)) - before;
+        // `received` is a balance delta; `== 0` is the intended zero-received guard (WON-14),
+        // not an exact-balance comparison. Safe strict equality — Slither false positive.
+        // slither-disable-next-line incorrect-equality
         if (received == 0) {
             revert ZeroAmount();
         }
