@@ -277,6 +277,16 @@ every CCIP burn pairs with a `release`. The reserve side is independent
 `ccipMintedSupply` is incremented in `mint(...)` (reverts on cap breach) and
 **saturating-decremented** on every burn entry-point.
 
+**The real invariant is enforced by CCIP, not by this contract.** Each CCIP
+message pairs exactly one BSC `lock`/`release` with one Ethereum `mint`/`burn`,
+so the ON locked on BSC *via CCIP* equals the wON minted on Ethereum *via CCIP*,
+message-for-message. Ethereum **cannot read the BSC pool's balance**, so that
+equality rests on **trusting Chainlink** (the DON + RMN) to deliver each message
+once and honour the pairing — `mint` fires when the trusted off-ramp calls
+`releaseOrMint`, and cannot verify the matching lock itself. `ccipMintedSupply`
+is only a *local* proxy for that figure: it saturates at 0 and reflects neither
+the pool's operator-seeded rebalancer liquidity nor any live cross-chain read.
+
 The cap bounds damage from a **buggy or compromised pool** that could mint
 without a matching BSC lock. It is **not** a per-token-provenance counter:
 wON is fungible, and a deposit-backed user can bridge OUT (burning wON,
