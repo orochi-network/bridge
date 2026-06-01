@@ -1,4 +1,4 @@
-.PHONY: help install patch-pragmas build test test-unit test-e2e test-fork fmt fmt-check coverage clean \
+.PHONY: help install patch-pragmas build test test-unit test-e2e test-fork fmt fmt-check coverage clean check-links \
         precheck-helper validate-config deploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce update-limits
 
 # ─── Defaults ──────────────────────────────────────────────────────────────────
@@ -17,6 +17,7 @@ help:
 	@echo "  make fmt             forge fmt"
 	@echo "  make fmt-check       forge fmt --check"
 	@echo "  make coverage        forge coverage --report summary"
+	@echo "  make check-links     verify Chainlink doc URLs in tracked sources still resolve (pre-release)"
 	@echo "  make clean           remove cache/, out/, broadcast/"
 	@echo ""
 	@echo "Deployment (load .env first; values in capitals come from env):"
@@ -52,6 +53,24 @@ install:
 patch-pragmas:
 	find lib -name "*.sol" -print0 | xargs -0 sed -i.bak 's/^pragma solidity 0\.8\.24;/pragma solidity ^0.8.24;/'
 	find lib -name "*.sol.bak" -delete
+
+# Verify every Chainlink docs URL referenced in tracked sources still resolves
+# (issue #20). docs.chain.link restructures periodically and moved pages 404
+# silently — e.g. the old `/ccip/concepts/cross-chain-token/{token-pools,tokens,
+# registration-and-administration}` paths. Run this as a pre-release gate
+# (RUNBOOK §0.0). Network-dependent and external-service-flaky by nature, so it
+# is intentionally NOT wired into PR CI; it is an operator/release check.
+# Requires `curl`. Exits non-zero if any link does not return HTTP 200.
+check-links:
+	@urls=$$(git grep -hoE 'https://docs\.chain\.link[^ )>"`]*' -- '*.md' '*.sol' | sed 's/[.,]*$$//' | sort -u); \
+	fail=0; \
+	for u in $$urls; do \
+	  code=$$(curl -sS -o /dev/null -w '%{http_code}' -L --max-time 25 --retry 2 "$$u" 2>/dev/null); \
+	  if [ "$$code" = "200" ]; then printf '  ok    %s\n' "$$u"; \
+	  else printf '  FAIL  %s (HTTP %s)\n' "$$u" "$$code"; fail=1; fi; \
+	done; \
+	if [ $$fail -ne 0 ]; then echo "One or more Chainlink doc links are broken — update the source files."; exit 1; fi; \
+	echo "All Chainlink doc links resolve."
 
 build:
 	forge build --sizes

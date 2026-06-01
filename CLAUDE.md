@@ -91,6 +91,7 @@ Everything goes through the `Makefile`. The full sequence is documented in `RUNB
 - `make test-e2e`              — PoolRoundtrip + DeploymentE2E integration tests.
 - `make test-fork ETH_RPC=... BSC_RPC=...` — fork tests against live mainnet (9 tests).
 - `make validate-config RPC=...` — live staticcall check that `Helper.sol` CCIP infra addresses are genuine on the target chain (script `ValidateConfig.s.sol`; pairs with the pure `precheck-helper`).
+- `make check-links`           — verify Chainlink `docs.chain.link` URLs in tracked sources still resolve (pre-release gate; not in PR CI — see RUNBOOK §0.5).
 - `make deploy-eth RPC=...`    — scripts 01→05 on the Ethereum side.
 - `make deploy-bsc RPC=...`    — scripts 02 + 04 + 05 on the BSC side.
 - `make verify-eth/bsc RPC=...` — script 08 view-only verification. Post-handoff renounce check needs `DEPLOYER=0x..` (SECURITY: DEP-8); pre-handoff or `MULTISIG`-unset runs don't.
