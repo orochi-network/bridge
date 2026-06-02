@@ -66,7 +66,7 @@ script/06_TransferOwnership.s.sol both chains — handoff to multisig (TransferO
 script/07_UpdateRateLimits.s.sol  ops — adjust setChainRateLimiterConfig (env-driven)
 script/08_PostDeployVerify.s.sol  view-only — programmatic check of all wiring
 test/WrappedON.t.sol              unit tests (incl. WON-1/4/5/7 + reentrancy TEST-8)
-test/WrappedONInvariant.t.sol     4 stateful invariants over 7 handler actions
+test/WrappedONInvariant.t.sol     4 stateful invariants over 9 handler actions
 test/PoolRoundtrip.t.sol          pool wiring + lockOrBurn/releaseOrMint + rate-limit fuzz
 test/DeploymentE2E.t.sol          full sequence simulation incl. handoff + rate-limit update
 test/Script04Paths.t.sol          script 04 admin-dispatch path coverage

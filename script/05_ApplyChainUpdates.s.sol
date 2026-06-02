@@ -12,7 +12,7 @@ import {Deployments} from "./Deployments.sol";
 /// @notice Wires each pool to its remote counterpart with rate limits.
 ///
 /// Initial limits (calibrate from production traffic):
-///   capacity = 100_000 ON   (~$X TODO depending on price)
+///   capacity = 100_000 ON   (USD value tracks the ON price — calibrate before mainnet)
 ///   rate     = 10 ON/sec    (~864,000 ON / day)
 ///
 /// Re-tune via `setChainRateLimiterConfig` on the pool after launch.
@@ -92,22 +92,6 @@ contract ApplyChainUpdates is Script, Helper {
         console.log(
             "Linked pool %s (remote selector %d) -> remote pool %s", localPool, remote.chainSelector, remotePool
         );
-    }
-
-    function _remoteChainId(uint256 chainId) internal pure returns (uint256) {
-        if (chainId == 1) {
-            return 56;
-        }
-        if (chainId == 56) {
-            return 1;
-        }
-        if (chainId == 11_155_111) {
-            return 97;
-        }
-        if (chainId == 97) {
-            return 11_155_111;
-        }
-        revert UnsupportedChain(chainId);
     }
 
     function _remoteConfig(uint256 chainId) internal pure returns (NetworkConfig memory) {

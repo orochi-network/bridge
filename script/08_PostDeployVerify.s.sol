@@ -334,22 +334,6 @@ contract PostDeployVerify is Script, Helper {
         console.log("[ok] wON DEFAULT_ADMIN_ROLE renounced by deployer %s", deployer);
     }
 
-    function _remoteChainId(uint256 chainId) internal pure returns (uint256) {
-        if (chainId == 1) {
-            return 56;
-        }
-        if (chainId == 56) {
-            return 1;
-        }
-        if (chainId == 11_155_111) {
-            return 97;
-        }
-        if (chainId == 97) {
-            return 11_155_111;
-        }
-        revert UnsupportedChain(chainId);
-    }
-
     function _remoteTokenAddress(NetworkConfig memory remote) internal view returns (address) {
         // The remote token recorded on the LOCAL pool points at:
         //   - wON on the ETH side (if the remote chain is ETH/Sepolia), or

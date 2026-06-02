@@ -31,6 +31,11 @@ interface ITokenAdminRegistryRead {
         returns (address administrator, address pendingAdministrator, address tokenPool);
 }
 
+// File-scoped so both handoff contracts below (TransferOwnership + RenounceDeployerAdmin)
+// share one definition and cannot drift apart.
+error MultisigEnvMissing();
+error MultisigEqualsDeployer(address addr);
+
 /// @notice Begins the ownership handoff from the deployer EOA to the operations multisig.
 ///
 /// What this script does (single broadcaster = current deployer/admin):
@@ -49,8 +54,6 @@ interface ITokenAdminRegistryRead {
 /// Required env vars:
 ///   MULTISIG  — checksummed address of the destination multisig (e.g. Safe).
 contract TransferOwnership is Script, Helper {
-    error MultisigEnvMissing();
-    error MultisigEqualsDeployer(address addr);
     /// @dev DEP-20: refuses to transfer custody-grade ownership of a pool that isn't bound
     ///      to the expected token. Mirrors the CCIP-4 check in script 03 so a tampered
     ///      `deployments/<chainId>.json` cannot redirect the handoff to a foreign pool.
@@ -209,9 +212,6 @@ contract TransferOwnership is Script, Helper {
 ///         Run ONLY after verifying the multisig holds the role and has accepted pool ownership
 ///         + registry admin role on both chains. ETH side only — wON does not exist on BSC.
 contract RenounceDeployerAdmin is Script, Helper {
-    error MultisigEnvMissing();
-    error MultisigEqualsDeployer(address addr);
-
     function run() external {
         if (block.chainid != 1 && block.chainid != 11_155_111) {
             revert UnsupportedChain(block.chainid);

@@ -83,10 +83,8 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     IERC20 public immutable ON;
 
     /// @notice CCIP mint-cap headroom currently consumed, bounded by `MAX_CCIP_MINTED`.
-    ///         Incremented by CCIP `mint`, saturating-decremented by CCIP burns. The cap
-    ///         bounds damage from a buggy pool minting without a matching BSC lock. NOT a
-    ///         BSC-locked-liquidity gauge — it saturates at 0 and ignores operator-seeded
-    ///         liquidity (M1 / #23; renamed from `ccipMintedSupply`). Read
+    ///         Incremented by CCIP `mint`, saturating-decremented by CCIP burns (M1 / #23;
+    ///         renamed from `ccipMintedSupply`). NOT a BSC-liquidity gauge — use
     ///         `IERC20(ON).balanceOf(BSC_pool)` for true cross-chain exposure. See NatSpec.
     uint256 public ccipMintHeadroomUsed;
 
@@ -245,9 +243,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         if (amount == 0) {
             revert ZeroAmount();
         }
-        uint256 newSupply = _decrementCcipMintHeadroom(amount);
-        _burn(msg.sender, amount);
-        emit CCIPBurned(msg.sender, amount, newSupply);
+        _ccipBurn(msg.sender, amount);
     }
 
     /// @notice Burns from `account` without allowance check (matches `IBurnMintERC20`).
@@ -259,9 +255,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         if (amount == 0) {
             revert ZeroAmount();
         }
-        uint256 newSupply = _decrementCcipMintHeadroom(amount);
-        _burn(account, amount);
-        emit CCIPBurned(account, amount, newSupply);
+        _ccipBurn(account, amount);
     }
 
     /// @notice Allowance-respecting burn. For pool variants that go through `approve`.
@@ -270,9 +264,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
             revert ZeroAmount();
         }
         _spendAllowance(account, msg.sender, amount);
-        uint256 newSupply = _decrementCcipMintHeadroom(amount);
-        _burn(account, amount);
-        emit CCIPBurned(account, amount, newSupply);
+        _ccipBurn(account, amount);
     }
 
     // ─── IGetCCIPAdmin (two-step) ─────────────────────────────────────────────
@@ -354,5 +346,15 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         uint256 current = ccipMintHeadroomUsed;
         newSupply = amount >= current ? 0 : current - amount;
         ccipMintHeadroomUsed = newSupply;
+    }
+
+    /// @dev Shared tail for all three CCIP burn entrypoints: saturating-decrement, OZ `_burn`,
+    ///      then `CCIPBurned`. Callers apply the `ZeroAmount` guard (WON-11) and, for
+    ///      `burnFrom`, `_spendAllowance` BEFORE calling here. WON-13: emits the local
+    ///      `newSupply` (one fewer SLOAD than re-reading storage; mirrors `mint`'s `wouldBe`).
+    function _ccipBurn(address account, uint256 amount) private {
+        uint256 newSupply = _decrementCcipMintHeadroom(amount);
+        _burn(account, amount);
+        emit CCIPBurned(account, amount, newSupply);
     }
 }

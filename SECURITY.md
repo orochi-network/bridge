@@ -124,7 +124,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-1: `mint` does not guard against zero-amount calls
 - **Severity:** LOW
 - **Status:** FIXED — `mint` now reverts `ZeroAmount` on zero. Test: `test_MintRevertsOnZeroAmount`.
-- **Location:** `src/WrappedON.sol:146-153`
+- **Location:** `src/WrappedON.sol:221-235`
 - **Description:** `deposit` and `withdraw` both revert on `amount == 0`, but `mint` (the CCIP entrypoint) does not. A zero-amount call increments nothing and mints nothing, but it emits an ERC20 `Transfer(pool, account, 0)` event and an OZ AccessControl check passes silently. Under normal CCIP operation the pool will never pass zero, but the asymmetry is worth eliminating for indexer hygiene and to match the pattern of every other state-mutating entry point in the contract.
 - **Impact:** No meaningful state harm; a misbehaving or test pool can spam zero-value Transfer events. No financial loss.
 - **Recommendation:** Add `if (amount == 0) revert ZeroAmount();` at the top of `mint`, matching the `deposit`/`withdraw` guards.
@@ -132,7 +132,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-2: `burn(address,uint256)` overload burns without allowance — design acknowledgement
 - **Severity:** INFO
 - **Status:** DESIGN ACK — the recommended on-chain count check requires `AccessControlEnumerable`, which expands inheritance for marginal benefit. The single-pool invariant is enforced operationally: script 03 (`GrantRoles`) only grants to the deployed pool, the multisig handoff transfers admin to a Safe, and the RUNBOOK monitoring table pages on every `RoleGranted(BURNER_ROLE, *)`. Adding `AccessControlEnumerable` is left as an option for a future redeploy if multi-grantee scenarios become realistic.
-- **Location:** `src/WrappedON.sol:164-167`
+- **Location:** `src/WrappedON.sol:254-259`
 - **Description:** The two-argument `burn(address account, uint256 amount)` overload calls `_burn(account, amount)` with no `_spendAllowance` check, matching the `IBurnMintERC20` interface contract. The test at `test/WrappedON.t.sol:264` explicitly verifies this. Safety relies entirely on `BURNER_ROLE` exclusivity. If `BURNER_ROLE` were ever granted to more than one address, any role holder could burn arbitrary balances without delegation.
 - **Impact:** Single-pool deployment is safe; multi-grantee deployment is not.
 - **Recommendation:** Add a `getRoleMemberCount(BURNER_ROLE) <= 1` post-deploy assertion to `script/08_PostDeployVerify.s.sol`, and document the constraint in the multisig handoff runbook.
@@ -148,7 +148,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-4: No named event emitted on `mint` / `burn` paths
 - **Severity:** LOW
 - **Status:** FIXED — `CCIPMinted(account, amount, ccipMintHeadroomUsed)` emitted from `mint`; `CCIPBurned(account, amount, ccipMintHeadroomUsed)` emitted from all three burn entrypoints. Tests: `test_MintEmitsCCIPMinted`, `test_BurnEmitsCCIPBurned_*`.
-- **Location:** `src/WrappedON.sol:146-153`, burn entrypoints
+- **Location:** `src/WrappedON.sol:221-235` (mint), `242-268` (burn entrypoints)
 - **Description:** `deposit` emits `Wrapped`, `withdraw` emits `Unwrapped`, but the CCIP `mint` path emits only the inherited ERC20 `Transfer(address(0), account, amount)`. Burns are similar. Indexers cannot distinguish CCIP-inbound mints from deposit wraps by event topic alone.
 - **Impact:** Cross-chain reconciliation tooling must correlate with pool-level CCIP events.
 - **Recommendation:** Add `CCIPMinted(address indexed account, uint256 amount, uint256 ccipMintHeadroomUsed)` (and optionally `CCIPBurned`) for direct on-chain auditability.
@@ -156,7 +156,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-5: Overwriting pending CCIP admin produces no cancellation event
 - **Severity:** LOW
 - **Status:** FIXED — `CCIPAdminProposalCancelled(address)` emitted in `setCCIPAdmin` when overwriting a different pending address. Identical re-proposal does NOT emit (verified by `test_SetCCIPAdminRePropose_DoesNotEmitCancellation`). Test: `test_SetCCIPAdminEmitsCancellationWhenOverwritten`.
-- **Location:** `src/WrappedON.sol:193-205`
+- **Location:** `src/WrappedON.sol:287-313`
 - **Description:** `setCCIPAdmin` allows the current admin to overwrite `s_pendingCcipAdmin` with a new address at any time. The prior proposed address receives no on-chain cancellation signal. If they had a multisig transaction queued for `acceptCCIPAdmin`, it will revert with `OnlyPendingCCIPAdmin`.
 - **Impact:** Operational confusion; no funds at risk.
 - **Recommendation:** Emit `CCIPAdminProposalCancelled(address indexed cancelled)` when overwriting a non-zero pending admin with a different address.
@@ -164,7 +164,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-6: `withdraw` orders balance-check before burn — currently safe
 - **Severity:** INFO
 - **Status:** DESIGN ACK — no code change. Recorded for completeness.
-- **Location:** `src/WrappedON.sol:128-139`
+- **Location:** `src/WrappedON.sol:199-210`
 - **Description:** Current ordering: read `ON.balanceOf(this)` → revert if insufficient → `_burn` → `safeTransfer`. With ON as a plain non-hookable ERC20 and `nonReentrant` active, no attack path exists. This is purely a defensive note: if `ON` were ever replaced by an ERC-777-style token with receiver hooks, the ordering would still be correct because reentry would observe the post-burn `totalSupply`.
 - **Impact:** None under current ON token.
 - **Recommendation:** No code change required. The `ON` immutable + non-upgradeable design closes this path.
@@ -172,7 +172,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-7: `supportsInterface` omits `IERC20Metadata`
 - **Severity:** INFO
 - **Status:** FIXED — `IERC20Metadata.interfaceId` added to `supportsInterface`. Test updated: `test_SupportsInterfacePositiveAndNegative` now asserts `true`.
-- **Location:** `src/WrappedON.sol:222-226`
+- **Location:** `src/WrappedON.sol:330-334`
 - **Description:** The contract satisfies `IERC20Metadata` (via OZ ERC20) but does not return `true` for its interface ID. Integrations that ERC-165-check before reading `decimals()` will get a false negative.
 - **Impact:** Minor integration friction; no security risk.
 - **Recommendation:** Add `|| interfaceId == type(IERC20Metadata).interfaceId`.
@@ -180,7 +180,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-8: Constructor `decimals()` call lacks try/catch
 - **Severity:** MEDIUM
 - **Status:** FALSE POSITIVE — the constructor is only deployable against a canonical ON token whose interface and value are fixed at the project level. ON on Ethereum (`0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d`, 600M supply) and ON on BSC (`0x0e4F6209eD984b21EDEA43acE6e09559eD051D48`, 100M supply) are both immutable non-upgradeable ERC20Metadata implementations with `decimals() == 18`. `Helper.getConfig(block.chainid)` hardcodes these mainnet addresses, and the `01_DeployWrappedON` script reads `onToken` from `Helper.getConfig()` rather than from operator input. There is no realistic deploy path where `decimals()` returns a non-18 value or reverts — the equality check `onDecimals != decimals()` already provides the only defence the architecture supports. Adding a try/catch + zero-check would be a defensive no-op that doesn't move the threat model.
-- **Location:** `src/WrappedON.sol:118-121`
+- **Location:** `src/WrappedON.sol:149-152`
 - **Description:** `IERC20Metadata(onToken).decimals()` is called without try/catch in the constructor. A non-`IERC20Metadata` token with a fallback returning 18-like bytes would pass; a token returning `0` would pass only if wON's `decimals()` were changed from 18.
 - **Impact:** None under the canonical-token constraint.
 - **Recommendation:** No code change. The deploy-time controls (hardcoded canonical addresses + non-mintable, non-upgradeable ON token) are the load-bearing guarantee.
@@ -188,7 +188,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-9: `Wrapped` event field labelled `amount` carries the post-fee `received` value
 - **Severity:** LOW
 - **Status:** FIXED — event signature renamed to `Wrapped(address indexed account, uint256 received)` so indexers using the parameter name (e.g. via the deployed ABI JSON) see the post-fee semantics directly. The wire format / topic is unchanged because event-parameter names are not part of the keccak signature, so existing decoders keyed off `Transfer`/`Wrapped(address,uint256)` continue to match. NatSpec on the event now spells out the received-amount semantics. The corresponding `Unwrapped` event remains `amount`-labelled because `withdraw` operates against a non-hookable internal reserve and there is no fee-on-transfer asymmetry to disclose.
-- **Location:** `src/WrappedON.sol:76,143`
+- **Location:** `src/WrappedON.sol:101` (`Wrapped` event), `164-192` (`deposit`)
 - **Description:** `deposit` uses received-amount accounting (computes `received = balanceAfter - balanceBefore`) so the credited wON tracks the actual transfer, including any fee-on-transfer skim. The emitted event field was labelled `amount`, suggesting it matched the caller-supplied argument; under a fee-on-transfer token the two diverge.
 - **Impact:** Indexers correlating against the caller-supplied `amount` argument would see a mismatch with the post-fee credit. No funds at risk.
 - **Recommendation:** Rename to `received` or add a second parameter making the requested amount explicit.
@@ -196,7 +196,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-10: `acceptCCIPAdmin` lacks defence-in-depth `address(this)` guard
 - **Severity:** INFO
 - **Status:** DESIGN ACK — `setCCIPAdmin` already rejects `address(this)` via `InvalidCCIPAdmin` (round-6 R-56), so the path to `s_pendingCcipAdmin == address(this)` is structurally closed. Adding the same guard to `acceptCCIPAdmin` would be symmetric belt-and-suspenders only; no realistic attack path. Recorded for completeness — left out to keep the contract surface minimal.
-- **Location:** `src/WrappedON.sol:250-257`
+- **Location:** `src/WrappedON.sol:317-324`
 - **Description:** `acceptCCIPAdmin` does not redundantly check `msg.sender != address(this)`. Even if the pending slot were somehow forced to `address(this)`, no external caller can satisfy `msg.sender == address(this)` without a recursive `address(this).call(…)` — which the contract never makes.
 - **Impact:** None under current logic.
 - **Recommendation:** Optional. If the maintainer prefers symmetry, add `if (msg.sender == address(this)) revert InvalidCCIPAdmin();` at the top of `acceptCCIPAdmin`.
@@ -204,7 +204,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-11: Burn entrypoints lack the `ZeroAmount` guard that `mint` has
 - **Severity:** LOW
 - **Status:** FIXED — added `if (amount == 0) revert ZeroAmount();` to all three burn overloads (`burn(uint256)`, `burn(address,uint256)`, `burnFrom`). Mirrors the WON-1 mint guard. New tests: `test_BurnRevertsOnZeroAmount_SingleArg`, `test_BurnRevertsOnZeroAmount_AddressOverload`, `test_BurnFromRevertsOnZeroAmount`.
-- **Location:** `src/WrappedON.sol:189-211`
+- **Location:** `src/WrappedON.sol:242-268`
 - **Description:** WON-1 closed `mint(0)`. The three burn paths emitted `CCIPBurned(account, 0, supply)` on zero-amount calls, polluting indexer accounting.
 - **Impact:** Indexer audit-trail noise. No funds at risk.
 - **Recommendation:** Add the zero-amount guard symmetrically.
@@ -212,7 +212,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-12: `CCIPAdminProposalCancelled` event emitted before state write
 - **Severity:** LOW
 - **Status:** FIXED — `s_pendingCcipAdmin = newAdmin` now happens before either event emits. No reentrancy risk in either order (no external calls), but emitting after the state write matches the `mint`/`burn`/`acceptCCIPAdmin` order and prevents an indexer subscribing to `CCIPAdminProposalCancelled` from reading the stale `pendingCCIPAdmin()` in the same block.
-- **Location:** `src/WrappedON.sol:240-251`
+- **Location:** `src/WrappedON.sol:287-313`
 - **Description:** Effects-events inversion vs the rest of the contract. Consistency only.
 - **Impact:** None for funds; potential indexer race only.
 - **Recommendation:** Reorder to state-write-then-emit.
@@ -220,7 +220,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-13: `CCIPBurned` re-reads `ccipMintHeadroomUsed` from storage
 - **Severity:** LOW
 - **Status:** FIXED — `_decrementCcipMintHeadroom` now returns the new supply; each burn path emits the local return value (saves one SLOAD per burn × 3 sites, matches the `mint` path's `wouldBe`-local pattern).
-- **Location:** `src/WrappedON.sol:189-211, 275-282`
+- **Location:** `src/WrappedON.sol:242-268` (burn entrypoints), `345-359` (`_decrementCcipMintHeadroom` + `_ccipBurn`)
 - **Description:** Asymmetric with the `mint` path which emits the local `wouldBe`. Identical pattern in three places was a refactor smell.
 - **Impact:** Gas only.
 - **Recommendation:** Return-value refactor on `_decrementCcipMintHeadroom`.
@@ -228,7 +228,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-14: `deposit` admits a `received == 0` no-op path
 - **Severity:** LOW
 - **Status:** FIXED — `deposit` now rejects `received == 0` post-transfer with `ZeroAmount`. Mirrors the WON-1 mint guard for the deposit path. New test: `test_DepositRevertsOnReceivedZero` using a mock whose `transferFrom` returns `true` without moving anything.
-- **Location:** `src/WrappedON.sol:135-148`
+- **Location:** `src/WrappedON.sol:164-192`
 - **Description:** A 100%-fee or buggy ERC20 whose `transferFrom` returned `true` without state change would let `deposit(N)` mint zero wON and emit `Wrapped(_, 0)`. Canonical ON cannot hit this; the received-amount accounting is itself the defensive accommodation for non-canonical variants — so a symmetric guard is consistent.
 - **Impact:** Indexer audit-trail noise; no funds at risk.
 - **Recommendation:** Add the post-transfer zero-amount guard.
@@ -236,7 +236,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-15: `Unwrapped` event keeps `amount` while `Wrapped` uses `received` (asymmetric semantics)
 - **Severity:** INFO
 - **Status:** DESIGN ACK — kept `Unwrapped(account, amount)` because `withdraw` is internal-reserve-only: `safeTransfer` from the contract's own balance to the user has no fee-on-transfer asymmetry on canonical ON. Added explicit NatSpec on the event documenting the asymmetry (vs WON-9's `Wrapped(received)` rename) so a future fee-on-transfer ON variant would not silently misreport. Symmetrizing to a `received`-style accounting on `withdraw` would require received-amount tracking at the recipient — which the contract can't observe without trust assumptions on the recipient.
-- **Location:** `src/WrappedON.sol:76-87`
+- **Location:** `src/WrappedON.sol:101-108`
 - **Description:** Same field name in a sibling event masks the difference in semantics between the two paths.
 - **Impact:** Documentation-only under canonical ON.
 - **Recommendation:** Inline NatSpec on `Unwrapped`.
@@ -244,7 +244,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-16: `mint` per-function NatSpec understates the CCIP-7 cap-replenishment behaviour
 - **Severity:** INFO
 - **Status:** FIXED — `mint`'s docstring now cross-references the contract-level CAP REPLENISHMENT block (CCIP-7) and explicitly says the cap is a live BSC-balance approximation, not a lifetime CCIP-mint ceiling. The previous wording ("so deposit-backed wON does not consume it") suggested a clean separation between the deposit and CCIP-mint paths' impact on the counter, which is misleading once deposit-backed wON is bridged out.
-- **Location:** `src/WrappedON.sol:166-172`
+- **Location:** `src/WrappedON.sol:214-235`
 - **Description:** Per-function NatSpec contradicted the more detailed contract-level block. An auditor reading `mint`'s docstring first formed an incorrect mental model.
 - **Impact:** Documentation only.
 - **Recommendation:** Rephrase to match the contract-level block.
@@ -252,7 +252,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-17: CCIP `mint`/`burn` entrypoints lack `nonReentrant`
 - **Severity:** LOW
 - **Status:** FIXED — added `nonReentrant` to `mint`, `burn(uint256)`, `burn(address,uint256)`, `burnFrom`. Defence-in-depth: OZ 5.x ERC20 has no hooks, so reentry via `_mint`/`_burn` cannot happen against the current code — but a future OZ release or a subclass override adding an `_update` hook would expose a `ccipMintHeadroomUsed` desync window. The `deposit`/`withdraw` paths already carry `nonReentrant`; consistency was worth the ~2.5k gas/call.
-- **Location:** `src/WrappedON.sol:173, 191, 199, 206`
+- **Location:** `src/WrappedON.sol:221, 242, 254, 262`
 - **Description:** The CCIP-side entrypoints didn't carry the same modifier as the wrap-side, so a hookable-token redeploy or a future OZ subclass change could open a same-tx reentry. Existing invariants pass under the new modifier.
 - **Impact:** No active exploit path against current OZ ERC20; forward-compat hardening.
 - **Recommendation:** Mirror `nonReentrant` from `deposit`/`withdraw`.
@@ -260,7 +260,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### WON-18: `mint`/`burn` cross-function reentrancy not under direct test
 - **Severity:** INFO
 - **Status:** DESIGN ACK — `WON-17` adds `nonReentrant` to all four CCIP entrypoints, which is the structural fix. The TEST-8 deposit-side reentry test (now hardened by TEST-16 to assert the specific `ReentrancyGuardReentrantCall` selector) exercises the OZ guard's behaviour against a hook-bearing token; adding a parallel CCIP-side test would be belt-and-suspenders since the same `nonReentrant` modifier is in play. Recorded so a future deploy against a hookable-ERC20 token has a single canonical follow-up: extend TEST-8's pattern to the CCIP path.
-- **Location:** `test/WrappedON.t.sol`, `src/WrappedON.sol:173, 191, 199, 206`
+- **Location:** `test/WrappedON.t.sol`, `src/WrappedON.sol:221, 242, 254, 262`
 - **Description:** No malicious-burner-pool mock exercises a same-tx reentry from `burn → mint` or vice versa.
 - **Impact:** Forward-compat only.
 - **Recommendation:** Defer to redeploy if the bridge is ever wired to a hookable ON variant.
@@ -477,7 +477,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### CCIP-3: Bucket capacity/rate ratio is high — single tx can saturate for ~2.8h
 - **Severity:** LOW
 - **Status:** DOC ADDED — script 05 NatSpec now spells out the ~2.8h-from-zero refill window so operators decide consciously before mainnet rather than inheriting it implicitly.
-- **Location:** `script/05_ApplyChainUpdates.s.sol:20-21`, `src/WrappedON.sol:147-152`
+- **Location:** `script/05_ApplyChainUpdates.s.sol:20-29`, `src/WrappedON.sol:78-80`
 - **Description:** `DEFAULT_CAPACITY = 100_000 ether` against `DEFAULT_RATE = 10 ether/sec` = 10,000 s to refill (~2.78 h). A single bridging tx can saturate the bucket and block all other users until refill.
 - **Impact:** Temporary DoS, resolvable by waiting or by operator-adjusted rate.
 - **Recommendation:** Consider sizing capacity to a smaller multiple of rate (e.g. 100-second refill window) and document the chosen ratio as an explicit decision in RUNBOOK.
@@ -511,7 +511,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Status:** DOC ADDED — `WrappedON.sol` NatSpec now contains a dedicated CAP REPLENISHMENT paragraph spelling out the cycling-refills-headroom behaviour, the preserved safety invariant, and the operational consequence (monitor `ccipMintHeadroomUsed` relative to current BSC locked balance, not relative to `MAX_CCIP_MINTED`). The monotone-counter alternative is left as a redeploy option if a true lifetime CCIP-mint bound becomes a requirement. **M1 / #23:** the counter was renamed `ccipMintedSupply` → `ccipMintHeadroomUsed` to make the "headroom used, not BSC-minted-supply" semantics explicit at the identifier level (see WON-3).
 - **External audit:** Maps to QuillAudits *Wrapped ON* Initial Audit Report — Finding I4 (Informational, reviewed at `b9de6da`), tracked as repo issue [#26](https://github.com/orochi-network/bridge/issues/26). Closed by a doc-consistency sweep of `README.md`, `RUNBOOK.md`, and `docs/ARCHITECTURE.md` confirming no wording presents `MAX_CCIP_MINTED` as a `totalSupply()` ceiling. Canonical phrasing: *MAX_CCIP_MINTED caps the local CCIP mint counter, not aggregate wON supply.*
 - **Clarification (the exact invariant vs. the local counter):** The genuine cross-chain invariant is enforced by CCIP, not by this contract: every CCIP message pairs one BSC `lock`/`release` with one Ethereum `mint`/`burn`, so the ON locked on BSC *via CCIP* equals the wON minted on Ethereum *via CCIP*, message-for-message. **Ethereum cannot read the BSC pool's balance**, so that equality rests on a Chainlink trust assumption (the DON + RMN delivering each message once and honouring the pairing) — `mint` fires when the trusted off-ramp calls `releaseOrMint` and cannot verify the matching BSC lock itself. `ccipMintHeadroomUsed` is only a *local* proxy that exists because the real figure is off-chain: it saturates at 0 (hence WON-3) and reflects neither operator-seeded rebalancer liquidity nor any live cross-chain read. Do not conflate the exact protocol pairing with the approximate local counter.
-- **Location:** `src/WrappedON.sol:234-237` (saturating decrement)
+- **Location:** `src/WrappedON.sol:345-349` (saturating decrement)
 - **Description:** wON is fungible. A user can `deposit` native ETH-side ON (deposit-backed wON, `ccipMintHeadroomUsed` untouched), then bridge that wON to BSC (`burn` saturating-decrements `ccipMintHeadroomUsed` toward zero). After cycling, the 100M cap is fully replenished, even though no CCIP-minted supply was burned. In the extreme: 100M deposit → 100M bridge-out → counter resets to 0 → another 100M CCIP-mint available. The safety invariant `lockedON_BSC + reserveON_ETH >= totalSupply(wON)` still holds, but the cap's intent (bounding damage from a compromised pool) is weakened: compromised-pool damage is bounded by *current* `ccipMintHeadroomUsed` headroom, which may exceed 100M cumulatively over time.
 - **Impact:** The cap is an approximation, not a hard CCIP-mint lifetime ceiling. The contract NatSpec already states this; the SECURITY-relevant point is that monitoring should not assume cap-fraction-used equals risk-fraction-used.
 - **Recommendation:** Document the cycling scenario explicitly in `WrappedON.sol` NatSpec. If a true lifetime CCIP-mint bound is desired, use a monotone non-decrementing counter (with a parallel cap higher than 100M to permit honest cycling).
@@ -551,7 +551,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### CCIP-12: `CCIPBurned.account` semantic mismatch with `Transfer.from` for the single-arg `burn(uint256)`
 - **Severity:** INFO
 - **Status:** DOC ADDED — NatSpec on the `burn(uint256)` overload now states: `account` is `msg.sender` (the burning pool), not the token holder. The concurrent ERC20 `Transfer(from, 0, amount)` has `from` = the token holder; indexers correlating both events need to match against `Transfer.from`. No on-chain behaviour change.
-- **Location:** `src/WrappedON.sol:185-191`
+- **Location:** `src/WrappedON.sol:237-247`
 - **Description:** Subscribing only to `CCIPBurned` and assuming `account` is the holder misreads the single-arg path.
 - **Impact:** Indexer correctness — documentation gap.
 - **Recommendation:** NatSpec disclosure.

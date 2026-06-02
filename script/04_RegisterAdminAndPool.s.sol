@@ -10,18 +10,7 @@ import {
 
 import {Helper} from "./Helper.sol";
 import {Deployments} from "./Deployments.sol";
-
-interface IGetCCIPAdmin {
-    function getCCIPAdmin() external view returns (address);
-}
-
-interface IOwnable {
-    function owner() external view returns (address);
-}
-
-interface IAccessControlRead {
-    function hasRole(bytes32 role, address account) external view returns (bool);
-}
+import {IGetCCIPAdmin, IOwnable, IAccessControlRead} from "./Interfaces.sol";
 
 interface ITokenAdminRegistryConfig {
     // 96-byte static struct {administrator, pendingAdministrator, tokenPool}.
