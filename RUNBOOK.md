@@ -62,6 +62,21 @@ cast call $BSC_ON 'totalSupply()(uint256)' --rpc-url $BSC_RPC
 
 If any mint surface is present and gated to an address that could plausibly mint more, halt the deployment — the cap-vs-supply relationship is load-bearing for the entire CCIP-7 / cap-replenishment safety story.
 
+**Incident response: an inbound CCIP message reverting with `CCIPMintCapExceeded`.** The mint
+cap makes `WrappedON.mint` — and therefore the offRamp's `releaseOrMint` — revert once
+`ccipMintedSupply + amount > MAX_CCIP_MINTED`. Treat this as a **deliberate fail-safe trip,
+not a transient.** CCIP will surface the message as failed-execution and allow manual
+re-execution, but the retry calls the same `mint` and will keep reverting until
+`ccipMintedSupply` drops below the cap (i.e. until matching wON is burned/bridged out on
+ETH). Under honest operation this is unreachable: only 100M ON exists on BSC,
+`ccipMintedSupply ≈ lockedON_BSC ≤ 100M`, and burns saturating-decrement the counter. So a
+live `CCIPMintCapExceeded` on an inbound message means one of: (a) BSC ON supply exceeded
+100M (OPS-29 above — the surplus is stranded by design), or (b) the ETH pool minted without
+a matching BSC lock (compromise/bug — the cap is the circuit-breaker that stopped it). In
+both cases do **not** treat the stuck message as a delivery bug to force through; page the
+on-call rotation and reconcile `ccipMintedSupply` against
+`IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` before any manual re-execution.
+
 ### 0.3 Environment
 
 Copy `.env.example` → `.env` and fill in:
