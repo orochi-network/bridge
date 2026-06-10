@@ -870,6 +870,60 @@ contract WrappedONTest is Test {
         assertFalse(won.supportsInterface(0xdeadbeef));
     }
 
+    /// @notice Pins the CCIP-facing ABI to hard-coded literals from the PRODUCTION
+    ///         Chainlink 1.5.x deployment (`BurnMintTokenPool` calls `mint`/`burn` by these
+    ///         exact 4-byte selectors; `RegistryModuleOwnerCustom` calls `getCCIPAdmin()`).
+    ///         The sibling test above asserts against `type(I).interfaceId` of the VENDORED
+    ///         submodule — which would silently follow a submodule re-pin. Deployed pool
+    ///         bytecode is immutable, so these literals must never change; a failure here
+    ///         means the token no longer matches what production CCIP actually calls.
+    function test_ProductionSelectorsAndInterfaceIdsPinned() public {
+        // Vendored interfaces still hash to the production constants (detects submodule drift).
+        assertEq(type(IBurnMintERC20).interfaceId, bytes4(0xe6599b4d), "IBurnMintERC20 id drifted from production");
+        assertEq(type(IGetCCIPAdmin).interfaceId, bytes4(0x8fd6a6ac), "IGetCCIPAdmin id drifted from production");
+        // ERC-165 advertisement answers the raw production constants, not just the vendored ids.
+        assertTrue(won.supportsInterface(bytes4(0xe6599b4d)));
+        assertTrue(won.supportsInterface(bytes4(0x8fd6a6ac)));
+
+        // Runtime dispatch on the exact selectors production pool bytecode emits.
+        bool ok;
+        bytes memory ret;
+
+        // mint(address,uint256) = 0x40c10f19 — BurnMintTokenPoolAbstract.releaseOrMint.
+        vm.prank(pool);
+        (ok,) = address(won).call(abi.encodeWithSelector(bytes4(0x40c10f19), alice, uint256(3 ether)));
+        assertTrue(ok, "mint selector 0x40c10f19 not dispatched");
+        assertEq(won.balanceOf(alice), 3 ether);
+
+        // burn(uint256) = 0x42966c68 — BurnMintTokenPool._burn (the deployed pool variant).
+        vm.prank(pool);
+        (ok,) = address(won).call(abi.encodeWithSelector(bytes4(0x40c10f19), pool, uint256(2 ether)));
+        assertTrue(ok);
+        vm.prank(pool);
+        (ok,) = address(won).call(abi.encodeWithSelector(bytes4(0x42966c68), uint256(2 ether)));
+        assertTrue(ok, "burn selector 0x42966c68 not dispatched");
+        assertEq(won.balanceOf(pool), 0);
+
+        // burn(address,uint256) = 0x9dc29fac — BurnWithFromMintTokenPool variant.
+        vm.prank(pool);
+        (ok,) = address(won).call(abi.encodeWithSelector(bytes4(0x9dc29fac), alice, uint256(1 ether)));
+        assertTrue(ok, "burn selector 0x9dc29fac not dispatched");
+        assertEq(won.balanceOf(alice), 2 ether);
+
+        // burnFrom(address,uint256) = 0x79cc6790 — BurnFromMintTokenPool variant.
+        vm.prank(alice);
+        won.approve(pool, 1 ether);
+        vm.prank(pool);
+        (ok,) = address(won).call(abi.encodeWithSelector(bytes4(0x79cc6790), alice, uint256(1 ether)));
+        assertTrue(ok, "burnFrom selector 0x79cc6790 not dispatched");
+        assertEq(won.balanceOf(alice), 1 ether);
+
+        // getCCIPAdmin() = 0x8fd6a6ac — RegistryModuleOwnerCustom.registerAdminViaGetCCIPAdmin.
+        (ok, ret) = address(won).staticcall(abi.encodeWithSelector(bytes4(0x8fd6a6ac)));
+        assertTrue(ok, "getCCIPAdmin selector 0x8fd6a6ac not dispatched");
+        assertEq(abi.decode(ret, (address)), admin);
+    }
+
     function test_Decimals18() public view {
         assertEq(won.decimals(), 18);
     }
