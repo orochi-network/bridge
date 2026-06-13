@@ -10,9 +10,7 @@ import {TokenPool} from "@chainlink/contracts-ccip/pools/TokenPool.sol";
 import {Pool} from "@chainlink/contracts-ccip/libraries/Pool.sol";
 import {RateLimiter} from "@chainlink/contracts-ccip/libraries/RateLimiter.sol";
 import {TokenAdminRegistry} from "@chainlink/contracts-ccip/tokenAdminRegistry/TokenAdminRegistry.sol";
-import {
-    RegistryModuleOwnerCustom
-} from "@chainlink/contracts-ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
+import {RegistryModuleOwnerCustom} from "@chainlink/contracts-ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
 
 import {WrappedON} from "../../src/WrappedON.sol";
 

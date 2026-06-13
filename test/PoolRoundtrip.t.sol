@@ -77,8 +77,9 @@ contract PoolRoundtripTest is Test {
         MockON onEth = new MockON("ON", 0, address(0xdead));
         vm.prank(admin);
         won = new WrappedON(IERC20(address(onEth)), admin);
-        ethPool =
-            new BurnMintTokenPool(IBurnMintERC20(address(won)), 18, new address[](0), address(ethRmn), address(ethRouter));
+        ethPool = new BurnMintTokenPool(
+            IBurnMintERC20(address(won)), 18, new address[](0), address(ethRmn), address(ethRouter)
+        );
 
         // Pool gets MINTER+BURNER on wON.
         vm.startPrank(admin);

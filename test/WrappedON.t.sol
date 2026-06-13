@@ -932,7 +932,7 @@ contract WrappedONTest is Test {
         vm.prank(admin);
         rWon.grantRole(lmRole, alice);
         // Fund alice with rON BEFORE arming the reentrancy so this transfer doesn't trip it.
-        rOn.transfer(alice, 1_000 ether);
+        rOn.transfer(alice, 1000 ether);
 
         // Deposit uses `transferFrom` (not the armed `transfer` path), so the reserve fills cleanly.
         vm.startPrank(alice);

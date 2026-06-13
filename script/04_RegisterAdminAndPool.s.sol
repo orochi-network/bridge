@@ -4,9 +4,7 @@ pragma solidity 0.8.34;
 import {Script, console} from "forge-std/Script.sol";
 
 import {TokenAdminRegistry} from "@chainlink/contracts-ccip/tokenAdminRegistry/TokenAdminRegistry.sol";
-import {
-    RegistryModuleOwnerCustom
-} from "@chainlink/contracts-ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
+import {RegistryModuleOwnerCustom} from "@chainlink/contracts-ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
 
 import {Helper} from "./Helper.sol";
 import {Deployments} from "./Deployments.sol";

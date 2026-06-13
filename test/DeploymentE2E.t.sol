@@ -15,9 +15,7 @@ import {
     IERC20 as CCIP_IERC20
 } from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
 import {TokenAdminRegistry} from "@chainlink/contracts-ccip/tokenAdminRegistry/TokenAdminRegistry.sol";
-import {
-    RegistryModuleOwnerCustom
-} from "@chainlink/contracts-ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
+import {RegistryModuleOwnerCustom} from "@chainlink/contracts-ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
 import {TokenPool as ITokenPool} from "@chainlink/contracts-ccip/pools/TokenPool.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
@@ -112,8 +110,9 @@ contract DeploymentE2ETest is Test {
     /// @dev Mirrors `script/02_DeployPools.s.sol` for both chains.
     function _run02_deployPools() internal {
         vm.prank(deployer);
-        ethPool =
-            new BurnMintTokenPool(IBurnMintERC20(address(won)), 18, new address[](0), address(ethRmn), address(ethRouter));
+        ethPool = new BurnMintTokenPool(
+            IBurnMintERC20(address(won)), 18, new address[](0), address(ethRmn), address(ethRouter)
+        );
 
         vm.prank(bscTokenOwner);
         bscPool = new LockReleaseTokenPool(

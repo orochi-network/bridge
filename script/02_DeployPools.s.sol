@@ -7,7 +7,9 @@ import {BurnMintTokenPool} from "@chainlink/contracts-ccip/pools/BurnMintTokenPo
 import {LockReleaseTokenPool} from "@chainlink/contracts-ccip/pools/LockReleaseTokenPool.sol";
 import {IBurnMintERC20} from "@chainlink/contracts/src/v0.8/shared/token/ERC20/IBurnMintERC20.sol";
 // Pool ctors expect the CCIP-vendored IERC20; importing the same path avoids a type clash.
-import {IERC20} from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
+import {
+    IERC20
+} from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
 
 import {Helper} from "./Helper.sol";
 import {Deployments} from "./Deployments.sol";
