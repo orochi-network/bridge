@@ -4,19 +4,19 @@ pragma solidity 0.8.34;
 import {Test, console} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {LockReleaseTokenPool} from "@chainlink/contracts-ccip/ccip/pools/LockReleaseTokenPool.sol";
-import {TokenPool} from "@chainlink/contracts-ccip/ccip/pools/TokenPool.sol";
-import {Pool} from "@chainlink/contracts-ccip/ccip/libraries/Pool.sol";
-import {RateLimiter} from "@chainlink/contracts-ccip/ccip/libraries/RateLimiter.sol";
-import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/ccip/interfaces/IGetCCIPAdmin.sol";
-import {IOwner} from "@chainlink/contracts-ccip/ccip/interfaces/IOwner.sol";
+import {LockReleaseTokenPool} from "@chainlink/contracts-ccip/pools/LockReleaseTokenPool.sol";
+import {TokenPool} from "@chainlink/contracts-ccip/pools/TokenPool.sol";
+import {Pool} from "@chainlink/contracts-ccip/libraries/Pool.sol";
+import {RateLimiter} from "@chainlink/contracts-ccip/libraries/RateLimiter.sol";
+import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/interfaces/IGetCCIPAdmin.sol";
+import {IOwner} from "@chainlink/contracts-ccip/interfaces/IOwner.sol";
 import {
     IERC20 as ICCIP_IERC20
-} from "@chainlink/contracts-ccip/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
-import {TokenAdminRegistry} from "@chainlink/contracts-ccip/ccip/tokenAdminRegistry/TokenAdminRegistry.sol";
+} from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
+import {TokenAdminRegistry} from "@chainlink/contracts-ccip/tokenAdminRegistry/TokenAdminRegistry.sol";
 import {
     RegistryModuleOwnerCustom
-} from "@chainlink/contracts-ccip/ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
+} from "@chainlink/contracts-ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
 
 /// @dev Extends IRouter with getOffRamps(), not in the minimal IRouter interface.
 interface IRouterFull {
@@ -66,22 +66,23 @@ contract Fork_BSC is Test {
 
         fakeRemoteEthPool = makeAddr("ethPoolPlaceholder");
 
-        // Deploy BSC pool. acceptLiquidity=false keeps withdrawLiquidity permanently disabled.
+        // Deploy BSC pool. CCIP 1.6.1 dropped the acceptLiquidity flag; leaving the rebalancer
+        // unset keeps provideLiquidity/withdrawLiquidity disabled (both revert unless
+        // msg.sender == s_rebalancer).
         vm.prank(deployer);
-        bscPool = new LockReleaseTokenPool(ICCIP_IERC20(ON_BSC), new address[](0), BSC_RMN, false, BSC_ROUTER);
+        bscPool = new LockReleaseTokenPool(ICCIP_IERC20(ON_BSC), 18, new address[](0), BSC_RMN, BSC_ROUTER);
 
         // Wire to ETH (placeholder remote pool address; filled by script 05 at deploy time).
         TokenPool.ChainUpdate[] memory updates = new TokenPool.ChainUpdate[](1);
         updates[0] = TokenPool.ChainUpdate({
             remoteChainSelector: ETH_SELECTOR,
-            allowed: true,
-            remotePoolAddress: abi.encode(fakeRemoteEthPool),
+            remotePoolAddresses: _remote(abi.encode(fakeRemoteEthPool)),
             remoteTokenAddress: abi.encode(ON_ETH_WON),
             outboundRateLimiterConfig: RateLimiter.Config({isEnabled: true, capacity: 100_000 ether, rate: 10 ether}),
             inboundRateLimiterConfig: RateLimiter.Config({isEnabled: true, capacity: 100_000 ether, rate: 10 ether})
         });
         vm.prank(deployer);
-        bscPool.applyChainUpdates(updates);
+        bscPool.applyChainUpdates(new uint64[](0), updates);
     }
 
     // ─── ON token ownership model (resolves the "known open item" in CLAUDE.md) ──
@@ -120,9 +121,11 @@ contract Fork_BSC is Test {
         assertEq(bscPool.getRmnProxy(), BSC_RMN);
         assertTrue(bscPool.isSupportedChain(ETH_SELECTOR));
 
-        assertEq(abi.decode(bscPool.getRemotePool(ETH_SELECTOR), (address)), fakeRemoteEthPool);
+        assertEq(abi.decode(bscPool.getRemotePools(ETH_SELECTOR)[0], (address)), fakeRemoteEthPool);
 
-        assertFalse(bscPool.canAcceptLiquidity(), "withdrawLiquidity must be permanently disabled");
+        // CCIP 1.6.1: no `acceptLiquidity`/`canAcceptLiquidity`. With no rebalancer set,
+        // provideLiquidity/withdrawLiquidity revert (gated on msg.sender == s_rebalancer).
+        assertEq(bscPool.getRebalancer(), address(0), "no rebalancer => provide/withdrawLiquidity disabled");
 
         // `isEnabled = true` with `rate = 0` silently bricks the limiter — every transfer
         // would be blocked because the bucket never refills. Assert both rate and capacity
@@ -183,7 +186,7 @@ contract Fork_BSC is Test {
             originalSender: abi.encode(alice),
             remoteChainSelector: ETH_SELECTOR,
             receiver: alice,
-            amount: amount,
+            sourceDenominatedAmount: amount,
             localToken: ON_BSC,
             sourcePoolAddress: abi.encode(fakeRemoteEthPool),
             sourcePoolData: "",
@@ -199,6 +202,12 @@ contract Fork_BSC is Test {
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+    /// @dev CCIP 1.6.1 `ChainUpdate.remotePoolAddresses` is `bytes[]`; wrap a single encoded pool.
+    function _remote(bytes memory poolAddr) internal pure returns (bytes[] memory arr) {
+        arr = new bytes[](1);
+        arr[0] = poolAddr;
+    }
 
     function _findOffRamp(address router, uint64 sourceChain) internal view returns (address offRamp) {
         IRouterFull.OffRamp[] memory all = IRouterFull(router).getOffRamps();

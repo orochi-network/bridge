@@ -10,8 +10,8 @@ import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol"
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
-import {IBurnMintERC20} from "@chainlink/contracts-ccip/shared/token/ERC20/IBurnMintERC20.sol";
-import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/ccip/interfaces/IGetCCIPAdmin.sol";
+import {IBurnMintERC20} from "@chainlink/contracts/src/v0.8/shared/token/ERC20/IBurnMintERC20.sol";
+import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/interfaces/IGetCCIPAdmin.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
@@ -60,6 +60,45 @@ contract ReentrantMockON is ERC20 {
             // TEST-16: assert the specific selector so an inner revert from a *different*
             // cause (insufficient balance, allowance, etc.) doesn't masquerade as the
             // guard firing. Foundry surfaces the inner revert reason as a 4-byte selector.
+            require(
+                ret.length >= 4 && bytes4(ret) == ReentrancyGuard.ReentrancyGuardReentrantCall.selector,
+                "expected ReentrancyGuardReentrantCall"
+            );
+            reentered = false;
+        }
+        return ok;
+    }
+}
+
+/// @dev TEST-8 (withdraw leg): mock whose `transfer` re-enters `WrappedON.withdraw`. The
+///      withdraw exit path is `ON.safeTransfer(msg.sender, amount)`, so on a hook-bearing
+///      ERC20 the `nonReentrant` guard on `withdraw` is the only thing between that hook and a
+///      reentrant unwrap. Mirrors `ReentrantMockON` (which probes the deposit leg via
+///      `transferFrom`). The current canonical ON is plain ERC20 with no hooks; this pins the
+///      guard against future redeployments against tokens that do hook.
+contract ReentrantWithdrawMockON is ERC20 {
+    address public target;
+    bool internal reentered;
+
+    constructor() ERC20("Reentrant Withdraw Mock ON", "rwON") {
+        _mint(msg.sender, 1_000_000 ether);
+    }
+
+    function setTarget(address t) external {
+        target = t;
+    }
+
+    function transfer(address to, uint256 amount) public override returns (bool) {
+        bool ok = super.transfer(to, amount);
+        if (target != address(0) && !reentered) {
+            reentered = true;
+            // Attempt reentry into withdraw during the outer withdraw's safeTransfer; the
+            // wON contract's `nonReentrant` must reject it. `nonReentrant` runs before any
+            // body logic, so the inner call reverts regardless of balances/roles.
+            (bool success, bytes memory ret) = target.call(abi.encodeWithSignature("withdraw(uint256)", 1));
+            require(!success, "reentry succeeded - nonReentrant guard missing");
+            // Assert the specific selector so an inner revert from a *different* cause doesn't
+            // masquerade as the guard firing.
             require(
                 ret.length >= 4 && bytes4(ret) == ReentrancyGuard.ReentrancyGuardReentrantCall.selector,
                 "expected ReentrancyGuardReentrantCall"
@@ -720,6 +759,30 @@ contract WrappedONTest is Test {
         assertEq(won.ccipMintHeadroomUsed(), cap, "deposit must not move ccipMintHeadroomUsed");
     }
 
+    /// @notice `withdraw()` must NEVER touch `ccipMintHeadroomUsed`. The counter approximates the
+    ///         BSC-pool lock; withdraw only moves the ETH-side reserve and never triggers a BSC
+    ///         release, so decrementing it here would free cap headroom without a matching BSC
+    ///         release and desync the bridge (the exact safety property the cap protects). This
+    ///         is the unwrap-side mirror of `test_DepositSucceedsWhenCCIPCapHit`; a refactor that
+    ///         added a decrement to `withdraw` would otherwise pass the whole suite silently.
+    function test_WithdrawDoesNotTouchCcipMintHeadroom() public {
+        // Drive the counter to a non-zero value via a CCIP mint (the only path that moves it up).
+        vm.prank(pool);
+        won.mint(bob, 40 ether);
+        assertEq(won.ccipMintHeadroomUsed(), 40 ether);
+
+        // Alice does a pure reserve round-trip: deposit then withdraw.
+        vm.startPrank(alice);
+        on.approve(address(won), 100 ether);
+        won.deposit(100 ether);
+        assertEq(won.ccipMintHeadroomUsed(), 40 ether, "deposit must not move ccipMintHeadroomUsed");
+        won.withdraw(100 ether);
+        vm.stopPrank();
+
+        assertEq(won.ccipMintHeadroomUsed(), 40 ether, "withdraw must not move ccipMintHeadroomUsed");
+        assertEq(on.balanceOf(address(won)), 0, "reserve fully withdrawn");
+    }
+
     function test_BurnDecrementsCCIPMintedSupply() public {
         vm.prank(pool);
         won.mint(pool, 80 ether);
@@ -852,6 +915,41 @@ contract WrappedONTest is Test {
         assertEq(rWon.balanceOf(address(this)), 5 ether, "outer deposit must complete");
     }
 
+    /// @notice SECURITY: TEST-8 (withdraw leg) — `nonReentrant` on `withdraw` must reject a
+    ///         reentry triggered by a hook-bearing ERC20's `transfer` (the withdraw exit path).
+    ///         The deposit leg is covered by `test_DepositReentrancyGuardFires`; this is its
+    ///         unwrap-side sibling. The mock re-enters `withdraw(1)` from inside `transfer` and
+    ///         asserts the inner call reverts `ReentrancyGuardReentrantCall`, so the OUTER
+    ///         withdraw must still complete normally.
+    function test_WithdrawReentrancyGuardFires() public {
+        ReentrantWithdrawMockON rOn = new ReentrantWithdrawMockON();
+        WrappedON rWon = new WrappedON(IERC20(address(rOn)), admin);
+
+        // M3 (#25): alice is the depositor; grant her LIQUIDITY_MANAGER_ROLE on the fresh wON.
+        // Cache the role constant so `vm.prank(admin)` applies to `grantRole`, not to the
+        // intervening `LIQUIDITY_MANAGER_ROLE()` view call.
+        bytes32 lmRole = rWon.LIQUIDITY_MANAGER_ROLE();
+        vm.prank(admin);
+        rWon.grantRole(lmRole, alice);
+        // Fund alice with rON BEFORE arming the reentrancy so this transfer doesn't trip it.
+        rOn.transfer(alice, 1_000 ether);
+
+        // Deposit uses `transferFrom` (not the armed `transfer` path), so the reserve fills cleanly.
+        vm.startPrank(alice);
+        rOn.approve(address(rWon), 100 ether);
+        rWon.deposit(100 ether);
+        vm.stopPrank();
+
+        // Arm the reentrancy: the next rON.transfer (the withdraw exit) re-enters withdraw.
+        rOn.setTarget(address(rWon));
+
+        vm.prank(alice);
+        rWon.withdraw(50 ether);
+
+        assertEq(rWon.balanceOf(alice), 50 ether, "outer withdraw must complete");
+        assertEq(rOn.balanceOf(address(rWon)), 50 ether, "reserve reduced by the withdrawn amount");
+    }
+
     function test_ConstructorRevertsOnDecimalsMismatch() public {
         MockON6 on6 = new MockON6();
         vm.expectRevert(abi.encodeWithSelector(WrappedON.DecimalsMismatch.selector, 18, 6));
@@ -870,9 +968,11 @@ contract WrappedONTest is Test {
         assertFalse(won.supportsInterface(0xdeadbeef));
     }
 
-    /// @notice Pins the CCIP-facing ABI to hard-coded literals from the PRODUCTION
-    ///         Chainlink 1.5.x deployment (`BurnMintTokenPool` calls `mint`/`burn` by these
+    /// @notice Pins the CCIP-facing ABI to hard-coded literals matching the PRODUCTION
+    ///         Chainlink 1.6.1 deployment (`BurnMintTokenPool` calls `mint`/`burn` by these
     ///         exact 4-byte selectors; `RegistryModuleOwnerCustom` calls `getCCIPAdmin()`).
+    ///         These selectors/interface-ids are byte-identical across 1.5.x and 1.6.1 — the
+    ///         signatures never changed — so the literals double as a cross-version anchor.
     ///         The sibling test above asserts against `type(I).interfaceId` of the VENDORED
     ///         submodule — which would silently follow a submodule re-pin. Deployed pool
     ///         bytecode is immutable, so these literals must never change; a failure here

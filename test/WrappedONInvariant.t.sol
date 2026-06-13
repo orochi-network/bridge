@@ -47,6 +47,12 @@ contract WrappedONHandler is Test {
     ///         invariant test to sanity-check the deposit accounting independently.
     uint256 public totalDeposited;
 
+    /// @notice Cumulative ON outflow from the wON reserve via `withdraw`. Paired with
+    ///         `totalDeposited` so the reserve invariant can assert the TIGHT form
+    ///         `reserve == totalDeposited - totalWithdrawn` (CCIP mint/burn never touches
+    ///         the reserve, so deposit/withdraw are the only flows).
+    uint256 public totalWithdrawn;
+
     constructor(WrappedON won_, InvariantMockON on_, address pool_) {
         WON = won_;
         ON = on_;
@@ -98,6 +104,7 @@ contract WrappedONHandler is Test {
         amount = _boundAmt(amount, cap);
         vm.prank(user);
         WON.withdraw(amount);
+        totalWithdrawn += amount;
     }
 
     /// @dev Simulates a CCIP `releaseOrMint` arriving on ETH: BSC pool locks `amount`,
@@ -355,15 +362,19 @@ contract WrappedONInvariantTest is StdInvariant, Test {
         );
     }
 
-    /// @notice The reserve accounting is a 1:1 invariant: ON balance of the wON contract
-    ///         equals the cumulative net deposit flow (deposits minus withdraws), because
-    ///         CCIP mint/burn never touches the reserve.
+    /// @notice The reserve accounting is an EXACT 1:1 invariant: the ON balance of the wON
+    ///         contract equals the cumulative net deposit flow (deposits minus withdraws),
+    ///         because CCIP mint/burn never moves the reserve — only `deposit` (in) and
+    ///         `withdraw` (out) do. The handler tracks both flows, so we assert the tight
+    ///         equality rather than the previous one-sided `reserve <= totalDeposited` bound:
+    ///         a `withdraw` that burned wON without returning ON, or a `deposit` that
+    ///         double-counted, would now fail here instead of slipping under the `<=`.
     function invariant_ReserveMatchesNetDeposits() public view {
         uint256 reserve = onToken.balanceOf(address(won));
-        // Net withdrawn = total deposited - current reserve. Must be non-negative
-        // (deposits can't go below zero), AND withdrawn must equal what users hold below
-        // the deposit-derived portion. We can't isolate that cleanly without provenance
-        // tagging, so this invariant is the weaker "reserve <= totalDeposited".
-        assertLe(reserve, handler.totalDeposited(), "invariant: reserve exceeds cumulative deposits");
+        assertEq(
+            reserve,
+            handler.totalDeposited() - handler.totalWithdrawn(),
+            "invariant: reserve != cumulative deposits - withdrawals"
+        );
     }
 }

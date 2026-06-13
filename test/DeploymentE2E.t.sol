@@ -5,20 +5,20 @@ import {Test, console} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {BurnMintTokenPool} from "@chainlink/contracts-ccip/ccip/pools/BurnMintTokenPool.sol";
-import {LockReleaseTokenPool} from "@chainlink/contracts-ccip/ccip/pools/LockReleaseTokenPool.sol";
-import {TokenPool} from "@chainlink/contracts-ccip/ccip/pools/TokenPool.sol";
-import {Pool} from "@chainlink/contracts-ccip/ccip/libraries/Pool.sol";
-import {RateLimiter} from "@chainlink/contracts-ccip/ccip/libraries/RateLimiter.sol";
-import {IBurnMintERC20} from "@chainlink/contracts-ccip/shared/token/ERC20/IBurnMintERC20.sol";
+import {BurnMintTokenPool} from "@chainlink/contracts-ccip/pools/BurnMintTokenPool.sol";
+import {LockReleaseTokenPool} from "@chainlink/contracts-ccip/pools/LockReleaseTokenPool.sol";
+import {TokenPool} from "@chainlink/contracts-ccip/pools/TokenPool.sol";
+import {Pool} from "@chainlink/contracts-ccip/libraries/Pool.sol";
+import {RateLimiter} from "@chainlink/contracts-ccip/libraries/RateLimiter.sol";
+import {IBurnMintERC20} from "@chainlink/contracts/src/v0.8/shared/token/ERC20/IBurnMintERC20.sol";
 import {
     IERC20 as CCIP_IERC20
-} from "@chainlink/contracts-ccip/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
-import {TokenAdminRegistry} from "@chainlink/contracts-ccip/ccip/tokenAdminRegistry/TokenAdminRegistry.sol";
+} from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
+import {TokenAdminRegistry} from "@chainlink/contracts-ccip/tokenAdminRegistry/TokenAdminRegistry.sol";
 import {
     RegistryModuleOwnerCustom
-} from "@chainlink/contracts-ccip/ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
-import {TokenPool as ITokenPool} from "@chainlink/contracts-ccip/ccip/pools/TokenPool.sol";
+} from "@chainlink/contracts-ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
+import {TokenPool as ITokenPool} from "@chainlink/contracts-ccip/pools/TokenPool.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
 import {MockRouter} from "./mocks/MockRouter.sol";
@@ -113,14 +113,15 @@ contract DeploymentE2ETest is Test {
     function _run02_deployPools() internal {
         vm.prank(deployer);
         ethPool =
-            new BurnMintTokenPool(IBurnMintERC20(address(won)), new address[](0), address(ethRmn), address(ethRouter));
+            new BurnMintTokenPool(IBurnMintERC20(address(won)), 18, new address[](0), address(ethRmn), address(ethRouter));
 
         vm.prank(bscTokenOwner);
         bscPool = new LockReleaseTokenPool(
             CCIP_IERC20(address(onBsc)),
+            18, // localTokenDecimals (ON is 18)
             new address[](0),
             address(bscRmn),
-            false, // acceptLiquidity disabled
+            // CCIP 1.6.1 removed the acceptLiquidity flag; no rebalancer set => provideLiquidity disabled
             address(bscRouter)
         );
     }
@@ -158,30 +159,34 @@ contract DeploymentE2ETest is Test {
         TokenPool.ChainUpdate[] memory ethToBsc = new TokenPool.ChainUpdate[](1);
         ethToBsc[0] = TokenPool.ChainUpdate({
             remoteChainSelector: BSC_SELECTOR,
-            allowed: true,
-            remotePoolAddress: abi.encode(address(bscPool)),
+            remotePoolAddresses: _remote(abi.encode(address(bscPool))),
             remoteTokenAddress: abi.encode(address(onBsc)),
             outboundRateLimiterConfig: _limit(),
             inboundRateLimiterConfig: _limit()
         });
         vm.prank(deployer);
-        ethPool.applyChainUpdates(ethToBsc);
+        ethPool.applyChainUpdates(new uint64[](0), ethToBsc);
 
         TokenPool.ChainUpdate[] memory bscToEth = new TokenPool.ChainUpdate[](1);
         bscToEth[0] = TokenPool.ChainUpdate({
             remoteChainSelector: ETH_SELECTOR,
-            allowed: true,
-            remotePoolAddress: abi.encode(address(ethPool)),
+            remotePoolAddresses: _remote(abi.encode(address(ethPool))),
             remoteTokenAddress: abi.encode(address(won)),
             outboundRateLimiterConfig: _limit(),
             inboundRateLimiterConfig: _limit()
         });
         vm.prank(bscTokenOwner);
-        bscPool.applyChainUpdates(bscToEth);
+        bscPool.applyChainUpdates(new uint64[](0), bscToEth);
     }
 
     function _limit() internal pure returns (RateLimiter.Config memory) {
         return RateLimiter.Config({isEnabled: true, capacity: CAPACITY, rate: RATE});
+    }
+
+    /// @dev CCIP 1.6.1 `ChainUpdate.remotePoolAddresses` is `bytes[]`; wrap a single encoded pool.
+    function _remote(bytes memory poolAddr) internal pure returns (bytes[] memory arr) {
+        arr = new bytes[](1);
+        arr[0] = poolAddr;
     }
 
     // ─── Post-deploy verification (mirrors script/08) ────────────────────────
@@ -201,8 +206,8 @@ contract DeploymentE2ETest is Test {
         assertTrue(ethPool.isSupportedChain(BSC_SELECTOR));
         assertTrue(bscPool.isSupportedChain(ETH_SELECTOR));
 
-        assertEq(abi.decode(ethPool.getRemotePool(BSC_SELECTOR), (address)), address(bscPool));
-        assertEq(abi.decode(bscPool.getRemotePool(ETH_SELECTOR), (address)), address(ethPool));
+        assertEq(abi.decode(ethPool.getRemotePools(BSC_SELECTOR)[0], (address)), address(bscPool));
+        assertEq(abi.decode(bscPool.getRemotePools(ETH_SELECTOR)[0], (address)), address(ethPool));
 
         assertEq(abi.decode(ethPool.getRemoteToken(BSC_SELECTOR), (address)), address(onBsc));
         assertEq(abi.decode(bscPool.getRemoteToken(ETH_SELECTOR), (address)), address(won));
@@ -241,7 +246,7 @@ contract DeploymentE2ETest is Test {
             originalSender: abi.encode(alice),
             remoteChainSelector: BSC_SELECTOR,
             receiver: alice,
-            amount: amount,
+            sourceDenominatedAmount: amount,
             localToken: address(won),
             sourcePoolAddress: abi.encode(address(bscPool)),
             sourcePoolData: outLock.destPoolData,
@@ -272,7 +277,7 @@ contract DeploymentE2ETest is Test {
             originalSender: abi.encode(alice),
             remoteChainSelector: ETH_SELECTOR,
             receiver: alice,
-            amount: amount,
+            sourceDenominatedAmount: amount,
             localToken: address(onBsc),
             sourcePoolAddress: abi.encode(address(ethPool)),
             sourcePoolData: outBurn.destPoolData,
@@ -423,15 +428,40 @@ contract DeploymentE2ETest is Test {
         // Trust-model verification: after handoff the multisig CAN call
         // setRebalancer + withdrawLiquidity (designed Chainlink CCT pattern).
         // Sanity-check: bscTokenOwner cannot, multisig can.
-        // SECURITY: TEST-3 — `setRebalancer` is `onlyOwner`; CCIP's ConfirmedOwner reverts
-        // with the bytes message "Only callable by owner".
+        // SECURITY: TEST-3 — `setRebalancer` is `onlyOwner`; CCIP 1.6.1's Ownable2StepMsgSender
+        // reverts with the custom error `OnlyCallableByOwner()` (1.5.x used the string
+        // "Only callable by owner").
         vm.prank(bscTokenOwner);
-        vm.expectRevert(bytes("Only callable by owner"));
+        vm.expectRevert(abi.encodeWithSignature("OnlyCallableByOwner()"));
         bscPool.setRebalancer(bscTokenOwner);
 
         vm.prank(multisig);
         bscPool.setRebalancer(multisig);
         assertEq(bscPool.getRebalancer(), multisig, "rebalancer is settable by new owner");
+    }
+
+    /// @notice CCIP 1.6.1 dropped the `acceptLiquidity` flag; with NO rebalancer set at launch,
+    ///         `provideLiquidity` and `withdrawLiquidity` must actually revert `Unauthorized` for
+    ///         everyone — including the pool owner, since they are rebalancer-gated, not
+    ///         owner-gated. Existing coverage only reads `getRebalancer() == address(0)` (a view);
+    ///         this exercises the real revert path so a future submodule bump that changed the
+    ///         guard would be caught.
+    function test_E2E_BSCLiquidityOpsDisabledAtLaunch() public {
+        assertEq(bscPool.getRebalancer(), address(0), "no rebalancer at launch");
+
+        address randoLP = makeAddr("randoLP");
+        vm.prank(randoLP);
+        vm.expectPartialRevert(ITokenPool.Unauthorized.selector);
+        bscPool.provideLiquidity(1 ether);
+
+        vm.prank(randoLP);
+        vm.expectPartialRevert(ITokenPool.Unauthorized.selector);
+        bscPool.withdrawLiquidity(1 ether);
+
+        // The owner is gated too — provide/withdraw check `s_rebalancer`, not `owner()`.
+        vm.prank(bscPool.owner());
+        vm.expectPartialRevert(ITokenPool.Unauthorized.selector);
+        bscPool.provideLiquidity(1 ether);
     }
 
     // ─── Renounce-before-accept negative test ────────────────────────────────

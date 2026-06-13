@@ -2,7 +2,7 @@
 pragma solidity 0.8.34;
 
 import {Test} from "forge-std/Test.sol";
-import {RateLimiter} from "@chainlink/contracts-ccip/ccip/libraries/RateLimiter.sol";
+import {RateLimiter} from "@chainlink/contracts-ccip/libraries/RateLimiter.sol";
 
 import {UpdateRateLimits} from "../script/07_UpdateRateLimits.s.sol";
 
@@ -15,16 +15,19 @@ contract UpdateRateLimitsHarness is UpdateRateLimits {
 }
 
 /// @dev Thin external wrapper around `RateLimiter._validateTokenBucketConfig` (an `internal
-///      pure` function in the vendored CCIP library) so the fuzz cross-check can actually
-///      execute the protocol's check rather than a hand-mirror of it. `mustBeDisabled=false`
-///      matches what `TokenPool.setChainRateLimiterConfig` passes through to the validator
-///      for a routine rate-limit update — see `lib/ccip/.../TokenPool.sol`
-///      `setChainRateLimiterConfig` → `_setRateLimitConfig` → `_validateTokenBucketConfig(_, false)`.
-///      Round-3 review [9]: lifts the fuzz from a hand-mirror to a true behavioural
-///      equivalence test against the on-chain protocol code.
+///      pure` function in the CCIP library) so the fuzz cross-check can actually execute the
+///      protocol's check rather than a hand-mirror of it. CCIP 1.6.1 dropped the
+///      `mustBeDisabled` second arg; `setChainRateLimiterConfig` → `_setRateLimitConfig` →
+///      `_validateTokenBucketConfig(_)` — see
+///      `lib/chainlink-ccip/chains/evm/contracts/pools/TokenPool.sol`.
+///      Round-3 review [9]: lifts the fuzz from a hand-mirror to a true behavioural check
+///      against the on-chain protocol code. NOTE (1.6.1): the protocol relaxed the enabled
+///      branch to revert only on `rate > capacity` (it now ACCEPTS `rate == 0` and
+///      `rate == capacity`), so the preflight is deliberately STRICTER than the protocol —
+///      the cross-check below is therefore one-directional (preflight ⊆ protocol).
 contract CcipRateLimiterValidator {
     function validate(RateLimiter.Config calldata cfg) external pure {
-        RateLimiter._validateTokenBucketConfig(cfg, false);
+        RateLimiter._validateTokenBucketConfig(cfg);
     }
 }
 
@@ -111,19 +114,19 @@ contract Script07PreflightTest is Test {
             ccipAccepts = false;
         }
 
-        // Equivalence in both directions: every config the preflight accepts must also
-        // pass the protocol's check, AND vice-versa. The disabled-direction half
-        // (capacity=0 + rate=0) is the case M-4's original non-strict rule got wrong.
-        assertEq(preflightAccepts, ccipAccepts, "preflight diverges from RateLimiter._validateTokenBucketConfig");
+        // One-directional (CCIP 1.6.1): the preflight is intentionally STRICTER than the
+        // protocol — it rejects enabled `rate == 0` and `rate == capacity`, which 1.6.1 now
+        // accepts (the protocol reverts only on `rate > capacity`). The safety contract is
+        // that everything the preflight ACCEPTS, the protocol also accepts (so an operator who
+        // passes preflight never has the broadcast revert mid-tx); the reverse no longer holds.
+        assertTrue(!preflightAccepts || ccipAccepts, "preflight accepts a config the protocol rejects");
     }
 
     /// @notice Concrete spot-check that the CCIP validator wrapper actually reaches the
-    ///         protocol code. If `RateLimiter._validateTokenBucketConfig` ever shifts
-    ///         its rule (e.g. a CCIP version bump that allows `rate == capacity`), this
-    ///         test forces the change to surface as a fuzz-test divergence on the
-    ///         relevant input rather than passing silently.
-    function test_CcipValidatorRejectsEnabledRateEqualsCapacity() public {
-        vm.expectRevert(); // RateLimiter.InvalidRateLimitRate
+    ///         protocol code, and pins the 1.6.1 rule change: `rate == capacity` is now
+    ///         ACCEPTED (CCIP 1.5.x reverted; 1.6.1 reverts only on `rate > capacity`). If a
+    ///         future version re-tightens this, the assertion below flips and surfaces it.
+    function test_CcipValidatorAcceptsEnabledRateEqualsCapacity() public view {
         ccipValidator.validate(_cfg(true, 100 ether, 100 ether));
     }
 

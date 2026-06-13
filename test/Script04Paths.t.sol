@@ -6,10 +6,10 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
-import {TokenAdminRegistry} from "@chainlink/contracts-ccip/ccip/tokenAdminRegistry/TokenAdminRegistry.sol";
+import {TokenAdminRegistry} from "@chainlink/contracts-ccip/tokenAdminRegistry/TokenAdminRegistry.sol";
 import {
     RegistryModuleOwnerCustom
-} from "@chainlink/contracts-ccip/ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
+} from "@chainlink/contracts-ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
 
 import {RegisterAdminAndPool} from "../script/04_RegisterAdminAndPool.s.sol";
 
@@ -87,6 +87,16 @@ contract MockRecordingModule {
         lastSelector = keccak256("registerAccessControlDefaultAdmin");
         lastToken = token;
     }
+}
+
+/// @dev v1.5-shaped module: exposes only the v1.5 entrypoints and does NOT implement
+///      `registerAccessControlDefaultAdmin`. Calling that selector reverts with empty data
+///      (no matching function, no fallback) — exactly how an unexpectedly-old v1.5 registry
+///      behaves. Now that the vendored `RegistryModuleOwnerCustom` is v1.6.1, this mock is
+///      what exercises script 04's missing-selector fall-through to `CannotResolveCCIPAdmin`.
+contract MockRegistryModuleV15 {
+    function registerAdminViaGetCCIPAdmin(address) external {}
+    function registerAdminViaOwner(address) external {}
 }
 
 /// @dev Mock module whose v1.6 entrypoint reverts with a structured error — used to
@@ -225,25 +235,24 @@ contract Script04PathsTest is Test {
 
     // ─── Gap [8] part 2: AccessControl path (registry v1.6 selector) ────────────
 
-    /// @notice The vendored `RegistryModuleOwnerCustom` is v1.5.0 (matching the rest of
-    ///         the pinned `lib/ccip @ v2.17.0-ccip1.5.16` codebase). The deployed registry
-    ///         on ETH + BSC mainnet is v1.6.0 and exposes `registerAccessControlDefaultAdmin`;
-    ///         script 04 invokes that selector via a local `IRegistryModuleOwnerCustom16`
-    ///         interface, which the v1.5 vendored module does NOT recognise.
+    /// @notice The vendored `RegistryModuleOwnerCustom` is now v1.6.1 (chainlink-ccip
+    ///         `contracts-ccip-v1.6.1`), matching the deployed registry on ETH + BSC mainnet,
+    ///         which exposes `registerAccessControlDefaultAdmin`. Script 04 still invokes that
+    ///         selector via a local `IRegistryModuleOwnerCustom16` interface wrapped in a
+    ///         try/catch, so an operator running against an unexpectedly OLD v1.5 registry
+    ///         (which lacks the selector) sees the clear path-4 `CannotResolveCCIPAdmin` revert
+    ///         rather than a bare empty revert from the missing selector. This test pins that
+    ///         defensive fall-through by driving script 04 against an explicit v1.5-shaped
+    ///         module mock (`MockRegistryModuleV15`).
     ///
-    ///         The script wraps the v1.6 selector call in its own try/catch so an operator
-    ///         running against an unexpectedly v1.5 registry sees the clear path-4
-    ///         `CannotResolveCCIPAdmin` revert rather than a bare empty revert from the
-    ///         missing selector. This test pins that fall-through behaviour.
-    ///
-    ///         Successful path-3 execution against the live v1.6 registry is OUT OF SCOPE
-    ///         of this unit test (would require either vendoring the v1.6 module or a
-    ///         mock that implements `registerAccessControlDefaultAdmin`). Production fork
-    ///         tests against ETH / BSC mainnet exercise that branch end-to-end.
+    ///         Successful path-3 execution against a v1.6 registry is covered by
+    ///         `test_RegistryAccepts_RegisterAccessControlDefaultAdmin`; the live mainnet
+    ///         branch is exercised by the production fork tests.
     function test_RegisterAdmin_AccessControlPath_FallsThroughAgainstV15Module() public {
         AccessControlOnlyToken token = new AccessControlOnlyToken(broadcaster);
         assertTrue(token.hasRole(token.DEFAULT_ADMIN_ROLE(), broadcaster), "broadcaster holds DEFAULT_ADMIN_ROLE");
 
+        MockRegistryModuleV15 v15Module = new MockRegistryModuleV15();
         vm.prank(broadcaster);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -252,7 +261,7 @@ contract Script04PathsTest is Test {
                 "broadcaster is neither getCCIPAdmin() nor Ownable.owner() nor AccessControl admin of token. Recovery: have the token's Ownable.owner call RegistryModuleOwnerCustom.registerAdminViaOwner(token) (permissionless for the owner), or coordinate with Chainlink to register the admin via the registry. proposeAdministrator on TokenAdminRegistry is NOT operator-callable - it is gated to registered registry modules / Chainlink."
             )
         );
-        harness.exposeRegisterAdmin(address(token), address(module), broadcaster);
+        harness.exposeRegisterAdmin(address(token), address(v15Module), broadcaster);
     }
 
     /// @notice The success path for AccessControl-based registration, simulated against

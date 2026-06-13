@@ -4,7 +4,7 @@ pragma solidity 0.8.34;
 import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {RateLimiter} from "@chainlink/contracts-ccip/ccip/libraries/RateLimiter.sol";
+import {RateLimiter} from "@chainlink/contracts-ccip/libraries/RateLimiter.sol";
 
 import {PostDeployVerify} from "../script/08_PostDeployVerify.s.sol";
 import {WrappedON} from "../src/WrappedON.sol";
@@ -34,8 +34,9 @@ contract MockBadPool {
         return rebalancer;
     }
 
-    function getRemotePool(uint64) external view returns (bytes memory) {
-        return remotePoolBytes;
+    function getRemotePools(uint64) external view returns (bytes[] memory arr) {
+        arr = new bytes[](1);
+        arr[0] = remotePoolBytes;
     }
 
     function getRemoteToken(uint64) external view returns (bytes memory) {
@@ -238,8 +239,9 @@ contract Script08VerifyTest is Test {
         h.exposeCheckRemoteLink(address(bad), 456, address(0xCAFE), address(0xBEEF));
     }
 
-    /// @notice DEP-8 happy path: the fully-handed-off state (multisig holds admin,
-    ///         ccipAdmin == multisig, deployer has renounced) must pass without revert.
+    /// @notice DEP-8 happy path: the fully-handed-off state (multisig holds DEFAULT_ADMIN +
+    ///         LIQUIDITY_MANAGER, ccipAdmin == multisig, deployer has renounced BOTH roles)
+    ///         must pass without revert.
     function test_CheckDeployerRenounced_PassesAfterRenounce() public {
         _MockON18 on = new _MockON18();
         address deployer = makeAddr("deployer");
@@ -248,18 +250,73 @@ contract Script08VerifyTest is Test {
         vm.startPrank(deployer);
         WrappedON won = new WrappedON(IERC20(address(on)), deployer);
         bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
+        bytes32 liquidityRole = won.LIQUIDITY_MANAGER_ROLE();
         won.grantRole(adminRole, multisig);
+        won.grantRole(liquidityRole, multisig);
         won.setCCIPAdmin(multisig);
+        // OZ 5.x: `renounceRole(role, callerConfirmation)` requires callerConfirmation == _msgSender();
+        // inside this `startPrank(deployer)` block _msgSender() is the deployer.
+        won.renounceRole(adminRole, deployer);
+        won.renounceRole(liquidityRole, deployer);
         vm.stopPrank();
         vm.prank(multisig);
         won.acceptCCIPAdmin();
-        // OZ 5.x: `renounceRole(role, callerConfirmation)` requires callerConfirmation == _msgSender().
-        // Cache the role selector via local variable so the prank applies to the renounceRole
-        // call itself rather than being consumed by a `won.DEFAULT_ADMIN_ROLE()` view fetch.
-        vm.prank(deployer);
-        won.renounceRole(adminRole, deployer);
         assertFalse(won.hasRole(adminRole, deployer));
+        assertFalse(won.hasRole(liquidityRole, deployer));
 
+        h.exposeCheckDeployerRenounced(won, multisig, deployer);
+    }
+
+    /// @notice M3 (#25): a deployer who renounced DEFAULT_ADMIN_ROLE but is still holding
+    ///         LIQUIDITY_MANAGER_ROLE (the partial-renounce gap) must surface as
+    ///         `RoleNotRenounced("LIQUIDITY_MANAGER_ROLE", deployer)` — `deposit()` is gated
+    ///         on that role, so a green `make verify-eth` here would be a false retirement signal.
+    function test_CheckDeployerRenounced_RevertsWhenDeployerStillHoldsLiquidityRole() public {
+        _MockON18 on = new _MockON18();
+        address deployer = makeAddr("deployer");
+        address multisig = makeAddr("multisig");
+
+        vm.startPrank(deployer);
+        WrappedON won = new WrappedON(IERC20(address(on)), deployer);
+        bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
+        bytes32 liquidityRole = won.LIQUIDITY_MANAGER_ROLE();
+        won.grantRole(adminRole, multisig);
+        won.grantRole(liquidityRole, multisig);
+        won.setCCIPAdmin(multisig);
+        // Deployer renounces DEFAULT_ADMIN_ROLE but NOT LIQUIDITY_MANAGER_ROLE (interrupted renounce).
+        won.renounceRole(adminRole, deployer);
+        vm.stopPrank();
+        vm.prank(multisig);
+        won.acceptCCIPAdmin();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(PostDeployVerify.RoleNotRenounced.selector, "LIQUIDITY_MANAGER_ROLE", deployer)
+        );
+        h.exposeCheckDeployerRenounced(won, multisig, deployer);
+    }
+
+    /// @notice M3 (#25): if the multisig was never granted LIQUIDITY_MANAGER_ROLE (the
+    ///         ETH-side partial-handoff case), `_checkDeployerRenounced` must surface
+    ///         `RoleMissing("LIQUIDITY_MANAGER_ROLE", multisig)` rather than report success.
+    function test_CheckDeployerRenounced_RevertsWhenMultisigMissingLiquidityRole() public {
+        _MockON18 on = new _MockON18();
+        address deployer = makeAddr("deployer");
+        address multisig = makeAddr("multisig");
+
+        vm.startPrank(deployer);
+        WrappedON won = new WrappedON(IERC20(address(on)), deployer);
+        bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
+        // Grant only DEFAULT_ADMIN_ROLE to the multisig — LIQUIDITY_MANAGER_ROLE grant "failed".
+        won.grantRole(adminRole, multisig);
+        won.setCCIPAdmin(multisig);
+        won.renounceRole(adminRole, deployer);
+        vm.stopPrank();
+        vm.prank(multisig);
+        won.acceptCCIPAdmin();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(PostDeployVerify.RoleMissing.selector, "LIQUIDITY_MANAGER_ROLE", multisig)
+        );
         h.exposeCheckDeployerRenounced(won, multisig, deployer);
     }
 }
