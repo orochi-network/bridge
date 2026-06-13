@@ -767,7 +767,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Severity:** MEDIUM
 - **Status:** FIXED — `.gitmodules` now carries an explicit header comment warning against `git submodule update --remote` and documenting the safe path (`git -C lib/<name> checkout <hash>`).
 - **Location:** `.gitmodules`
-- **Description:** `lib/chainlink-ccip`, `lib/chainlink-evm`, and `lib/chainlink-local` are at tagged commits; `lib/forge-std` and `lib/openzeppelin-contracts` are at interim commits. No `branch =` lock in any entry. `git submodule update --remote` (a common but wrong invocation) would advance all to upstream tip.
+- **Description:** All five submodules are pinned to exact release tags — `lib/chainlink-ccip` (`contracts-ccip-v1.6.1`), `lib/chainlink-evm` (`contracts-v1.4.0`), `lib/chainlink-local` (`v0.2.8`), `lib/forge-std` (`v1.16.1`), and `lib/openzeppelin-contracts` (`v5.6.1`); each gitlink commit resolves to its tag via `git describe --tags --exact-match`, and `foundry.lock` records the matching tag + rev. No `branch =` lock in any entry. `git submodule update --remote` (a common but wrong invocation) would advance all to upstream tip.
 - **Impact:** Low in practice (the Makefile uses `--init --recursive`), but a misconfigured CI step that uses `--remote` could change compiler and library behaviour silently.
 - **Recommendation:** Add a comment in `.gitmodules` warning against `--remote`, and add a dependency table to README listing the exact intended commit hashes for auditor cross-reference.
 
