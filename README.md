@@ -12,7 +12,7 @@ A Chainlink CCIP **Cross-Chain Token (CCT)** bridge for the Orochi Network **ON*
 | Ethereum Mainnet | wON (this repo) | deployed | CCIP-mint ≤ 100M; deposit-backed uncapped | Burn/Mint (pool only) |
 | BSC Mainnet | ON (existing) | `0x0e4F6209eD984b21EDEA43acE6e09559eD051D48` | 100M | Lock/Release |
 
-Production CCIP versions on both chains: Router 1.2.0, ARMProxy 1.0.0, TokenAdminRegistry 1.5.0, RegistryModuleOwnerCustom 1.6.0. This repo pins `lib/ccip` to **`v2.17.0-ccip1.5.16`** to match.
+Production CCIP infra on both chains: Router 1.2.0, ARMProxy 1.0.0, TokenAdminRegistry 1.5.0, RegistryModuleOwnerCustom 1.6.0. This repo builds the pools from **`lib/chainlink-ccip` @ `contracts-ccip-v1.6.1`** (with shared/vendored sources from **`lib/chainlink-evm` @ `contracts-v1.4.0`**) — CCIP 1.6.1, the Chainlink-docs-recommended generic-pool version. The deployed `BurnMintTokenPool`/`LockReleaseTokenPool` report `typeAndVersion` `…1.6.1`.
 
 For the deep operator playbook, see [`RUNBOOK.md`](RUNBOOK.md). For project conventions, see [`CLAUDE.md`](CLAUDE.md).
 
@@ -38,7 +38,7 @@ make install          # git submodule update --init --recursive + patch-pragmas
 make build            # forge build --sizes
 ```
 
-`make install` pulls the four pinned submodules (`forge-std`, `openzeppelin-contracts`, `chainlink-local`, `ccip`) and applies the documented pragma patch (`0.8.24` → `^0.8.24`) so the vendored Chainlink + OZ sources compile under solc 0.8.34. The patch is working-tree-only and must be re-run if you ever do `git submodule update`.
+`make install` pulls the five pinned submodules (`forge-std`, `openzeppelin-contracts`, `chainlink-local`, `chainlink-ccip`, `chainlink-evm`) and applies the documented pragma patch (`0.8.24` → `^0.8.24`) so the vendored Chainlink + OZ sources compile under solc 0.8.34. The patch is working-tree-only and must be re-run if you ever do `git submodule update`.
 
 ### 3. Run the test suite (no RPC needed)
 

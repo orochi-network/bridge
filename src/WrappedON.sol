@@ -10,8 +10,8 @@ import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol"
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-import {IBurnMintERC20} from "@chainlink/contracts-ccip/shared/token/ERC20/IBurnMintERC20.sol";
-import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/ccip/interfaces/IGetCCIPAdmin.sol";
+import {IBurnMintERC20} from "@chainlink/contracts/src/v0.8/shared/token/ERC20/IBurnMintERC20.sol";
+import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/interfaces/IGetCCIPAdmin.sol";
 
 /// @title Wrapped Orochi Network Token (wON)
 /// @notice CCIP `BurnMintTokenPool` token on Ethereum + 1:1 wrapper for canonical ON.
@@ -301,9 +301,11 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         //
         // WON-12: write the new pending slot BEFORE emitting either event. The contract
         // makes no external calls here, so there's no reentrancy risk either way, but
-        // emitting after the state write matches the `mint`/`burn`/`acceptCCIPAdmin` order
-        // and prevents an indexer that subscribes to `CCIPAdminProposalCancelled` and
-        // immediately reads `pendingCCIPAdmin()` from seeing the stale value.
+        // emitting after the state write matches the `mint`/`burn` order and prevents an
+        // indexer that subscribes to `CCIPAdminProposalCancelled` and immediately reads
+        // `pendingCCIPAdmin()` from seeing the stale value. (`acceptCCIPAdmin` below is the
+        // deliberate exception — it MUST emit before the write so `CCIPAdminTransferred`
+        // captures the OLD `s_ccipAdmin` in its `previousAdmin` field.)
         address prev = s_pendingCcipAdmin;
         s_pendingCcipAdmin = newAdmin;
         if (prev != address(0) && prev != newAdmin) {

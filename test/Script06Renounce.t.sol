@@ -94,9 +94,10 @@ contract Script06RenounceTest is Test {
         registry = new MockRegistry();
 
         // Default state for the happy path: full handoff complete.
-        // wON: multisig has DEFAULT_ADMIN_ROLE; multisig is the ccipAdmin.
+        // wON: multisig has DEFAULT_ADMIN_ROLE + LIQUIDITY_MANAGER_ROLE; multisig is the ccipAdmin.
         vm.startPrank(deployer);
         won.grantRole(won.DEFAULT_ADMIN_ROLE(), multisig);
+        won.grantRole(won.LIQUIDITY_MANAGER_ROLE(), multisig);
         won.setCCIPAdmin(multisig); // proposes
         vm.stopPrank();
         vm.prank(multisig);
@@ -140,6 +141,20 @@ contract Script06RenounceTest is Test {
         won.revokeRole(adminRole, multisig);
 
         vm.expectRevert(bytes("multisig does NOT hold admin role yet"));
+        _call();
+    }
+
+    /// @notice M3 (#25): the renounce drops the deployer's LIQUIDITY_MANAGER_ROLE, so it must
+    ///         be blocked until the multisig actually holds that role — otherwise a partial
+    ///         `TransferOwnership._handoff` (DEFAULT_ADMIN granted, LIQUIDITY_MANAGER not) would
+    ///         let the renounce proceed and leave NO holder of the `deposit()` gate.
+    function test_RevertsWhenMultisigLacksLiquidityRole() public {
+        // Revoke the LIQUIDITY_MANAGER_ROLE grant set up in setUp, simulating a partial handoff.
+        bytes32 liquidityRole = won.LIQUIDITY_MANAGER_ROLE();
+        vm.prank(deployer);
+        won.revokeRole(liquidityRole, multisig);
+
+        vm.expectRevert(bytes("multisig does NOT hold LIQUIDITY_MANAGER_ROLE yet (re-run TransferOwnership)"));
         _call();
     }
 

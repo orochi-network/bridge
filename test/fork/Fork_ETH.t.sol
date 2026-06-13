@@ -4,15 +4,13 @@ pragma solidity 0.8.34;
 import {Test, console} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {IBurnMintERC20} from "@chainlink/contracts-ccip/shared/token/ERC20/IBurnMintERC20.sol";
-import {BurnMintTokenPool} from "@chainlink/contracts-ccip/ccip/pools/BurnMintTokenPool.sol";
-import {TokenPool} from "@chainlink/contracts-ccip/ccip/pools/TokenPool.sol";
-import {Pool} from "@chainlink/contracts-ccip/ccip/libraries/Pool.sol";
-import {RateLimiter} from "@chainlink/contracts-ccip/ccip/libraries/RateLimiter.sol";
-import {TokenAdminRegistry} from "@chainlink/contracts-ccip/ccip/tokenAdminRegistry/TokenAdminRegistry.sol";
-import {
-    RegistryModuleOwnerCustom
-} from "@chainlink/contracts-ccip/ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
+import {IBurnMintERC20} from "@chainlink/contracts/src/v0.8/shared/token/ERC20/IBurnMintERC20.sol";
+import {BurnMintTokenPool} from "@chainlink/contracts-ccip/pools/BurnMintTokenPool.sol";
+import {TokenPool} from "@chainlink/contracts-ccip/pools/TokenPool.sol";
+import {Pool} from "@chainlink/contracts-ccip/libraries/Pool.sol";
+import {RateLimiter} from "@chainlink/contracts-ccip/libraries/RateLimiter.sol";
+import {TokenAdminRegistry} from "@chainlink/contracts-ccip/tokenAdminRegistry/TokenAdminRegistry.sol";
+import {RegistryModuleOwnerCustom} from "@chainlink/contracts-ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
 
 import {WrappedON} from "../../src/WrappedON.sol";
 
@@ -68,7 +66,7 @@ contract Fork_ETH is Test {
 
         vm.startPrank(deployer);
         won = new WrappedON(IERC20(ON_ETH), deployer);
-        ethPool = new BurnMintTokenPool(IBurnMintERC20(address(won)), new address[](0), ETH_RMN, ETH_ROUTER);
+        ethPool = new BurnMintTokenPool(IBurnMintERC20(address(won)), 18, new address[](0), ETH_RMN, ETH_ROUTER);
         won.grantRole(won.MINTER_ROLE(), address(ethPool));
         won.grantRole(won.BURNER_ROLE(), address(ethPool));
 
@@ -82,13 +80,12 @@ contract Fork_ETH is Test {
         TokenPool.ChainUpdate[] memory updates = new TokenPool.ChainUpdate[](1);
         updates[0] = TokenPool.ChainUpdate({
             remoteChainSelector: BSC_SELECTOR,
-            allowed: true,
-            remotePoolAddress: abi.encode(fakeRemoteBscPool),
+            remotePoolAddresses: _remote(abi.encode(fakeRemoteBscPool)),
             remoteTokenAddress: abi.encode(ON_BSC),
             outboundRateLimiterConfig: RateLimiter.Config({isEnabled: true, capacity: 100_000 ether, rate: 10 ether}),
             inboundRateLimiterConfig: RateLimiter.Config({isEnabled: true, capacity: 100_000 ether, rate: 10 ether})
         });
-        ethPool.applyChainUpdates(updates);
+        ethPool.applyChainUpdates(new uint64[](0), updates);
         vm.stopPrank();
     }
 
@@ -110,7 +107,7 @@ contract Fork_ETH is Test {
         assertEq(ethPool.getRmnProxy(), ETH_RMN);
         assertTrue(ethPool.isSupportedChain(BSC_SELECTOR));
 
-        assertEq(abi.decode(ethPool.getRemotePool(BSC_SELECTOR), (address)), fakeRemoteBscPool);
+        assertEq(abi.decode(ethPool.getRemotePools(BSC_SELECTOR)[0], (address)), fakeRemoteBscPool);
 
         // `isEnabled = true` with `rate = 0` silently bricks the limiter — every transfer
         // would be blocked because the bucket never refills. Assert both rate and capacity
@@ -136,7 +133,7 @@ contract Fork_ETH is Test {
             originalSender: abi.encode(alice),
             remoteChainSelector: BSC_SELECTOR,
             receiver: alice,
-            amount: amount,
+            sourceDenominatedAmount: amount,
             localToken: address(won),
             sourcePoolAddress: abi.encode(fakeRemoteBscPool),
             sourcePoolData: "",
@@ -165,7 +162,7 @@ contract Fork_ETH is Test {
                 originalSender: abi.encode(alice),
                 remoteChainSelector: BSC_SELECTOR,
                 receiver: alice,
-                amount: amount,
+                sourceDenominatedAmount: amount,
                 localToken: address(won),
                 sourcePoolAddress: abi.encode(fakeRemoteBscPool),
                 sourcePoolData: "",
@@ -196,6 +193,12 @@ contract Fork_ETH is Test {
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+    /// @dev CCIP 1.6.1 `ChainUpdate.remotePoolAddresses` is `bytes[]`; wrap a single encoded pool.
+    function _remote(bytes memory poolAddr) internal pure returns (bytes[] memory arr) {
+        arr = new bytes[](1);
+        arr[0] = poolAddr;
+    }
 
     function _findOffRamp(address router, uint64 sourceChain) internal view returns (address offRamp) {
         IRouterFull.OffRamp[] memory all = IRouterFull(router).getOffRamps();

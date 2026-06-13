@@ -3,10 +3,8 @@ pragma solidity 0.8.34;
 
 import {Script, console} from "forge-std/Script.sol";
 
-import {TokenAdminRegistry} from "@chainlink/contracts-ccip/ccip/tokenAdminRegistry/TokenAdminRegistry.sol";
-import {
-    RegistryModuleOwnerCustom
-} from "@chainlink/contracts-ccip/ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
+import {TokenAdminRegistry} from "@chainlink/contracts-ccip/tokenAdminRegistry/TokenAdminRegistry.sol";
+import {RegistryModuleOwnerCustom} from "@chainlink/contracts-ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol";
 
 import {Helper} from "./Helper.sol";
 import {Deployments} from "./Deployments.sol";
@@ -22,8 +20,8 @@ interface ITokenAdminRegistryConfig {
 
 /// @dev The deployed `RegistryModuleOwnerCustom` on Ethereum and BSC mainnet is at version
 /// 1.6.0, which exposes `registerAccessControlDefaultAdmin` for tokens that use OZ
-/// `AccessControl.DEFAULT_ADMIN_ROLE`. The vendored ABI at v2.17.0-ccip1.5.16 only ships the
-/// 1.5.0 contract, so we call the extra selector via this interface.
+/// `AccessControl.DEFAULT_ADMIN_ROLE`. The vendored CCIP 1.6.1 ABI ships this selector on
+/// `RegistryModuleOwnerCustom`, and we also expose it via this interface for explicit calls.
 interface IRegistryModuleOwnerCustom16 {
     function registerAccessControlDefaultAdmin(address token) external;
 }

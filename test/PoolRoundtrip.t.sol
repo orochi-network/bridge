@@ -5,15 +5,15 @@ import {Test, console} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {BurnMintTokenPool} from "@chainlink/contracts-ccip/ccip/pools/BurnMintTokenPool.sol";
-import {LockReleaseTokenPool} from "@chainlink/contracts-ccip/ccip/pools/LockReleaseTokenPool.sol";
-import {TokenPool} from "@chainlink/contracts-ccip/ccip/pools/TokenPool.sol";
-import {Pool} from "@chainlink/contracts-ccip/ccip/libraries/Pool.sol";
-import {RateLimiter} from "@chainlink/contracts-ccip/ccip/libraries/RateLimiter.sol";
-import {IBurnMintERC20} from "@chainlink/contracts-ccip/shared/token/ERC20/IBurnMintERC20.sol";
+import {BurnMintTokenPool} from "@chainlink/contracts-ccip/pools/BurnMintTokenPool.sol";
+import {LockReleaseTokenPool} from "@chainlink/contracts-ccip/pools/LockReleaseTokenPool.sol";
+import {TokenPool} from "@chainlink/contracts-ccip/pools/TokenPool.sol";
+import {Pool} from "@chainlink/contracts-ccip/libraries/Pool.sol";
+import {RateLimiter} from "@chainlink/contracts-ccip/libraries/RateLimiter.sol";
+import {IBurnMintERC20} from "@chainlink/contracts/src/v0.8/shared/token/ERC20/IBurnMintERC20.sol";
 import {
     IERC20 as ICCIP_IERC20
-} from "@chainlink/contracts-ccip/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
+} from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
 import {MockRouter} from "./mocks/MockRouter.sol";
@@ -77,8 +77,9 @@ contract PoolRoundtripTest is Test {
         MockON onEth = new MockON("ON", 0, address(0xdead));
         vm.prank(admin);
         won = new WrappedON(IERC20(address(onEth)), admin);
-        ethPool =
-            new BurnMintTokenPool(IBurnMintERC20(address(won)), new address[](0), address(ethRmn), address(ethRouter));
+        ethPool = new BurnMintTokenPool(
+            IBurnMintERC20(address(won)), 18, new address[](0), address(ethRmn), address(ethRouter)
+        );
 
         // Pool gets MINTER+BURNER on wON.
         vm.startPrank(admin);
@@ -88,7 +89,7 @@ contract PoolRoundtripTest is Test {
 
         // ── BSC side deploy ─────────────────────────────────────────────────
         bscPool = new LockReleaseTokenPool(
-            ICCIP_IERC20(address(onBsc)), new address[](0), address(bscRmn), false, address(bscRouter)
+            ICCIP_IERC20(address(onBsc)), 18, new address[](0), address(bscRmn), address(bscRouter)
         );
 
         // ── Wire routers (the only ramps we recognise are our test fixtures) ─
@@ -101,24 +102,27 @@ contract PoolRoundtripTest is Test {
         TokenPool.ChainUpdate[] memory ethToBsc = new TokenPool.ChainUpdate[](1);
         ethToBsc[0] = TokenPool.ChainUpdate({
             remoteChainSelector: BSC_SELECTOR,
-            allowed: true,
-            remotePoolAddress: abi.encode(address(bscPool)),
+            remotePoolAddresses: _remote(abi.encode(address(bscPool))),
             remoteTokenAddress: abi.encode(address(onBsc)),
             outboundRateLimiterConfig: _limit(100_000 ether, 10 ether),
             inboundRateLimiterConfig: _limit(100_000 ether, 10 ether)
         });
-        ethPool.applyChainUpdates(ethToBsc);
+        ethPool.applyChainUpdates(new uint64[](0), ethToBsc);
 
         TokenPool.ChainUpdate[] memory bscToEth = new TokenPool.ChainUpdate[](1);
         bscToEth[0] = TokenPool.ChainUpdate({
             remoteChainSelector: ETH_SELECTOR,
-            allowed: true,
-            remotePoolAddress: abi.encode(address(ethPool)),
+            remotePoolAddresses: _remote(abi.encode(address(ethPool))),
             remoteTokenAddress: abi.encode(address(won)),
             outboundRateLimiterConfig: _limit(100_000 ether, 10 ether),
             inboundRateLimiterConfig: _limit(100_000 ether, 10 ether)
         });
-        bscPool.applyChainUpdates(bscToEth);
+        bscPool.applyChainUpdates(new uint64[](0), bscToEth);
+    }
+
+    function _remote(bytes memory poolAddr) internal pure returns (bytes[] memory arr) {
+        arr = new bytes[](1);
+        arr[0] = poolAddr;
     }
 
     function _limit(uint128 capacity, uint128 rate) internal pure returns (RateLimiter.Config memory) {
@@ -152,7 +156,7 @@ contract PoolRoundtripTest is Test {
             originalSender: abi.encode(alice),
             remoteChainSelector: BSC_SELECTOR,
             receiver: alice,
-            amount: amount,
+            sourceDenominatedAmount: amount,
             localToken: address(won),
             sourcePoolAddress: abi.encode(address(bscPool)),
             sourcePoolData: outLock.destPoolData,
@@ -198,7 +202,7 @@ contract PoolRoundtripTest is Test {
             originalSender: abi.encode(alice),
             remoteChainSelector: ETH_SELECTOR,
             receiver: alice,
-            amount: amount,
+            sourceDenominatedAmount: amount,
             localToken: address(onBsc),
             sourcePoolAddress: abi.encode(address(ethPool)),
             sourcePoolData: outBurn.destPoolData,
@@ -263,7 +267,7 @@ contract PoolRoundtripTest is Test {
             originalSender: abi.encode(alice),
             remoteChainSelector: BSC_SELECTOR,
             receiver: alice,
-            amount: 1 ether,
+            sourceDenominatedAmount: 1 ether,
             localToken: address(won),
             sourcePoolAddress: abi.encode(address(bscPool)),
             sourcePoolData: "",

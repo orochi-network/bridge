@@ -3,8 +3,8 @@ pragma solidity 0.8.34;
 
 import {Script, console} from "forge-std/Script.sol";
 
-import {TokenPool} from "@chainlink/contracts-ccip/ccip/pools/TokenPool.sol";
-import {RateLimiter} from "@chainlink/contracts-ccip/ccip/libraries/RateLimiter.sol";
+import {TokenPool} from "@chainlink/contracts-ccip/pools/TokenPool.sol";
+import {RateLimiter} from "@chainlink/contracts-ccip/libraries/RateLimiter.sol";
 
 import {Helper} from "./Helper.sol";
 import {Deployments} from "./Deployments.sol";
@@ -54,14 +54,21 @@ contract ApplyChainUpdates is Script, Helper {
             // Round-2 review [6]: detect stale wiring — a remote pool redeploy will leave
             // the local pool pointed at the old (dead) address until we re-wire. Revert
             // with a clear instruction rather than silently skipping.
-            bytes memory wiredRemote = TokenPool(localPool).getRemotePool(remote.chainSelector);
-            // `abi.encode(address)` produces exactly 32 bytes (left-padded), and the
-            // pool's `getRemotePool` returns the same shape. Compare directly as bytes32
-            // rather than hashing both sides — same intent, cheaper, and clearer about
-            // the assumed shape (round-3 review [10]).
+            // CCIP 1.6.1: a chain can hold MULTIPLE remote pools; `getRemotePools` returns
+            // `bytes[]`. Treat the wiring as current if our expected remotePool is among them.
+            // `abi.encode(address)` is exactly 32 bytes (left-padded), matching each entry's shape;
+            // compare as bytes32 rather than hashing — same intent, cheaper (round-3 review [10]).
+            bytes[] memory wiredRemotes = TokenPool(localPool).getRemotePools(remote.chainSelector);
+            bool wired = false;
+            for (uint256 i = 0; i < wiredRemotes.length; i++) {
+                if (wiredRemotes[i].length == 32 && bytes32(wiredRemotes[i]) == bytes32(uint256(uint160(remotePool)))) {
+                    wired = true;
+                    break;
+                }
+            }
             require(
-                wiredRemote.length == 32 && bytes32(wiredRemote) == bytes32(uint256(uint160(remotePool))),
-                "stale remote pool wiring: local pool points at a different remotePool than deployments JSON. Owner must remove the chain via applyChainUpdates(removed) and re-run, or call setRemotePool directly."
+                wired,
+                "stale remote pool wiring: local pool's remotePools for this chain do not include the remotePool in deployments JSON. Owner must reconcile via addRemotePool/removeRemotePool (or applyChainUpdates) and re-run."
             );
             console.log(
                 "Pool %s already wired to remote selector %d - skipping (rate-limit changes are NOT applied here; use `make update-limits`)",
@@ -71,11 +78,14 @@ contract ApplyChainUpdates is Script, Helper {
             return;
         }
 
+        // CCIP 1.6.1: `ChainUpdate` drops `bool allowed` (removal is the separate
+        // `applyChainUpdates` first arg) and takes `bytes[] remotePoolAddresses`.
+        bytes[] memory remotePoolAddresses = new bytes[](1);
+        remotePoolAddresses[0] = abi.encode(remotePool);
         TokenPool.ChainUpdate[] memory updates = new TokenPool.ChainUpdate[](1);
         updates[0] = TokenPool.ChainUpdate({
             remoteChainSelector: remote.chainSelector,
-            allowed: true,
-            remotePoolAddress: abi.encode(remotePool),
+            remotePoolAddresses: remotePoolAddresses,
             remoteTokenAddress: abi.encode(remoteToken),
             outboundRateLimiterConfig: RateLimiter.Config({
                 isEnabled: true, capacity: DEFAULT_CAPACITY, rate: DEFAULT_RATE
@@ -86,7 +96,8 @@ contract ApplyChainUpdates is Script, Helper {
         });
 
         vm.startBroadcast();
-        TokenPool(localPool).applyChainUpdates(updates);
+        // First arg = chain selectors to REMOVE (none here); second = chains to add.
+        TokenPool(localPool).applyChainUpdates(new uint64[](0), updates);
         vm.stopBroadcast();
 
         console.log(

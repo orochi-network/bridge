@@ -3,8 +3,8 @@ pragma solidity 0.8.34;
 
 import {Script, console} from "forge-std/Script.sol";
 
-import {TokenPool} from "@chainlink/contracts-ccip/ccip/pools/TokenPool.sol";
-import {RateLimiter} from "@chainlink/contracts-ccip/ccip/libraries/RateLimiter.sol";
+import {TokenPool} from "@chainlink/contracts-ccip/pools/TokenPool.sol";
+import {RateLimiter} from "@chainlink/contracts-ccip/libraries/RateLimiter.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
 import {Helper} from "./Helper.sol";
@@ -178,12 +178,19 @@ contract PostDeployVerify is Script, Helper {
         // (32 bytes, left-padded) before decoding. Same protective check as the CCIP-6
         // stale-wiring path in script 05; surfaces a typed `MalformedRemoteEncoding`
         // diagnostic instead of a low-level `abi.decode` panic.
-        bytes memory remotePoolBytes = TokenPool(pool).getRemotePool(remoteSelector);
-        if (remotePoolBytes.length != 32) {
-            revert MalformedRemoteEncoding(remoteSelector, "remotePool", remotePoolBytes.length);
+        // CCIP 1.6.1: `getRemotePools` returns `bytes[]` (a chain may hold multiple remote
+        // pools); assert the expected remotePool is present.
+        bytes[] memory remotePoolsBytes = TokenPool(pool).getRemotePools(remoteSelector);
+        bool remotePoolLinked = false;
+        for (uint256 i = 0; i < remotePoolsBytes.length; i++) {
+            if (remotePoolsBytes[i].length != 32) {
+                revert MalformedRemoteEncoding(remoteSelector, "remotePool", remotePoolsBytes[i].length);
+            }
+            if (abi.decode(remotePoolsBytes[i], (address)) == expectedRemotePool) {
+                remotePoolLinked = true;
+            }
         }
-        address remotePool = abi.decode(remotePoolBytes, (address));
-        if (remotePool != expectedRemotePool) {
+        if (!remotePoolLinked) {
             revert RemotePoolNotLinked(remoteSelector, expectedRemotePool);
         }
 
@@ -197,7 +204,7 @@ contract PostDeployVerify is Script, Helper {
         }
 
         console.log("[ok] pool.isSupportedChain(%d) == true", remoteSelector);
-        console.log("[ok] pool.getRemotePool(%d) == %s", remoteSelector, expectedRemotePool);
+        console.log("[ok] pool.getRemotePools(%d) includes %s", remoteSelector, expectedRemotePool);
         console.log("[ok] pool.getRemoteToken(%d) == %s", remoteSelector, expectedRemoteToken);
     }
 
@@ -326,12 +333,26 @@ contract PostDeployVerify is Script, Helper {
         if (won.hasRole(adminRole, deployer)) {
             revert RoleNotRenounced("DEFAULT_ADMIN_ROLE", deployer);
         }
+        // M3 (#25): the deployer is seeded LIQUIDITY_MANAGER_ROLE at construction (it gates
+        // `deposit()`), script 06 grants it to the multisig, and RenounceDeployerAdmin renounces
+        // the deployer's copy. Assert that full transfer happened on BOTH legs — otherwise a
+        // partial `RenounceDeployerAdmin` (interrupted after the DEFAULT_ADMIN renounce but
+        // before the LIQUIDITY_MANAGER one) would leave the deployer EOA able to call
+        // `deposit()` while `make verify-eth` still printed a green renounce.
+        bytes32 liquidityRole = won.LIQUIDITY_MANAGER_ROLE();
+        if (!won.hasRole(liquidityRole, multisig)) {
+            revert RoleMissing("LIQUIDITY_MANAGER_ROLE", multisig);
+        }
+        if (won.hasRole(liquidityRole, deployer)) {
+            revert RoleNotRenounced("LIQUIDITY_MANAGER_ROLE", deployer);
+        }
         if (won.getCCIPAdmin() != multisig) {
             revert RoleMissing("ccipAdmin", multisig);
         }
         console.log("[ok] wON DEFAULT_ADMIN_ROLE held only by multisig %s", multisig);
+        console.log("[ok] wON LIQUIDITY_MANAGER_ROLE held only by multisig %s", multisig);
         console.log("[ok] wON ccipAdmin == multisig %s", multisig);
-        console.log("[ok] wON DEFAULT_ADMIN_ROLE renounced by deployer %s", deployer);
+        console.log("[ok] wON DEFAULT_ADMIN_ROLE + LIQUIDITY_MANAGER_ROLE renounced by deployer %s", deployer);
     }
 
     function _remoteTokenAddress(NetworkConfig memory remote) internal view returns (address) {
