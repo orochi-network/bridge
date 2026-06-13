@@ -77,13 +77,13 @@ contract GrantRoles is Script, Helper {
         } catch {
             revert PoolMisidentified(pool, "rmnProxy", cfg.rmnProxy, address(0));
         }
-        // typeAndVersion is "BurnMintTokenPool 1.5.0" on the vendored v2.17.0-ccip1.5.16
-        // BurnMintTokenPool. Compare by keccak so the literal can drift without source-code
-        // text edits going stale in two places. Failure modes:
+        // typeAndVersion is "BurnMintTokenPool 1.6.1" on the chainlink-ccip
+        // contracts-ccip-v1.6.1 BurnMintTokenPool. Compare by keccak so the literal can drift
+        // without source-code text edits going stale in two places. Failure modes:
         //   - selector missing (non-pool contract): caught below as PoolTypeMismatch with "".
         //   - selector returns a different string: caught below with the actual value.
         try ITypeAndVersion(pool).typeAndVersion() returns (string memory typeStr) {
-            if (keccak256(bytes(typeStr)) != keccak256(bytes("BurnMintTokenPool 1.5.0"))) {
+            if (keccak256(bytes(typeStr)) != keccak256(bytes("BurnMintTokenPool 1.6.1"))) {
                 revert PoolTypeMismatch(pool, typeStr);
             }
         } catch {

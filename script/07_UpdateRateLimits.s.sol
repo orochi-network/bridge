@@ -3,8 +3,8 @@ pragma solidity 0.8.34;
 
 import {Script, console} from "forge-std/Script.sol";
 
-import {TokenPool} from "@chainlink/contracts-ccip/ccip/pools/TokenPool.sol";
-import {RateLimiter} from "@chainlink/contracts-ccip/ccip/libraries/RateLimiter.sol";
+import {TokenPool} from "@chainlink/contracts-ccip/pools/TokenPool.sol";
+import {RateLimiter} from "@chainlink/contracts-ccip/libraries/RateLimiter.sol";
 
 import {Helper} from "./Helper.sol";
 import {Deployments} from "./Deployments.sol";
@@ -50,17 +50,21 @@ contract UpdateRateLimits is Script, Helper {
             rate: uint128(vm.envUint("INBOUND_RATE"))
         });
 
-        // Preflight: mirror CCIP `RateLimiter._validateTokenBucketConfig` exactly so any
-        // mistake fails off-chain rather than mid-broadcast inside a Gnosis Safe batch.
+        // Preflight: validate the bucket config off-chain so any mistake fails before a
+        // Gnosis Safe batch rather than mid-broadcast. This check is intentionally STRICTER
+        // than CCIP 1.6.1's `RateLimiter._validateTokenBucketConfig`:
         //
         //   isEnabled=true  : rate > 0 AND rate < capacity (strict)
         //   isEnabled=false : capacity == 0 AND rate == 0
         //
-        // Earlier preflight (`capacity > 0` always, `rate <= capacity` non-strict, no
-        // `rate > 0` check, no disabled-case handling) was inconsistent with the protocol
-        // on both ends — it would let `rate == capacity` and `rate == 0` slip through, and
-        // it would block the valid disabled-state (capacity=0, rate=0). Aligned with CCIP
-        // 1.5.x validation per Chainlink compliance audit.
+        // 1.6.1 reverts ONLY on `rate > capacity` — it accepts `rate == capacity` and
+        // `rate == 0` — but we reject those early for a clearer operator UX (an enabled
+        // `rate == 0` bucket never refills; `rate == capacity` is almost always a typo). The
+        // guarantee is one-directional: anything this preflight accepts, the protocol also
+        // accepts, so no config that passes here can revert mid-broadcast. The earlier preflight
+        // (`capacity > 0` always, `rate <= capacity` non-strict, no `rate > 0` check, no
+        // disabled-case handling) both let bad configs through and blocked the valid
+        // disabled-state (capacity=0, rate=0). See test/Script07Preflight.t.sol.
         _validateBucket(outbound, "OUTBOUND");
         _validateBucket(inbound, "INBOUND");
 

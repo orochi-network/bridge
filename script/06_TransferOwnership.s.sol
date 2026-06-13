@@ -287,6 +287,16 @@ contract RenounceDeployerAdmin is Script, Helper {
         bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
         require(won.hasRole(adminRole, deployer), "deployer does not hold admin role");
         require(won.hasRole(adminRole, multisig), "multisig does NOT hold admin role yet");
+        // M3 (#25): the renounce below drops the deployer's LIQUIDITY_MANAGER_ROLE. If the
+        // multisig was never granted it (e.g. `TransferOwnership._handoff` partially broadcast
+        // — the DEFAULT_ADMIN grant landed but the LIQUIDITY_MANAGER grant did not), renouncing
+        // now would leave NO holder of the role that gates `deposit()`. The multisig can
+        // self-heal via DEFAULT_ADMIN_ROLE, but force the operator to complete the handoff
+        // (re-run TransferOwnership) before renouncing rather than discover it later.
+        require(
+            won.hasRole(won.LIQUIDITY_MANAGER_ROLE(), multisig),
+            "multisig does NOT hold LIQUIDITY_MANAGER_ROLE yet (re-run TransferOwnership)"
+        );
         require(won.getCCIPAdmin() == multisig, "wON ccipAdmin not yet accepted by multisig");
 
         // Block the renounce until the pool and registry handoffs on THIS chain have
