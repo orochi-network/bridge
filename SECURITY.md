@@ -56,8 +56,9 @@ DEP-8 (HIGH, added in the second-pass review) are `FIXED`.
 
 - **Scope:** `src/`, `script/`, `test/`, `Makefile`, `foundry.toml`, `.gitmodules`,
   `README.md`, `RUNBOOK.md`, `CLAUDE.md`, `.github/workflows/`, `.env.example`.
-- **Out of scope:** vendored code in `lib/ccip` and `lib/openzeppelin-contracts`
-  (audited upstream; pinned at `v2.17.0-ccip1.5.16` / OZ 5.x).
+- **Out of scope:** vendored code in `lib/chainlink-ccip`, `lib/chainlink-evm`, and
+  `lib/openzeppelin-contracts` (audited upstream; pinned at `contracts-ccip-v1.6.1` /
+  `contracts-v1.4.0` / OZ 5.x).
 - **Methodology:** 5 reviewers worked independently in parallel — one per area —
   each producing findings with substantiated code references.
 - **Reviewers / ID prefixes:**
@@ -460,8 +461,8 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### CCIP-1: BSC pool `withdrawLiquidity` is rebalancer-gated, but `setRebalancer` is owner-set with no monitor
 - **Severity:** HIGH
 - **Status:** FIXED — `script/08_PostDeployVerify.s.sol` now calls `_checkBscRebalancer(pool)` on every BSC verify run and reverts `UnexpectedRebalancer` if the slot is non-zero. The RUNBOOK monitoring table already pages on `setRebalancer` calldata; the verify-time assertion catches an accidental set at deploy and on every operator re-verify.
-- **Location:** `lib/ccip/contracts/src/v0.8/ccip/pools/LockReleaseTokenPool.sol:107-113`, `script/02_DeployPools.s.sol:53`
-- **Description:** `acceptLiquidity = false` blocks `provideLiquidity` only. `withdrawLiquidity` requires `msg.sender == s_rebalancer`, and `setRebalancer` is `onlyOwner` (no timelock, no cap, no in-flight-message guard). The pool owner can set the rebalancer to themselves and drain the reserve in a single multisig batch. Mid-flight BSC→ETH messages would commit on ETH (wON minted) but fail permanently on BSC release with `InsufficientLiquidity`. This is the documented CCT trust model and is correctly disclosed in CLAUDE.md/RUNBOOK — but no script-level or monitoring assertion exists on `s_rebalancer`.
+- **Location:** `lib/chainlink-ccip/chains/evm/contracts/pools/LockReleaseTokenPool.sol:53-102`, `script/02_DeployPools.s.sol:53`
+- **Description:** CCIP 1.6.1 has no `acceptLiquidity` flag; with no rebalancer set, `provideLiquidity` and `withdrawLiquidity` both revert `Unauthorized` (they require `msg.sender == s_rebalancer`), and `setRebalancer` is `onlyOwner` (no timelock, no cap, no in-flight-message guard). The pool owner can set the rebalancer to themselves and drain the reserve in a single multisig batch. Mid-flight BSC→ETH messages would commit on ETH (wON minted) but fail permanently on BSC release with `InsufficientLiquidity`. This is the documented CCT trust model and is correctly disclosed in CLAUDE.md/RUNBOOK — but no script-level or monitoring assertion exists on `s_rebalancer`.
 - **Impact:** The custodial risk is accepted by design. The gap is that an accidental or malicious `setRebalancer` is not detected promptly.
 - **Recommendation:** Add `_checkRebalancer(localPool)` to `script/08_PostDeployVerify.s.sol` asserting `LockReleaseTokenPool(pool).getRebalancer() == address(0)`. Add the same assertion to the RUNBOOK monitoring checklist as a recurring check.
 
@@ -500,7 +501,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 
 ### CCIP-6: Stale-wiring check assumes `abi.encode(address)` encoding
 - **Severity:** LOW
-- **Status:** FALSE POSITIVE — re-reading `script/05_ApplyChainUpdates.s.sol:47-50`, the comment block immediately above the `bytes32` cast already states: "`abi.encode(address)` produces exactly 32 bytes (left-padded), and the pool's `getRemotePool` returns the same shape. Compare directly as bytes32 rather than hashing both sides — same intent, cheaper, and clearer about the assumed shape." The encoding assumption is documented and the assertion `wiredRemote.length == 32 && bytes32(wiredRemote) == bytes32(uint256(uint160(remotePool)))` already explicitly checks the length, so a non-32-byte encoding would fail the `require`, not silently pass it.
+- **Status:** FALSE POSITIVE — re-reading `script/05_ApplyChainUpdates.s.sol:47-50`, the comment block immediately above the `bytes32` cast already states: "`abi.encode(address)` produces exactly 32 bytes (left-padded), and the pool's `getRemotePools` returns the same shape. Compare directly as bytes32 rather than hashing both sides — same intent, cheaper, and clearer about the assumed shape." The encoding assumption is documented and the assertion `wiredRemote.length == 32 && bytes32(wiredRemote) == bytes32(uint256(uint160(remotePool)))` already explicitly checks the length, so a non-32-byte encoding would fail the `require`, not silently pass it.
 - **Location:** `script/05_ApplyChainUpdates.s.sol:51-53`
 - **Description:** `wiredRemote` is cast to `bytes32` and compared. Correct for `abi.encode(address)` (32-byte left-padded). `TokenPool.setRemotePool` takes raw `bytes` with no encoding requirement, so a directly-set non-32-byte encoding bypasses the check. Real CCIP messages would still revert at validation time, so this is a diagnostic-only issue.
 - **Impact:** Silent skip of stale-detection under non-standard manual wiring.
@@ -519,7 +520,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 ### CCIP-8: RMN curse halts both directions — no runbook response
 - **Severity:** LOW
 - **Status:** FALSE POSITIVE — `RUNBOOK.md §4.2 "Responding to an RMN curse"` already documents the operator-side response: confirm the curse via the CCIP Explorer, coordinate with Chainlink ops, transfers resume automatically once uncursed. The finding was missed by the reviewer's scan.
-- **Location:** `lib/ccip/contracts/src/v0.8/ccip/pools/TokenPool.sol:162,180`
+- **Location:** `lib/chainlink-ccip/chains/evm/contracts/pools/TokenPool.sol:283,302`
 - **Description:** A curse on the BSC selector blocks both `lockOrBurn` and `releaseOrMint`. Users cannot exit in either direction. RUNBOOK has no documented response procedure.
 - **Impact:** During an RMN curse, all bridging stops. Funds are not at risk; user UX is.
 - **Recommendation:** Add a "RMN Curse Response" section to RUNBOOK: detection (monitor `CursedByRMN` reverts or query `IRMN.isCursed`), authority (Chainlink), user communication.
@@ -766,7 +767,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Severity:** MEDIUM
 - **Status:** FIXED — `.gitmodules` now carries an explicit header comment warning against `git submodule update --remote` and documenting the safe path (`git -C lib/<name> checkout <hash>`).
 - **Location:** `.gitmodules`
-- **Description:** `lib/ccip` and `lib/chainlink-local` are at tagged commits; `lib/forge-std` and `lib/openzeppelin-contracts` are at interim commits. No `branch =` lock in any entry. `git submodule update --remote` (a common but wrong invocation) would advance all to upstream tip.
+- **Description:** `lib/chainlink-ccip`, `lib/chainlink-evm`, and `lib/chainlink-local` are at tagged commits; `lib/forge-std` and `lib/openzeppelin-contracts` are at interim commits. No `branch =` lock in any entry. `git submodule update --remote` (a common but wrong invocation) would advance all to upstream tip.
 - **Impact:** Low in practice (the Makefile uses `--init --recursive`), but a misconfigured CI step that uses `--remote` could change compiler and library behaviour silently.
 - **Recommendation:** Add a comment in `.gitmodules` warning against `--remote`, and add a dependency table to README listing the exact intended commit hashes for auditor cross-reference.
 
@@ -956,7 +957,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 
 ### OPS-27: README submodule commit-hash table never landed (half of OPS-3)
 - **Severity:** INFO
-- **Status:** DEFERRED — bundled with the pre-mainnet workflow commit alongside OPS-8 (Slither gating) and OPS-13 (SARIF upload). The `lib/ccip` pin tag is documented in prose at README:15 and ARCHITECTURE.md:179; an enumerated SHA table is the cross-reference aid an auditor reads `git submodule status` for today, and is worth adding once.
+- **Status:** DEFERRED — bundled with the pre-mainnet workflow commit alongside OPS-8 (Slither gating) and OPS-13 (SARIF upload). The `lib/chainlink-ccip` / `lib/chainlink-evm` pin tags are documented in prose at README:15 and ARCHITECTURE.md §3.2; an enumerated SHA table is the cross-reference aid an auditor reads `git submodule status` for today, and is worth adding once.
 - **Location:** `README.md` (top-of-file), `docs/ARCHITECTURE.md` §3.2
 - **Description:** OPS-3's original recommendation was two-part; only `.gitmodules` warning landed.
 - **Impact:** Auditor cross-reference friction.
@@ -991,7 +992,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 # Closing note
 
 This review intentionally excludes vendor library audit findings — Chainlink CCIP
-1.5.x and OpenZeppelin 5.x are independently audited and pinned. Re-review is
+1.6.1 and OpenZeppelin 5.x are independently audited and pinned. Re-review is
 recommended after any submodule bump, after any change to `src/WrappedON.sol`,
 or before mainnet broadcast. The HIGH-severity findings should be closed prior
 to mainnet rollout; MEDIUM findings should be triaged and either closed or

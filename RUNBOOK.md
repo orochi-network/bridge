@@ -265,7 +265,7 @@ To reduce exposure:
 1. Have the multisig signers staged and ready before running `make handoff-all`.
 2. Queue the 3.2 accept transactions in the Safe UI immediately after 3.1 completes — **all of them**, both chains. The BSC handoff completes when the multisig accepts `pool.acceptOwnership` in 3.2 (BSC has no separate renounce step; `make renounce` in 3.4 only renounces wON `DEFAULT_ADMIN_ROLE` on ETH).
 3. Run `make renounce` (3.4) as soon as 3.2 + 3.3 confirm. Aim for hours, not days, between grant and renounce on ETH; the BSC window closes earlier (at 3.2 acceptance).
-4. **Monitor while the handoff is in flight on both chains.** ETH-side: page on `RoleGranted(MINTER_ROLE, *)` / `RoleGranted(BURNER_ROLE, *)` on wON whose grantee is not the BurnMintTokenPool. BSC-side: page on `LiquidityRemoved(*, *)` and `OwnershipTransferRequested(*, *)` on the LockReleaseTokenPool, plus a calldata trace on `setRebalancer(addr)` (the function is `onlyOwner` and emits no event, so monitoring requires watching calldata to the pool address — same pattern as the Trust-Model table). See [Trust model](#trust-model-bsc-reserve-custody) for the full monitoring table.
+4. **Monitor while the handoff is in flight on both chains.** ETH-side: page on `RoleGranted(MINTER_ROLE, *)` / `RoleGranted(BURNER_ROLE, *)` on wON whose grantee is not the BurnMintTokenPool. BSC-side: page on `LiquidityRemoved(*, *)` and `OwnershipTransferRequested(*, *)` on the LockReleaseTokenPool, plus the `RebalancerSet(oldRebalancer, newRebalancer)` event (CCIP 1.6.1 emits this on every `setRebalancer` call — subscribe to the log; no calldata trace needed). See [Trust model](#trust-model-bsc-reserve-custody) for the full monitoring table.
 
 ### 3.2 Multisig accepts (from the Safe UI / SDK)
 
@@ -409,8 +409,9 @@ the Ethereum side** — this is enforced operationally.
    message shows the destination execution failing on an insufficient-liquidity
    revert.
 2. Replenish the BSC pool. **`provideLiquidity` is disabled on this deployment**
-   (`acceptLiquidity = false` → reverts `LiquidityNotAccepted`), so the rebalancer
-   cannot use it. Restore releasable liquidity by transferring ON **directly to
+   (CCIP 1.6.1 has no `acceptLiquidity` flag; with no rebalancer set, the call
+   reverts `Unauthorized`), so the rebalancer path cannot be used. Restore
+   releasable liquidity by transferring ON **directly to
    the BSC `LockReleaseTokenPool` address** from the operator reserve / multisig:
    `releaseOrMint` and `withdrawLiquidity` both read the pool's raw `balanceOf`,
    so a direct ERC-20 transfer is immediately releasable and remains withdrawable
@@ -428,7 +429,7 @@ the Ethereum side** — this is enforced operationally.
 Chainlink's `LockReleaseTokenPool` is built around a trusted-operator pattern. After ownership handoff, the BSC pool's `owner` (the ops multisig) can:
 
 - Call `setRebalancer(addr)` (`onlyOwner`) — designates which address may move the locked-ON reserve.
-- The designated rebalancer can call `provideLiquidity(amount)` (only when `acceptLiquidity=true`; we deploy with `false`, so this path is blocked) and `withdrawLiquidity(amount)` / `transferLiquidity(from, amount)`.
+- The designated rebalancer can call `provideLiquidity(amount)` and `withdrawLiquidity(amount)` (both revert `Unauthorized` unless `msg.sender == s_rebalancer`). `transferLiquidity(from, amount)` is `onlyOwner`, but it only PULLS liquidity *into* this pool from a `from` pool that has set this pool as its rebalancer (it calls `from.withdrawLiquidity`) — it cannot extract this pool's own reserve. CCIP 1.6.1 removed the `acceptLiquidity` flag, and we deploy with **no rebalancer set**, so the locked-ON reserve is not movable out by anyone until the owner calls `setRebalancer`.
 
 This means the multisig effectively has custody of the BSC-side locked-ON reserve. This is the **documented Chainlink CCT pattern** for `LockReleaseTokenPool` and is intentional.
 
@@ -438,8 +439,8 @@ This means the multisig effectively has custody of the BSC-side locked-ON reserv
 |---|---|---|
 | `LiquidityRemoved(remover, amount)` | BSC pool | **Critical** |
 | `LiquidityAdded(provider, amount)` | BSC pool | High |
-| `setRebalancer(addr)` calldata trace | BSC pool | **Critical** |
-| `setRateLimitAdmin(addr)` calldata trace (`onlyOwner`, no event — OPS-28) | both pools | High |
+| `RebalancerSet(oldRebalancer, newRebalancer)` event (CCIP 1.6.1 — `setRebalancer`) | BSC pool | **Critical** |
+| `RateLimitAdminSet(rateLimitAdmin)` event (CCIP 1.6.1 — `setRateLimitAdmin`; OPS-28) | both pools | High |
 | `OwnershipTransferRequested` / `OwnershipTransferred` | BSC pool | **Critical** |
 | `RouterUpdated(oldRouter, newRouter)` (CCIP-13) | both pools | **Critical** |
 | `RemotePoolSet(selector, oldRemote, newRemote)` (CCIP-14) | both pools | **Critical** |
@@ -465,9 +466,10 @@ This means the multisig effectively has custody of the BSC-side locked-ON reserv
   validate inbound mints. Door to forged-source mints if compromised.
 - `ChainAdded` / `ChainRemoved` / `ChainConfigured` (CCIP-14) — rate-limit reset / new
   selector wired in. Less catastrophic than RouterUpdated/RemotePoolSet but worth a page.
-- `setRateLimitAdmin` calldata (OPS-28) — `onlyOwner`, no event. §4.1.1 recommends
-  delegating to a hot key, so this is a legitimate operational call — but it should be a
-  signal you can correlate with a multisig action you know about.
+- `RateLimitAdminSet(rateLimitAdmin)` event (OPS-28) — `onlyOwner`; CCIP 1.6.1 emits this
+  on `setRateLimitAdmin`, so subscribe to the log. §4.1.1 recommends delegating to a hot key,
+  so this is a legitimate operational call — but it should be a signal you can correlate with
+  a multisig action you know about.
 - `AdministratorTransferRequested`/`Transferred` on `TokenAdminRegistry` (OPS-28) — the
   registry sibling of `CCIPAdminTransferProposed`/`Transferred` on wON; previously only
   the wON half was monitored.
@@ -486,7 +488,7 @@ signal from `IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` as the authoritativ
 locked-balance read; treat `ccipMintHeadroomUsed` as a useful local indicator but not the
 ground truth for "how much value is in flight."
 
-Source the events in `lib/ccip/contracts/src/v0.8/ccip/pools/LockReleaseTokenPool.sol` and `src/WrappedON.sol`. Page the on-call rotation on Critical lines.
+Source the events in `lib/chainlink-ccip/chains/evm/contracts/pools/LockReleaseTokenPool.sol` and `src/WrappedON.sol`. Page the on-call rotation on Critical lines.
 
 ## Appendix: file references
 

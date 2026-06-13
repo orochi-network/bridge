@@ -35,8 +35,8 @@ custom contract in this repo is [`src/WrappedON.sol`](../src/WrappedON.sol).
                                                                         ▼
         ┌─────────────┐                                        ┌──────────────────┐
         │  ON (100M)  │ ◀────────────  lock / release  ──────▶ │ LockReleasePool  │
-        │  canonical  │                                        │ acceptLiquidity= │
-        └─────────────┘                                        │ false (stock)    │
+        │  canonical  │                                        │ no rebalancer    │
+        └─────────────┘                                        │ set (stock)      │
                                                                └──────────────────┘
 ```
 
@@ -174,16 +174,19 @@ pool's `staticcall`-based interface probes succeed.
 
 | Contract | Chain | Source path |
 |---|---|---|
-| `BurnMintTokenPool` | ETH | `lib/ccip/.../ccip/pools/BurnMintTokenPool.sol` |
-| `LockReleaseTokenPool` | BSC | `lib/ccip/.../ccip/pools/LockReleaseTokenPool.sol` |
-| `TokenAdminRegistry` | both | `lib/ccip/.../ccip/tokenAdminRegistry/TokenAdminRegistry.sol` |
-| `RegistryModuleOwnerCustom` | both | `lib/ccip/.../ccip/tokenAdminRegistry/RegistryModuleOwnerCustom.sol` |
+| `BurnMintTokenPool` | ETH | `lib/chainlink-ccip/chains/evm/contracts/pools/BurnMintTokenPool.sol` |
+| `LockReleaseTokenPool` | BSC | `lib/chainlink-ccip/chains/evm/contracts/pools/LockReleaseTokenPool.sol` |
+| `TokenAdminRegistry` | both | `lib/chainlink-ccip/chains/evm/contracts/tokenAdminRegistry/TokenAdminRegistry.sol` |
+| `RegistryModuleOwnerCustom` | both | `lib/chainlink-ccip/chains/evm/contracts/tokenAdminRegistry/RegistryModuleOwnerCustom.sol` |
 
-`lib/ccip` is pinned to **`v2.17.0-ccip1.5.16`** to match the deployed production
-CCIP 1.5.x ABI on both ETH + BSC mainnet. Decision rationale: subclassing was
-considered (e.g. to disable `setRebalancer` on the BSC pool) and rejected —
-extra inheritance increases audit surface for zero functional gain, and the
-trust model is the documented Chainlink CCT pattern.
+`lib/chainlink-ccip` is pinned to **`contracts-ccip-v1.6.1`** (CCIP 1.6.1, the
+Chainlink-docs-recommended generic-pool version), with its shared/vendored
+dependency `lib/chainlink-evm` pinned to **`contracts-v1.4.0`** (`@chainlink/contracts`).
+This is the migration off the archived `smartcontractkit/ccip` repo, which carried the
+old 1.5.x line (formerly pinned at `v2.17.0-ccip1.5.16`). Decision rationale: subclassing was considered
+(e.g. to disable `setRebalancer` on the BSC pool) and rejected — extra inheritance
+increases audit surface for zero functional gain, and the trust model is the documented
+Chainlink CCT pattern.
 
 ### 3.3 Configuration — `script/Helper.sol`
 
@@ -485,9 +488,11 @@ gets a clear signal.
 2. **The ops multisig** — post-handoff, the multisig holds custody of the
    BSC-side locked-ON reserve via `setRebalancer` → `withdrawLiquidity`. This
    is the **documented Chainlink CCT pattern** for `LockReleaseTokenPool` and
-   is intentional. We deploy with `acceptLiquidity=false` to disable
-   `provideLiquidity`, but `withdrawLiquidity` remains operator-controlled by
-   design. Subclassing to disable this was considered and rejected.
+   is intentional. In CCIP 1.6.1 there is no `acceptLiquidity` flag; we deploy with
+   **no rebalancer set**, so `provideLiquidity` / `withdrawLiquidity` /
+   `transferLiquidity` all revert `Unauthorized` until the owner calls
+   `setRebalancer`. That owner→rebalancer custody path remains operator-controlled
+   by design. Subclassing to disable this was considered and rejected.
 3. **The deployer EOA, during the handoff window** — between the grant in
    script 06 and the multisig accepts, the deployer still holds wON
    `DEFAULT_ADMIN_ROLE` and the BSC pool ownership. A compromised deployer key
