@@ -17,10 +17,18 @@ fs_permissions = [
 # SECURITY: OPS-11 — remappings live ONLY here. A sibling `remappings.txt` was deleted
 # because Foundry gives the .txt file precedence when both exist, so an edit to one
 # but not the other would silently change resolution (most dangerous for the
-# `@chainlink/contracts-ccip/` line which points at the pinned vendored ABI). Do not
+# `@chainlink/contracts-ccip/` line which points at the pinned CCIP 1.6.1 ABI). Do not
 # recreate `remappings.txt`.
+#
+# CCIP 1.6.x layout: contracts moved to smartcontractkit/chainlink-ccip (EVM under
+# `chains/evm/contracts/`), and the shared/vendored sources (Ownable2StepMsgSender,
+# IBurnMintERC20, ITypeAndVersion, and the vendored OZ at v4.8.3 + v5.0.2) live in the
+# `@chainlink/contracts` (chainlink-evm) dependency — hence the two `@chainlink/...`
+# remaps below. chainlink-evm vendors OpenZeppelin internally, so no extra OZ remap is
+# needed for the library sources; `@openzeppelin/contracts/` is for THIS repo's own code.
 remappings = [
-    "@chainlink/contracts-ccip/=lib/ccip/contracts/src/v0.8/",
+    "@chainlink/contracts-ccip/=lib/chainlink-ccip/chains/evm/contracts/",
+    "@chainlink/contracts/=lib/chainlink-evm/contracts/",
     "@chainlink/local/=lib/chainlink-local/src/",
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
     "forge-std/=lib/forge-std/src/",
