@@ -3,12 +3,16 @@ pragma solidity 0.8.34;
 
 /// @notice Per-chain CCIP infrastructure config.
 ///
-/// **All `address` fields below are intentionally `address(0)` placeholders.** Look up the
-/// current values in the public Chainlink CCIP directory and fill them in immediately before
-/// deploying. The deployment scripts call `_requireSet(...)` on every address they read,
-/// so attempting to broadcast with placeholders fails fast with a clear `MissingAddress` error.
+/// Address fields are populated from the public Chainlink CCIP directory (the same data the
+/// `smartcontractkit/documentation` config renders). **Re-verify against the live chain before
+/// any broadcast** with `make validate-config RPC=<target-chain rpc>`, which staticcalls each
+/// address and checks `typeAndVersion()` / `isChainSupported()`. The deployment scripts also call
+/// `_requireSet(...)` on every address they read, so any unset field fails fast with a clear
+/// `MissingAddress` error.
 ///
 ///   Directory: https://docs.chain.link/ccip/directory
+///   Expected on-chain versions: Router 1.2.0, ARMProxy 1.0.0, TokenAdminRegistry 1.5.0,
+///   RegistryModuleOwnerCustom 1.6.0.
 ///
 /// Chain selectors are stable identifiers and rarely change — they are committed here.
 abstract contract Helper {
@@ -36,47 +40,47 @@ abstract contract Helper {
 
     function getConfig(uint256 chainId) internal pure returns (NetworkConfig memory cfg) {
         if (chainId == 1) {
-            // ── Ethereum Mainnet ── FILL IN from https://docs.chain.link/ccip/directory
+            // ── Ethereum Mainnet ── from https://docs.chain.link/ccip/directory (re-verify: make validate-config)
             cfg = NetworkConfig({
                 chainSelector: ETH_MAINNET_SELECTOR,
-                router: address(0),
-                rmnProxy: address(0),
-                tokenAdminRegistry: address(0),
-                registryModuleOwnerCustom: address(0),
-                linkToken: address(0),
+                router: 0x80226fc0Ee2b096224EeAc085Bb9a8cba1146f7D,
+                rmnProxy: 0x411dE17f12D1A34ecC7F45f49844626267c75e81,
+                tokenAdminRegistry: 0xb22764f98dD05c789929716D677382Df22C05Cb6,
+                registryModuleOwnerCustom: 0x4855174E9479E211337832E109E7721d43A4CA64,
+                linkToken: 0x514910771AF9Ca656af840dff83E8264EcF986CA,
                 onToken: ON_ETH_MAINNET
             });
         } else if (chainId == 11_155_111) {
-            // ── Sepolia ── FILL IN from https://docs.chain.link/ccip/directory
+            // ── Sepolia ── from https://docs.chain.link/ccip/directory (re-verify: make validate-config)
             cfg = NetworkConfig({
                 chainSelector: SEPOLIA_SELECTOR,
-                router: address(0),
-                rmnProxy: address(0),
-                tokenAdminRegistry: address(0),
-                registryModuleOwnerCustom: address(0),
-                linkToken: address(0),
+                router: 0x0BF3dE8c5D3e8A2B34D2BEeB17ABfCeBaf363A59,
+                rmnProxy: 0xba3f6251de62dED61Ff98590cB2fDf6871FbB991,
+                tokenAdminRegistry: 0x95F29FEE11c5C55d26cCcf1DB6772DE953B37B82,
+                registryModuleOwnerCustom: 0xa3c796d480638d7476792230da1E2ADa86e031b0,
+                linkToken: 0x779877A7B0D9E8603169DdbD7836e478b4624789,
                 onToken: address(0) // no canonical ON on Sepolia — deploy a mock for testing
             });
         } else if (chainId == 56) {
-            // ── BSC Mainnet ── FILL IN from https://docs.chain.link/ccip/directory
+            // ── BSC Mainnet ── from https://docs.chain.link/ccip/directory (re-verify: make validate-config)
             cfg = NetworkConfig({
                 chainSelector: BSC_MAINNET_SELECTOR,
-                router: address(0),
-                rmnProxy: address(0),
-                tokenAdminRegistry: address(0),
-                registryModuleOwnerCustom: address(0),
-                linkToken: address(0),
+                router: 0x34B03Cb9086d7D758AC55af71584F81A598759FE,
+                rmnProxy: 0x9e09697842194f77d315E0907F1Bda77922e8f84,
+                tokenAdminRegistry: 0x736Fd8660c443547a85e4Eaf70A49C1b7Bb008fc,
+                registryModuleOwnerCustom: 0x47Db76c9c97F4bcFd54D8872FDb848Cab696092d,
+                linkToken: 0x404460C6A5EdE2D891e8297795264fDe62ADBB75,
                 onToken: ON_BSC_MAINNET
             });
         } else if (chainId == 97) {
-            // ── BSC Testnet ── FILL IN from https://docs.chain.link/ccip/directory
+            // ── BSC Testnet ── from https://docs.chain.link/ccip/directory (re-verify: make validate-config)
             cfg = NetworkConfig({
                 chainSelector: BSC_TESTNET_SELECTOR,
-                router: address(0),
-                rmnProxy: address(0),
-                tokenAdminRegistry: address(0),
-                registryModuleOwnerCustom: address(0),
-                linkToken: address(0),
+                router: 0xE1053aE1857476f36A3C62580FF9b016E8EE8F6f,
+                rmnProxy: 0xA8C0c11bf64AF62CDCA6f93D3769B88BdD7cb93D,
+                tokenAdminRegistry: 0xF8f2A4466039Ac8adf9944fD67DBb3bb13888f2B,
+                registryModuleOwnerCustom: 0x8Cd87FeAC14D69D770E67Bedf029e6fd3F33D0C7,
+                linkToken: 0x84b9B910527Ad5C03A9Ca831909E21e236EA7b06,
                 onToken: address(0) // no canonical ON on BSC testnet — deploy a mock for testing
             });
         } else {
