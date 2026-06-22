@@ -1,6 +1,23 @@
 # Deployment State — ON Bridge (mainnet)
 
-_Last updated: 2026-06-16_
+_Last updated: 2026-06-23_
+
+## 2026-06-23 — wON redeployed (auto-unwrap + permissionless deposit)
+
+`WrappedON` was updated to add:
+- **Auto-unwrap on BSC→ETH arrivals**: `mint` now checks whether `ON.balanceOf(wON) >= amount` and, if so, transfers native ON directly to the receiver instead of minting wON (emits `CCIPAutoUnwrapped`; does not increment `ccipMintHeadroomUsed`).
+- **Permissionless `deposit`**: the `LIQUIDITY_MANAGER_ROLE` gate on `deposit` was removed; anyone holding ETH-side ON can wrap 1:1 into wON.
+
+Because wON is non-upgradeable, both ETH contracts (wON + `BurnMintTokenPool`) were redeployed. The existing BSC `LockReleaseTokenPool` was retained; only its ETH-lane config was updated (new remote pool + new wON address via script 05). Procedure: RUNBOOK §4.4.
+
+The old on-chain wON (`0x98d6…606`) and old ETH pool (`0xE0b7…8A72`) were clean at redeploy time — no circulating holders, no reserve.
+
+**New addresses are PENDING — fill in after broadcast:**
+
+| Contract | Address | Notes |
+|---|---|---|
+| wON (WrappedON) — NEW | _(PENDING post-broadcast)_ | Replaces `0x98d6…606` |
+| BurnMintTokenPool — NEW | _(PENDING post-broadcast)_ | Replaces `0xE0b7…8A72` |
 
 Snapshot of where the mainnet deployment stands. Verified by direct on-chain reads
 (`cast call`) this session. **Bridge is NOT yet operational** — see Blocker below.
@@ -22,10 +39,14 @@ Snapshot of where the mainnet deployment stands. Verified by direct on-chain rea
 
 ### Ethereum mainnet (chain id 1) — artifact `deployments/1.json`
 
+> **SUPERSEDED 2026-06-23 — pending redeploy.** The addresses below are the pre-redeploy contracts (old wON + old ETH pool). New addresses will be written to `deployments/1.json` after broadcast and should replace this table.
+
 | Contract | Address | Notes |
 |---|---|---|
-| wON (WrappedON) | `0x98d6d288AfaB1EdC7A6d49502790FA517765E606` | "Wrapped Orochi Network" / wON / 18 dec; ON=`0x33f6…59d`; `MAX_CCIP_MINTED`=100M; `getCCIPAdmin`=deployer |
-| BurnMintTokenPool | `0xE0b7Dcd123122aC50f47d4E97C8CaFD01BAc8A72` | `typeAndVersion`="BurnMintTokenPool 1.6.1"; `getToken`=wON; `owner`=deployer |
+| wON (WrappedON) | `0x98d6d288AfaB1EdC7A6d49502790FA517765E606` | **OLD — superseded.** Pre-auto-unwrap / pre-permissionless-deposit build. No holders, no reserve. |
+| BurnMintTokenPool | `0xE0b7Dcd123122aC50f47d4E97C8CaFD01BAc8A72` | **OLD — superseded.** Paired with the old wON. |
+| wON (WrappedON) — NEW | _(PENDING post-broadcast)_ | Auto-unwrap + permissionless deposit; replaces row above. |
+| BurnMintTokenPool — NEW | _(PENDING post-broadcast)_ | Paired with new wON; replaces row above. |
 
 ### BSC mainnet (chain id 56) — artifact `deployments/56.json`
 

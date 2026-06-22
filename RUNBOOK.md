@@ -94,19 +94,27 @@ cast call $BSC_ON 'totalSupply()(uint256)' --rpc-url $BSC_RPC
 
 If any mint surface is present and gated to an address that could plausibly mint more, halt the deployment — the cap-vs-supply relationship is load-bearing for the entire CCIP-7 / cap-replenishment safety story.
 
+**Auto-unwrap on BSC→ETH arrivals.** When a BSC→ETH CCIP message arrives, `WrappedON.mint`
+first checks whether `ON.balanceOf(wON) >= amount` (the ETH-side reserve). If so, it
+transfers native ON directly to the receiver (all-or-nothing) and emits `CCIPAutoUnwrapped`
+without incrementing `ccipMintHeadroomUsed` — the receiver gets canonical ETH ON, not wON.
+If the reserve does not cover the full amount, it falls through to the standard wON mint
+path. Operators should expect `CCIPAutoUnwrapped` events during normal operation whenever
+the reserve holds sufficient ON; this is expected and benign.
+
 **Incident response: an inbound CCIP message reverting with `CCIPMintCapExceeded`.** The mint
 cap makes `WrappedON.mint` — and therefore the offRamp's `releaseOrMint` — revert once
-`ccipMintedSupply + amount > MAX_CCIP_MINTED`. Treat this as a **deliberate fail-safe trip,
+`ccipMintHeadroomUsed + amount > MAX_CCIP_MINTED`. Treat this as a **deliberate fail-safe trip,
 not a transient.** CCIP will surface the message as failed-execution and allow manual
 re-execution, but the retry calls the same `mint` and will keep reverting until
-`ccipMintedSupply` drops below the cap (i.e. until matching wON is burned/bridged out on
+`ccipMintHeadroomUsed` drops below the cap (i.e. until matching wON is burned/bridged out on
 ETH). Under honest operation this is unreachable: only 100M ON exists on BSC,
-`ccipMintedSupply ≈ lockedON_BSC ≤ 100M`, and burns saturating-decrement the counter. So a
+`ccipMintHeadroomUsed ≈ lockedON_BSC ≤ 100M`, and burns saturating-decrement the counter. So a
 live `CCIPMintCapExceeded` on an inbound message means one of: (a) BSC ON supply exceeded
 100M (OPS-29 above — the surplus is stranded by design), or (b) the ETH pool minted without
 a matching BSC lock (compromise/bug — the cap is the circuit-breaker that stopped it). In
 both cases do **not** treat the stuck message as a delivery bug to force through; page the
-on-call rotation and reconcile `ccipMintedSupply` against
+on-call rotation and reconcile `ccipMintHeadroomUsed` against
 `IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` before any manual re-execution.
 
 ### 0.3 Environment
@@ -252,7 +260,7 @@ The single target runs the handoff sequentially against both chains with the sam
 
 Each per-chain invocation:
 - Calls `pool.transferOwnership(multisig)` (two-step Ownable).
-- (ETH only) Grants wON `DEFAULT_ADMIN_ROLE` **and `LIQUIDITY_MANAGER_ROLE`** (M3 / #25 — the `deposit` reserve-wrap gate) to the multisig, and proposes the new CCIP admin (two-step — multisig must call `acceptCCIPAdmin`). The deployer renounces both roles in 3.4. Before handoff, the deployer holds `LIQUIDITY_MANAGER_ROLE` (granted at construction) and uses it to seed the initial ETH-side reserve via `deposit`; post-handoff the multisig manages it and may re-delegate to a dedicated liquidity manager.
+- (ETH only) Grants wON `DEFAULT_ADMIN_ROLE` to the multisig and proposes the new CCIP admin (two-step — multisig must call `acceptCCIPAdmin`). The deployer renounces `DEFAULT_ADMIN_ROLE` in 3.4. Note: `deposit` is permissionless — there is no `LIQUIDITY_MANAGER_ROLE` to grant or manage.
 - Calls `TokenAdminRegistry.transferAdminRole(token, multisig)` (two-step).
 
 **Minimize the handoff window (`DEP-3` + `CCIP-1` — legacy audit tags H-2 + C-1).** Between the grant in 3.1 and the multisig accepts in 3.2, the deployer EOA still holds:
@@ -318,7 +326,7 @@ The script now pre-asserts (`DEP-3` — legacy audit tag H-1):
 - Multisig is `getCCIPAdmin()` (i.e. it called `acceptCCIPAdmin`).
 - The deployer still holds the role at call time.
 
-Then calls `won.renounceRole(DEFAULT_ADMIN_ROLE, deployer)` and, if held, `won.renounceRole(LIQUIDITY_MANAGER_ROLE, deployer)` (M3 / #25). After this point, only the multisig can grant/revoke wON roles and only multisig-designated liquidity managers can `deposit`. **Do not skip this step.**
+Then calls `won.renounceRole(DEFAULT_ADMIN_ROLE, deployer)`. After this point, only the multisig can grant/revoke wON roles. `deposit` is permissionless — no liquidity-manager role exists. **Do not skip this step.**
 
 ---
 
@@ -376,7 +384,66 @@ These contracts are non-upgradeable. To replace a pool:
 4. Multisig: `applyChainUpdates` on the new pool to link the remote.
 5. Drain the old pool. The locked-ON reserve on the BSC `LockReleaseTokenPool` is movable by the pool owner via `setRebalancer` → `withdrawLiquidity` (see [Trust model](#trust-model-bsc-reserve-custody) below). Either rebalance manually under multisig governance, or — preferred — plan migrations such that net positions are zero before swapping so no reserve movement is needed.
 
-### 4.4 Stuck or delayed ETH→BSC transfers (insufficient BSC liquidity)
+### 4.4 Redeploy (new wON)
+
+Use this procedure when the wON contract must be replaced (e.g. the 2026-06-23 redeploy for auto-unwrap + permissionless deposit). The existing BSC `LockReleaseTokenPool` stays in place; only the ETH side is redeployed.
+
+**Context for the 2026-06-23 redeploy.** The current on-chain wON (`0x98d6…606`) and its ETH `BurnMintTokenPool` (`0xE0b7…8A72`) are clean — no circulating wON holders, no reserve. The deployer EOA still owns both pools and holds `DEFAULT_ADMIN_ROLE` on wON (handoff not yet run). No reserve migration is needed.
+
+#### Step 1: ETH — deploy new wON + new BurnMintTokenPool, wire ETH side (scripts 01→05)
+
+Delete the existing ETH artifact entries so scripts 01 and 02 redeploy rather than skip:
+
+```bash
+# Remove the stale ETH artifact (or delete/zero-out the wON + ETH pool entries)
+# then re-run the full ETH deploy sequence:
+make deploy-eth RPC=eth
+```
+
+`make deploy-eth` runs scripts 01 → 02 → 03 → 04 → 05 in sequence:
+- Script 01: deploys a new wON (`WrappedON`), writes address to `deployments/1.json`.
+- Script 02: deploys a new `BurnMintTokenPool` for the new wON, writes to `deployments/1.json`.
+- Script 03: grants `MINTER_ROLE` + `BURNER_ROLE` on the new wON to the new ETH pool.
+- Script 04: registers the deployer as new wON's CCIP admin in `TokenAdminRegistry`, then `setPool(newWON, newETHPool)`.
+- Script 05: wires the BSC remote chain config onto the new ETH pool (`remotePoolAddresses` = BSC `LockReleaseTokenPool`, `remoteTokenAddress` = BSC ON, same rate limits).
+
+#### Step 2: BSC — re-wire the ETH lane of the existing LockReleaseTokenPool (script 05 only)
+
+The existing BSC `LockReleaseTokenPool` still has the old ETH pool wired. Remove the old ETH-lane config and add the new ETH pool + new wON address by running **script 05 only** on BSC — invoke it directly rather than via `make deploy-bsc`, because that target also runs scripts 02 and 04:
+
+```bash
+forge script script/05_ApplyChainUpdates.s.sol \
+  --rpc-url bsc --broadcast --account deployer
+```
+
+Script 05 re-applies `applyChainUpdates` on the existing BSC pool with the new `remotePoolAddresses` (new ETH pool) and new `remoteTokenAddress` (new wON). Same rate limits apply. `applyChainUpdates` is `onlyOwner` (the deployer) and does not touch CCIP admin registration.
+
+> **Do NOT run script 04 on BSC mainnet in any form** (it reverts `CannotResolveCCIPAdmin` — the path-4 blocker: BSC ON `owner()` = `address(0)`, no `getCCIPAdmin`, not AccessControl). The BSC pool's CCIP-admin registration was already done out-of-band with Chainlink (2026-06-19) and does not need redoing. Re-wire the existing pool with script 05 only — **do not use `make deploy-bsc`**, which would also run scripts 02 and 04.
+
+#### Step 3 (optional): deregister the old wON in TokenAdminRegistry
+
+The old wON (`0x98d6…606`) will be orphaned in `TokenAdminRegistry` after the redeploy. To clean it up, the deployer (still the current admin for the old wON until it is superseded) can call:
+
+```solidity
+// Via cast or a Foundry script targeting TokenAdminRegistry on ETH:
+registry.setPool(oldWON, address(0));
+// oldWON = 0x98d6d288AfaB1EdC7A6d49502790FA517765E606
+```
+
+This is optional and non-blocking — the old wON is inert (no holders, no reserve) so a dangling registry entry has no operational impact.
+
+#### Step 4: verify both sides
+
+```bash
+make verify-eth RPC=eth
+make verify-bsc RPC=bsc
+```
+
+Script 08 (`PostDeployVerify`) is view-only and reverts on any wiring mismatch. Verify both chains show green before proceeding to the live bridge test (RUNBOOK §2.5) and eventual handoff (RUNBOOK §3).
+
+---
+
+### 4.5 Stuck or delayed ETH→BSC transfers (insufficient BSC liquidity)
 
 **This is the QuillAudits M2 scenario** (SECURITY: CCIP-2 / M2). An ETH→BSC
 transfer burns wON on Ethereum the moment the source message is accepted; the
@@ -450,7 +517,7 @@ This means the multisig effectively has custody of the BSC-side locked-ON reserv
 | `CCIPAdminTransferProposed` / `CCIPAdminTransferred` | wON | High |
 | `AdministratorTransferRequested` / `AdministratorTransferred` (registry — OPS-28) | TokenAdminRegistry | High |
 | `CCIPMinted` cumulative > BSC `IERC20(ON).balanceOf(LockReleaseTokenPool)` | wON ↔ BSC pool | **Critical** |
-| `BSC_ON.balanceOf(BSC pool)` < ETH→BSC rate-limit capacity + buffer (M2 / CCIP-2 — stuck-transfer precursor; see §4.4) | BSC pool ↔ ETH pool config | High |
+| `BSC_ON.balanceOf(BSC pool)` < ETH→BSC rate-limit capacity + buffer (M2 / CCIP-2 — stuck-transfer precursor; see §4.5) | BSC pool ↔ ETH pool config | High |
 | `CCIPAdminProposalCancelled` | wON | High |
 | Outbound / inbound rate-limit bucket exhausted | both pools | Medium |
 

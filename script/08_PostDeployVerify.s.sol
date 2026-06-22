@@ -333,26 +333,12 @@ contract PostDeployVerify is Script, Helper {
         if (won.hasRole(adminRole, deployer)) {
             revert RoleNotRenounced("DEFAULT_ADMIN_ROLE", deployer);
         }
-        // M3 (#25): the deployer is seeded LIQUIDITY_MANAGER_ROLE at construction (it gates
-        // `deposit()`), script 06 grants it to the multisig, and RenounceDeployerAdmin renounces
-        // the deployer's copy. Assert that full transfer happened on BOTH legs — otherwise a
-        // partial `RenounceDeployerAdmin` (interrupted after the DEFAULT_ADMIN renounce but
-        // before the LIQUIDITY_MANAGER one) would leave the deployer EOA able to call
-        // `deposit()` while `make verify-eth` still printed a green renounce.
-        bytes32 liquidityRole = won.LIQUIDITY_MANAGER_ROLE();
-        if (!won.hasRole(liquidityRole, multisig)) {
-            revert RoleMissing("LIQUIDITY_MANAGER_ROLE", multisig);
-        }
-        if (won.hasRole(liquidityRole, deployer)) {
-            revert RoleNotRenounced("LIQUIDITY_MANAGER_ROLE", deployer);
-        }
         if (won.getCCIPAdmin() != multisig) {
             revert RoleMissing("ccipAdmin", multisig);
         }
         console.log("[ok] wON DEFAULT_ADMIN_ROLE held only by multisig %s", multisig);
-        console.log("[ok] wON LIQUIDITY_MANAGER_ROLE held only by multisig %s", multisig);
         console.log("[ok] wON ccipAdmin == multisig %s", multisig);
-        console.log("[ok] wON DEFAULT_ADMIN_ROLE + LIQUIDITY_MANAGER_ROLE renounced by deployer %s", deployer);
+        console.log("[ok] wON DEFAULT_ADMIN_ROLE renounced by deployer %s", deployer);
     }
 
     function _remoteTokenAddress(NetworkConfig memory remote) internal view returns (address) {

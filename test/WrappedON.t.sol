@@ -152,8 +152,6 @@ contract WrappedONTest is Test {
         vm.startPrank(admin);
         won.grantRole(won.MINTER_ROLE(), pool);
         won.grantRole(won.BURNER_ROLE(), pool);
-        // M3 (#25): deposit is gated to LIQUIDITY_MANAGER_ROLE; alice is the test depositor.
-        won.grantRole(won.LIQUIDITY_MANAGER_ROLE(), alice);
         vm.stopPrank();
     }
 
@@ -185,11 +183,6 @@ contract WrappedONTest is Test {
         WrappedON nullWon = new WrappedON(IERC20(address(mock)), admin);
         mock.mint(address(this), 100 ether);
         mock.approve(address(nullWon), 100 ether);
-        // M3 (#25): this test deposits as address(this); grant it the liquidity role so the
-        // call reaches the received==0 guard rather than reverting on the role check first.
-        bytes32 lmRole = nullWon.LIQUIDITY_MANAGER_ROLE();
-        vm.prank(admin);
-        nullWon.grantRole(lmRole, address(this));
 
         vm.expectRevert(WrappedON.ZeroAmount.selector);
         nullWon.deposit(50 ether);
@@ -206,58 +199,16 @@ contract WrappedONTest is Test {
         assertEq(won.totalSupply(), 100 ether);
     }
 
-    /// @notice M3 (#25): `deposit` is gated to `LIQUIDITY_MANAGER_ROLE`. An account with ON
-    ///         and approval but no role must be rejected with the OZ AccessControl error.
-    function test_DepositRevertsWithoutLiquidityManagerRole() public {
-        // bob holds ON and has approved, but does NOT hold the liquidity-manager role.
-        vm.prank(alice);
-        on.transfer(bob, 50 ether);
-        vm.startPrank(bob);
-        on.approve(address(won), 50 ether);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                IAccessControl.AccessControlUnauthorizedAccount.selector, bob, keccak256("LIQUIDITY_MANAGER_ROLE")
-            )
-        );
-        won.deposit(50 ether);
-        vm.stopPrank();
-    }
-
-    /// @notice M3 (#25): a granted liquidity manager can deposit normally.
-    function test_DepositSucceedsWithLiquidityManagerRole() public {
-        bytes32 lmRole = won.LIQUIDITY_MANAGER_ROLE();
-        vm.prank(admin);
-        won.grantRole(lmRole, bob);
-
+    /// @notice Issue 2: `deposit` is permissionless — any holder with ON + approval can wrap.
+    function test_DepositPermissionlessForAnyCaller() public {
         vm.prank(alice);
         on.transfer(bob, 50 ether);
         vm.startPrank(bob);
         on.approve(address(won), 50 ether);
         won.deposit(50 ether);
         vm.stopPrank();
-
         assertEq(won.balanceOf(bob), 50 ether);
         assertEq(on.balanceOf(address(won)), 50 ether);
-    }
-
-    /// @notice M3 (#25): the constructor seeds LIQUIDITY_MANAGER_ROLE to the bootstrap admin,
-    ///         and DEFAULT_ADMIN_ROLE is its role admin so the admin can manage it.
-    function test_ConstructorGrantsLiquidityManagerRoleToAdmin() public view {
-        assertTrue(won.hasRole(won.LIQUIDITY_MANAGER_ROLE(), admin));
-        assertEq(won.getRoleAdmin(won.LIQUIDITY_MANAGER_ROLE()), won.DEFAULT_ADMIN_ROLE());
-    }
-
-    /// @notice M3 (#25): admin can revoke the role, after which deposit is rejected again.
-    function test_AdminCanRevokeLiquidityManagerRole() public {
-        bytes32 lmRole = won.LIQUIDITY_MANAGER_ROLE();
-        vm.prank(admin);
-        won.revokeRole(lmRole, alice);
-
-        vm.startPrank(alice);
-        on.approve(address(won), 10 ether);
-        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, lmRole));
-        won.deposit(10 ether);
-        vm.stopPrank();
     }
 
     function test_WithdrawEmitsUnwrapped() public {
@@ -362,12 +313,15 @@ contract WrappedONTest is Test {
         won.deposit(100 ether);
         vm.stopPrank();
 
-        // CCIP-mint 50
+        // CCIP-mint 50 — reserve (100) >= amount (50), so auto-unwrap fires:
+        // native ON is delivered to bob, no wON minted, reserve shrinks by 50.
         vm.prank(pool);
         won.mint(bob, 50 ether);
 
-        assertEq(won.totalSupply(), 150 ether, "totalSupply = wrap + ccip");
-        assertEq(on.balanceOf(address(won)), 100 ether, "reserve only tracks wrap deposits");
+        // totalSupply = only alice's deposit-backed wON (auto-unwrap mints 0 wON).
+        assertEq(won.totalSupply(), 100 ether, "totalSupply = only deposit-backed wON (auto-unwrap mints 0)");
+        assertEq(on.balanceOf(address(won)), 50 ether, "reserve drained by auto-unwrap");
+        assertEq(on.balanceOf(bob), 50 ether, "bob received native ON via auto-unwrap");
     }
 
     // ─── Role gating ──────────────────────────────────────────────────────────
@@ -895,11 +849,6 @@ contract WrappedONTest is Test {
         ReentrantMockON rOn = new ReentrantMockON();
         WrappedON rWon = new WrappedON(IERC20(address(rOn)), admin);
         rOn.setTarget(address(rWon));
-        // M3 (#25): outer depositor is address(this); grant it the liquidity role. The inner
-        // reentry hits `nonReentrant` (applied before `onlyRole`) and reverts regardless.
-        bytes32 lmRole = rWon.LIQUIDITY_MANAGER_ROLE();
-        vm.prank(admin);
-        rWon.grantRole(lmRole, address(this));
 
         // Mock token mints supply to test contract; approve from here as the depositor.
         rOn.approve(address(rWon), 10 ether);
@@ -925,12 +874,6 @@ contract WrappedONTest is Test {
         ReentrantWithdrawMockON rOn = new ReentrantWithdrawMockON();
         WrappedON rWon = new WrappedON(IERC20(address(rOn)), admin);
 
-        // M3 (#25): alice is the depositor; grant her LIQUIDITY_MANAGER_ROLE on the fresh wON.
-        // Cache the role constant so `vm.prank(admin)` applies to `grantRole`, not to the
-        // intervening `LIQUIDITY_MANAGER_ROLE()` view call.
-        bytes32 lmRole = rWon.LIQUIDITY_MANAGER_ROLE();
-        vm.prank(admin);
-        rWon.grantRole(lmRole, alice);
         // Fund alice with rON BEFORE arming the reentrancy so this transfer doesn't trip it.
         rOn.transfer(alice, 1000 ether);
 
@@ -1060,6 +1003,82 @@ contract WrappedONTest is Test {
         assertEq(on.balanceOf(address(won)), reserveBefore, "reserve back to baseline");
         assertEq(on.balanceOf(alice), aliceONBefore, "alice ON balance restored");
         assertEq(won.totalSupply(), 0);
+    }
+
+    // ─── Auto-unwrap (Issue 1) ────────────────────────────────────────────────
+
+    /// @notice Issue 1: reserve fully covers the CCIP arrival → mint() delivers native ON,
+    ///         mints 0 wON, leaves the cap counter untouched.
+    function test_MintAutoUnwrapsWhenReserveCovers() public {
+        vm.startPrank(alice);
+        on.approve(address(won), 100 ether);
+        won.deposit(100 ether); // reserve = 100 ON, alice holds 100 wON
+        vm.stopPrank();
+
+        uint256 bobOnBefore = on.balanceOf(bob);
+        uint256 supplyBefore = won.totalSupply();
+
+        vm.expectEmit(true, false, false, true);
+        emit WrappedON.CCIPAutoUnwrapped(bob, 40 ether);
+        vm.prank(pool);
+        won.mint(bob, 40 ether);
+
+        assertEq(on.balanceOf(bob), bobOnBefore + 40 ether, "bob got native ON");
+        assertEq(won.balanceOf(bob), 0, "no wON minted to bob");
+        assertEq(won.totalSupply(), supplyBefore, "totalSupply unchanged");
+        assertEq(won.ccipMintHeadroomUsed(), 0, "cap counter untouched");
+        assertEq(on.balanceOf(address(won)), 60 ether, "reserve drained by 40");
+    }
+
+    /// @notice Issue 1: boundary — reserve == amount → full auto-unwrap.
+    function test_MintAutoUnwrapsAtExactReserve() public {
+        vm.startPrank(alice);
+        on.approve(address(won), 50 ether);
+        won.deposit(50 ether);
+        vm.stopPrank();
+
+        vm.prank(pool);
+        won.mint(bob, 50 ether);
+
+        assertEq(on.balanceOf(bob), 50 ether, "exact reserve delivered as ON");
+        assertEq(won.balanceOf(bob), 0);
+        assertEq(won.totalSupply(), 50 ether, "only alice's deposit-wON exists");
+        assertEq(won.ccipMintHeadroomUsed(), 0);
+    }
+
+    /// @notice Issue 1: reserve < amount → falls back to minting wON (all-or-nothing).
+    function test_MintMintsWonWhenReserveInsufficient() public {
+        vm.startPrank(alice);
+        on.approve(address(won), 30 ether);
+        won.deposit(30 ether);
+        vm.stopPrank();
+
+        vm.expectEmit(true, false, false, true);
+        emit WrappedON.CCIPMinted(bob, 100 ether, 100 ether);
+        vm.prank(pool);
+        won.mint(bob, 100 ether);
+
+        assertEq(won.balanceOf(bob), 100 ether, "wON minted (no partial unwrap)");
+        assertEq(on.balanceOf(bob), 0, "no ON delivered");
+        assertEq(on.balanceOf(address(won)), 30 ether, "reserve untouched");
+        assertEq(won.ccipMintHeadroomUsed(), 100 ether, "cap counter incremented");
+    }
+
+    /// @notice Reserve one wei below the amount → no auto-unwrap, wON minted.
+    function test_MintMintsWonWhenReserveOneWeiShort() public {
+        uint256 amount = 100 ether;
+        vm.startPrank(alice);
+        on.approve(address(won), amount - 1);
+        won.deposit(amount - 1);
+        vm.stopPrank();
+
+        vm.prank(pool);
+        won.mint(bob, amount);
+
+        assertEq(won.balanceOf(bob), amount, "wON minted (reserve 1 wei short)");
+        assertEq(on.balanceOf(bob), 0, "no ON delivered");
+        assertEq(on.balanceOf(address(won)), amount - 1, "reserve untouched");
+        assertEq(won.ccipMintHeadroomUsed(), amount, "cap incremented");
     }
 
     /// @notice CCIP mint up to the cap succeeds; one wei over reverts. Boundary fuzz around

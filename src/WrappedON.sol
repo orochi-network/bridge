@@ -67,13 +67,6 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
 
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
-    /// @notice Gates `deposit` (the wrap path). SECURITY: M3 (#25) — `deposit` is the
-    ///         protocol-managed reserve seed, NOT a public arbitrage layer; an uncapped
-    ///         permissionless wrap could grow wON supply (and ETH→BSC redemption demand)
-    ///         past the BSC liquidity / rate limits a launch was sized for. `DEFAULT_ADMIN_ROLE`
-    ///         is the role admin (OZ default), so the admin (deployer, then multisig) grants
-    ///         it to whoever manages the reserve. Granted to the bootstrap `admin` at deploy.
-    bytes32 public constant LIQUIDITY_MANAGER_ROLE = keccak256("LIQUIDITY_MANAGER_ROLE");
 
     /// @notice Cap on `ccipMintHeadroomUsed`. Matches canonical BSC ON supply — the upper bound
     ///         on ON that can ever be locked on the BSC pool.
@@ -114,6 +107,9 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     ///         a named event in addition to the inherited ERC20 `Transfer(account, 0, amount)`.
     ///         SECURITY: WON-4.
     event CCIPBurned(address indexed account, uint256 amount, uint256 ccipMintHeadroomUsed);
+    /// @notice Emitted by `mint` when the wrap reserve fully covers a CCIP arrival and native
+    ///         ON is delivered instead of minting wON (issue #1). Mints 0 wON; cap untouched.
+    event CCIPAutoUnwrapped(address indexed account, uint256 amount);
     event CCIPAdminTransferProposed(address indexed currentAdmin, address indexed proposed);
     event CCIPAdminTransferred(address indexed previousAdmin, address indexed newAdmin);
     /// @notice Emitted when an in-flight `setCCIPAdmin` proposal is overwritten by a new
@@ -152,29 +148,19 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         }
         ON = onToken;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
-        // M3 (#25): seed the reserve manager. Admin can re-delegate / revoke; the multisig
-        // takes it over at handoff (script 06) and the deployer renounces it on renounce.
-        _grantRole(LIQUIDITY_MANAGER_ROLE, admin);
         s_ccipAdmin = admin;
         emit CCIPAdminTransferred(address(0), admin);
     }
 
     // ─── Wrap / Unwrap (1:1 against native ON) ────────────────────────────────
 
-    /// @notice Pulls `amount` ON and mints wON to `msg.sender` (1:1).
+    /// @notice Pulls `amount` ON and mints wON to `msg.sender` (1:1). Permissionless.
     /// @dev Received-amount accounting keeps the wrap exact under fee-on-transfer variants
     ///      (defensive; canonical ON is plain ERC20). `nonReentrant` guards against future
     ///      hook-bearing tokens. Uncapped — bounded by ETH-side ON supply; independent of
     ///      `MAX_CCIP_MINTED` so heavy wrap usage can't starve inbound CCIP.
-    /// @dev WON-14: also rejects `received == 0` after the transfer. A 100%-fee or buggy
-    ///      ERC20 whose `transferFrom` returned `true` without actually moving anything
-    ///      would otherwise let a `deposit(N)` call mint 0 wON and emit `Wrapped(_, 0)`.
-    ///      Canonical ON cannot hit this, but the received-amount guard is what mints the
-    ///      defensive accounting; rejecting `received == 0` matches the WON-1 mint guard.
-    /// @dev M3 (#25): `onlyRole(LIQUIDITY_MANAGER_ROLE)`. The wrap path is the protocol-managed
-    ///      reserve, not a public arbitrage layer — restricting it bounds wON supply growth
-    ///      (and ETH→BSC redemption demand) to what the launch liquidity / rate limits support.
-    function deposit(uint256 amount) external nonReentrant onlyRole(LIQUIDITY_MANAGER_ROLE) {
+    /// @dev WON-14: also rejects `received == 0` after the transfer (see existing rationale).
+    function deposit(uint256 amount) external nonReentrant {
         if (amount == 0) {
             revert ZeroAmount();
         }
@@ -212,7 +198,13 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     // ─── IBurnMintERC20 (pool-only) ───────────────────────────────────────────
 
     /// @notice CCIP `BurnMintTokenPool.releaseOrMint` entrypoint.
-    /// @dev Capped at `MAX_CCIP_MINTED` via `ccipMintHeadroomUsed`. See the contract-level
+    /// @dev Auto-unwrap (issue #1, all-or-nothing): when the wrap reserve fully covers this
+    ///      CCIP arrival, native ON is delivered to `account` and 0 wON is minted — the cap
+    ///      counter stays untouched because nothing is minted. The safety invariant holds
+    ///      because BSC lock += amount and reserve -= amount net out. A compromised pool can
+    ///      thus also drain the reserve — see SECURITY.
+    ///      Otherwise, falls through to cap-checked wON mint as before.
+    ///      Capped at `MAX_CCIP_MINTED` via `ccipMintHeadroomUsed`. See the contract-level
     ///      CAP REPLENISHMENT block (CCIP-7) for the cycling-refill semantics — the cap
     ///      is a live BSC-balance approximation, not a lifetime CCIP-mint ceiling.
     ///      WON-17: `nonReentrant` is defensive — OZ 5.x ERC20 has no hooks, so re-entry
@@ -224,6 +216,16 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         // SECURITY: WON-1.
         if (amount == 0) {
             revert ZeroAmount();
+        }
+        // Auto-unwrap (issue #1, all-or-nothing): if the wrap reserve fully covers this CCIP
+        // arrival, deliver native ON and mint 0 wON. The cap counter is untouched (nothing
+        // minted); the safety invariant holds because BSC lock += amount and reserve -= amount
+        // net out. A compromised pool can thus also drain the reserve — see SECURITY.
+        uint256 reserve = ON.balanceOf(address(this));
+        if (reserve >= amount) {
+            ON.safeTransfer(account, amount);
+            emit CCIPAutoUnwrapped(account, amount);
+            return;
         }
         uint256 wouldBe = ccipMintHeadroomUsed + amount;
         if (wouldBe > MAX_CCIP_MINTED) {

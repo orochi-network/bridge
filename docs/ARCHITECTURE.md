@@ -46,10 +46,9 @@ Two chains, one canonical asset family:
   this repo deploys. CCIP-bridged value lives as wON.
 - **BSC side** uses a **lock/release** pool against the **existing** ON token.
   Outbound transfers lock ON in the pool; inbound transfers release it.
-- **wON** is also a 1:1 wrapper around native ETH-side ON: a `LIQUIDITY_MANAGER_ROLE`
-  holder can `deposit` ON to mint wON (M3 / #25 — the reserve is protocol-managed,
-  not a public wrap), and anyone holding wON can `withdraw` to redeem (subject to
-  reserve availability).
+- **wON** is also a 1:1 wrapper around native ETH-side ON: anyone can `deposit` ON to
+  mint wON 1:1 (permissionless), and anyone holding wON can `withdraw` to redeem
+  (subject to reserve availability).
 
 This is **not a generic message bridge** — it transfers only tokens. There is no
 arbitrary cross-chain calldata routed through this repo.
@@ -153,8 +152,7 @@ pool's `staticcall`-based interface probes succeed.
 
 | Role | Held by | Purpose |
 |---|---|---|
-| `DEFAULT_ADMIN_ROLE` | deployer → multisig (handoff) | OZ AccessControl admin. Can grant/revoke `MINTER_ROLE` / `BURNER_ROLE` / `LIQUIDITY_MANAGER_ROLE`. |
-| `LIQUIDITY_MANAGER_ROLE` | deployer → multisig (handoff) | Gates `deposit` (the reserve wrap path). M3 (#25). Role admin is `DEFAULT_ADMIN_ROLE`. |
+| `DEFAULT_ADMIN_ROLE` | deployer → multisig (handoff) | OZ AccessControl admin. Can grant/revoke `MINTER_ROLE` / `BURNER_ROLE`. |
 | `MINTER_ROLE` | Ethereum `BurnMintTokenPool` only | CCIP inbound — calls `mint(account, amount)`. |
 | `BURNER_ROLE` | Ethereum `BurnMintTokenPool` only | CCIP outbound — calls one of three `burn` overloads. |
 | (logical) `s_ccipAdmin` | deployer → multisig (separate two-step) | Independent of `DEFAULT_ADMIN_ROLE`. Read by registry. |
@@ -163,9 +161,9 @@ pool's `staticcall`-based interface probes succeed.
 
 | Function | Caller | Effect |
 |---|---|---|
-| `deposit(amount)` | `LIQUIDITY_MANAGER_ROLE` | Pulls ON, mints wON 1:1. Received-amount accounting. `nonReentrant`. Uncapped in amount, role-gated (M3 / #25). |
+| `deposit(amount)` | anyone | Pulls ON, mints wON 1:1. Received-amount accounting. `nonReentrant`. Permissionless and uncapped. |
 | `withdraw(amount)` | anyone | Burns wON, returns ON from reserve. Reverts on `InsufficientReserve`. `nonReentrant`. |
-| `mint(account, amount)` | `MINTER_ROLE` (pool) | CCIP-inbound mint. Increments `ccipMintHeadroomUsed` and reverts if cap exceeded. Emits `CCIPMinted`. |
+| `mint(account, amount)` | `MINTER_ROLE` (pool) | CCIP-inbound mint. Auto-unwraps to native ON when reserve covers the amount (emits `CCIPAutoUnwrapped`, cap untouched); otherwise increments `ccipMintHeadroomUsed` and reverts if cap exceeded (emits `CCIPMinted`). |
 | `burn(amount)` / `burn(account, amount)` / `burnFrom(account, amount)` | `BURNER_ROLE` (pool) | CCIP-outbound burn. Saturating-decrements `ccipMintHeadroomUsed`. Emits `CCIPBurned`. |
 | `setCCIPAdmin(addr)` / `acceptCCIPAdmin()` | current / pending admin | Two-step CCIP admin rotation. |
 | `getCCIPAdmin()` / `pendingCCIPAdmin()` | view | Registry probes + handoff verification. |
@@ -253,12 +251,14 @@ contract while:
 
 Both mint paths produce **fungible** wON. They are backed differently:
 
-- **`deposit(amount)`** — a `LIQUIDITY_MANAGER_ROLE` holder pulls native ETH ON;
-  wON minted is backed by ON held in the wON contract's own reserve. Role-gated
-  (M3 / #25 — protocol-managed reserve, not a public wrap), uncapped in amount,
+- **`deposit(amount)`** — anyone pulls native ETH ON; wON minted is backed by ON
+  held in the wON contract's own reserve. Permissionless, uncapped in amount,
   independent of CCIP.
 - **`mint(...)`** — the Ethereum `BurnMintTokenPool` calls this on inbound CCIP
-  messages. Backed by ON locked on the BSC `LockReleaseTokenPool`.
+  messages. Backed by ON locked on the BSC `LockReleaseTokenPool`. **Auto-unwrap**:
+  when `ON.balanceOf(wON) >= amount` the call delivers native ON directly to the
+  receiver and mints 0 wON (emits `CCIPAutoUnwrapped`); the cap counter is untouched.
+  Otherwise, mints wON and increments `ccipMintHeadroomUsed` as normal.
 
 ### 4.3 Invariants
 
@@ -343,9 +343,13 @@ user                wON contract             ON token
 8. ETH_OffRamp → BurnMintTokenPool.releaseOrMint(receiver, amount, src, ...)
                 ─ checks inbound rate limiter
                 ─ calls wON.mint(receiver, amount)
-                ─ wON checks ccipMintHeadroomUsed + amount ≤ MAX_CCIP_MINTED
-                ─ emits CCIPMinted
-9. receiver holds `amount` wON on Ethereum
+                ─ AUTO-UNWRAP (if ON.balanceOf(wON) >= amount):
+                    ─ transfers `amount` native ON to receiver
+                    ─ emits CCIPAutoUnwrapped; cap counter untouched; returns
+                ─ OTHERWISE:
+                    ─ wON checks ccipMintHeadroomUsed + amount ≤ MAX_CCIP_MINTED
+                    ─ mints wON to receiver; emits CCIPMinted
+9. receiver holds `amount` native ON (auto-unwrap path) or `amount` wON (mint path)
 ```
 
 ### 5.3 Outbound: Ethereum → BSC
@@ -461,7 +465,7 @@ ETH BurnMintTokenPool         wON contract             BSC LockReleaseTokenPool
 |---|---|---|---|
 | ETH `BurnMintTokenPool.owner` | deployer | multisig | Two-step `transferOwnership` / `acceptOwnership` |
 | BSC `LockReleaseTokenPool.owner` | deployer | multisig | Two-step `transferOwnership` / `acceptOwnership` |
-| `wON.DEFAULT_ADMIN_ROLE` | deployer | multisig + deployer renounces | Grant to multisig, then `renounceRole` (preconditioned on multisig having accepted) |
+| `wON.DEFAULT_ADMIN_ROLE` | deployer | multisig + deployer renounces | Grant to multisig, then `renounceRole` (preconditioned on multisig having accepted). No `LIQUIDITY_MANAGER_ROLE` exists — `deposit` is permissionless. |
 | `wON.MINTER_ROLE` / `BURNER_ROLE` | none → ETH pool (script 03) | ETH pool | Granted once at deploy; never moves |
 | `wON.s_ccipAdmin` | deployer (set in ctor) | multisig | Two-step `setCCIPAdmin` / `acceptCCIPAdmin` |
 | `TokenAdminRegistry.administrator(token)` (per chain) | deployer | multisig | Two-step `transferAdminRole` / `acceptAdminRole` |

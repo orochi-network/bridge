@@ -148,6 +148,45 @@ contract Fork_ETH is Test {
         assertEq(won.totalSupply(), amount);
     }
 
+    /// @notice Issue #1 (fork): when the wON wrap reserve covers a BSC→ETH arrival,
+    ///         `mint` auto-unwraps — the receiver gets native ON, 0 wON is minted, and
+    ///         totalSupply is unchanged.
+    ///
+    ///         The reserve is seeded via `deal` (no approve/deposit needed in a fork test).
+    ///         The ReleaseOrMintInV1 struct is identical to `test_Fork_ETH_BscToEth_Mint`
+    ///         except `receiver` is a fresh address.
+    function test_Fork_ETH_BscToEth_AutoUnwrap() public {
+        uint256 amount = 1000 ether;
+
+        // Seed the wrap reserve with native ON so `mint` will auto-unwrap.
+        deal(ON_ETH, address(won), amount);
+
+        uint256 supplyBefore = won.totalSupply();
+        address rcv = makeAddr("autoUnwrapReceiver");
+
+        address bscToEthOffRamp = _findOffRamp(ETH_ROUTER, BSC_SELECTOR);
+
+        Pool.ReleaseOrMintInV1 memory in1 = Pool.ReleaseOrMintInV1({
+            originalSender: abi.encode(rcv),
+            remoteChainSelector: BSC_SELECTOR,
+            receiver: rcv,
+            sourceDenominatedAmount: amount,
+            localToken: address(won),
+            sourcePoolAddress: abi.encode(fakeRemoteBscPool),
+            sourcePoolData: "",
+            offchainTokenData: ""
+        });
+
+        vm.prank(bscToEthOffRamp);
+        Pool.ReleaseOrMintOutV1 memory out = ethPool.releaseOrMint(in1);
+
+        assertEq(out.destinationAmount, amount, "destinationAmount");
+        assertEq(IERC20(ON_ETH).balanceOf(rcv), amount, "receiver got native ON");
+        assertEq(won.balanceOf(rcv), 0, "no wON minted to receiver");
+        assertEq(won.totalSupply(), supplyBefore, "totalSupply unchanged (auto-unwrap)");
+        assertEq(won.ccipMintHeadroomUsed(), 0, "cap untouched");
+    }
+
     // ─── Bridge direction 2: ETH → BSC (OnRamp burns wON) ───────────────────────
 
     function test_Fork_ETH_EthToBsc_Burn() public {

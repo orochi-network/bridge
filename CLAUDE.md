@@ -8,7 +8,7 @@ A Foundry project implementing a **Chainlink CCIP Cross-Chain Token (CCT) bridge
 
 - **BSC side**: stock `LockReleaseTokenPool` against the existing ON token. CCIP 1.6.1 removed the `acceptLiquidity` ctor flag; `provideLiquidity`/`withdrawLiquidity` are gated on `msg.sender == s_rebalancer`, so deploying with **no rebalancer set** keeps them disabled (same launch posture as the old `acceptLiquidity = false`). The operator multisig takes custody of the reserve via `setRebalancer` → `withdrawLiquidity` (Chainlink CCT trust model — see [Trust model](#trust-model-bsc-reserve-custody)).
 - **Ethereum side**: stock `BurnMintTokenPool` against a new **wON** token (this repo's only custom contract). The CCIP `mint` path is bounded by `MAX_CCIP_MINTED = 100M` (tracked via `ccipMintHeadroomUsed`); `deposit` is uncapped and bounded naturally by ETH-side ON supply.
-- **wON** is also a 1:1 wrapper holding a reserve of native ETH-side ON. `deposit` mints wON 1:1 against deposited ON (received-amount accounting, `nonReentrant`); `withdraw` burns wON and returns ON when the reserve allows.
+- **wON** is also a 1:1 wrapper holding a reserve of native ETH-side ON. `deposit` mints wON 1:1 against deposited ON (received-amount accounting, `nonReentrant`); `withdraw` burns wON and returns ON when the reserve allows. On BSC→ETH arrivals, `mint` auto-unwraps — delivers native ON when the reserve covers the amount (all-or-nothing), else mints wON.
 
 ## Token addresses (canonical)
 
@@ -32,7 +32,7 @@ A Foundry project implementing a **Chainlink CCIP Cross-Chain Token (CCT) bridge
 - **Use stock Chainlink contracts** for `BurnMintTokenPool` and `LockReleaseTokenPool`. Do NOT subclass — extra inheritance increases audit surface for zero functional gain. Subclassing was considered and rejected; the Chainlink trust model is documented instead.
 - **Only one custom contract**: `src/WrappedON.sol`. Keep it small. New custom contracts require justification.
 - **Decimals**: ON and wON are both 18. CCIP 1.6.1 pool constructors take `uint8 localTokenDecimals` (validated against `token.decimals()`); both pools are deployed with `18`. Off-chain registration in the CCIP directory records 18/18 for both.
-- **Roles on wON**: `MINTER_ROLE` and `BURNER_ROLE` go ONLY to the `BurnMintTokenPool` on Ethereum. `LIQUIDITY_MANAGER_ROLE` gates `deposit` (the reserve wrap path — SECURITY M3 / #25): granted to the deployer at construction so it can seed the reserve, granted to the multisig at handoff (script 06), and renounced by the deployer on renounce. `DEFAULT_ADMIN_ROLE` (its role admin) starts on deployer, then transfers to the ops multisig after wiring.
+- **Roles on wON**: `MINTER_ROLE` and `BURNER_ROLE` go ONLY to the `BurnMintTokenPool` on Ethereum. `DEFAULT_ADMIN_ROLE` starts on deployer, then transfers to the ops multisig after wiring. There is no `LIQUIDITY_MANAGER_ROLE` — `deposit` is permissionless (SECURITY M3 / #25 REVERSED 2026-06-23 by product decision).
 - **CCIP admin handoff is two-step**: `setCCIPAdmin(addr)` proposes; the proposed address must call `acceptCCIPAdmin()` to take effect. The proposal target is validated on-chain — rejects `address(0)` (`ZeroAddress`), self-proposal `newAdmin == s_ccipAdmin`, and `newAdmin == address(this)` (both via `InvalidCCIPAdmin`) — so scripts can't accidentally clobber an in-flight pending or write an unreachable address. Same handoff shape for `Ownable` ownership on pools and `TokenAdminRegistry` admin roles.
 - **No upgrades**: contracts are non-upgradeable by design. Migration path = redeploy + re-register in `TokenAdminRegistry` + `applyChainUpdates`.
 
@@ -40,12 +40,12 @@ A Foundry project implementing a **Chainlink CCIP Cross-Chain Token (CCT) bridge
 
 There are TWO mint paths for wON; both produce identical fungible tokens but back differently:
 
-1. `deposit(amount)` — a `LIQUIDITY_MANAGER_ROLE` holder pulls native ETH ON; wON minted is backed by ON held in this contract's reserve. **Role-gated (M3 / #25)** — the wrap path is the protocol-managed reserve, not a public arbitrage layer, so wON supply growth (and ETH→BSC redemption demand) stays within the sized launch liquidity / rate limits.
-2. `mint(...)` — CCIP pool mints when value arrives from BSC; backing is ON locked on the BSC `LockReleaseTokenPool`.
+1. `deposit(amount)` — anyone pulls native ETH ON and receives wON 1:1; wON minted is backed by ON held in this contract's reserve. **Permissionless and uncapped** — wON supply growth (and ETH→BSC redemption demand) is bounded only by ETH-side ON supply and the CCIP pool rate limits.
+2. `mint(...)` — CCIP pool mints when value arrives from BSC; backing is ON locked on the BSC `LockReleaseTokenPool`. **Auto-unwrap**: when `ON.balanceOf(wON) >= amount` it delivers native ON to the receiver (all-or-nothing) and mints 0 wON, leaving `ccipMintHeadroomUsed` untouched; otherwise mints wON as normal. Emits `CCIPAutoUnwrapped(account, amount)` on the unwrap path.
 
 Conceptual invariant (NOT tracked as on-chain state — `wrapBackedSupply` is a term, not a storage variable): `{wON minted via deposit and still circulating} <= ON.balanceOf(WrappedON)`. Enforcement is via `withdraw` reverting when `ON.balanceOf(this) < amount`, plus the received-amount accounting in `deposit` that adds to the reserve and `totalSupply` in lockstep. CCIP-bridged users who want native ETH ON depend on someone else having wrapped — this is an arbitrage layer, not a guaranteed redemption.
 
-**CCIP mint cap**: `WrappedON.MAX_CCIP_MINTED = 100_000_000 ether` bounds `ccipMintHeadroomUsed` — the counter incremented in `mint(...)` and saturating-decremented in every burn entrypoint. `mint` reverts `CCIPMintCapExceeded(cap, wouldBe)` when `ccipMintHeadroomUsed + amount` would exceed the cap; `deposit` is uncapped in amount but `LIQUIDITY_MANAGER_ROLE`-gated (M3 / #25) and independent of `MAX_CCIP_MINTED`, so heavy wrap usage cannot starve inbound CCIP messages. The cap matches the canonical ON supply on BSC, which is the absolute upper bound on what the bridge can ever reflect onto Ethereum. The counter is a BSC-pool-balance approximation, not a circulating-CCIP-minted accounting.
+**CCIP mint cap**: `WrappedON.MAX_CCIP_MINTED = 100_000_000 ether` bounds `ccipMintHeadroomUsed` — the counter incremented in `mint(...)` and saturating-decremented in every burn entrypoint. `mint` reverts `CCIPMintCapExceeded(cap, wouldBe)` when `ccipMintHeadroomUsed + amount` would exceed the cap; `deposit` is permissionless, uncapped, and independent of `MAX_CCIP_MINTED`, so heavy wrap usage cannot starve inbound CCIP messages. The cap matches the canonical ON supply on BSC, which is the absolute upper bound on what the bridge can ever reflect onto Ethereum. The counter is a BSC-pool-balance approximation, not a circulating-CCIP-minted accounting. Note: when the reserve covers a BSC→ETH arrival, `mint` auto-unwraps by transferring ON directly — the cap counter is not incremented on that path.
 
 ## Trust model: BSC reserve custody
 
@@ -75,7 +75,7 @@ test/Script06Renounce.t.sol       renounce precondition assertions
 test/Script07Preflight.t.sol      rate-limit preflight checks
 test/Script08Verify.t.sol         post-deploy verification coverage
 test/mocks/                       MockRouter, MockRMN
-test/fork/Fork_ETH.t.sol          ETH mainnet fork — deploy + registry + bridge simulation (4)
+test/fork/Fork_ETH.t.sol          ETH mainnet fork — deploy + registry + bridge simulation (5)
 test/fork/Fork_BSC.t.sol          BSC mainnet fork — token ownership probe + pool + bridge sim (4)
 test/fork/Fork_Bridge.t.sol       dual-fork full roundtrip BSC→ETH→BSC against live CCIP (1)
 deployments/<chainId>.json        written by scripts via vm.writeJson
@@ -86,10 +86,10 @@ deployments/<chainId>.json        written by scripts via vm.writeJson
 Everything goes through the `Makefile`. The full sequence is documented in `RUNBOOK.md`. Key targets:
 
 - `make install`               — submodule init + patch-pragmas (one-time after clone).
-- `make test`                  — full test suite, no fork: 130 tests total (126 unit/integration + 4 stateful invariants).
+- `make test`                  — full test suite, no fork: 139 tests total (135 unit/integration + 4 stateful invariants).
 - `make test-unit`             — WrappedON.t.sol unit tests only.
 - `make test-e2e`              — PoolRoundtrip + DeploymentE2E integration tests.
-- `make test-fork ETH_RPC=... BSC_RPC=...` — fork tests against live mainnet (9 tests).
+- `make test-fork ETH_RPC=... BSC_RPC=...` — fork tests against live mainnet (10 tests).
 - `make validate-config RPC=...` — live staticcall check that `Helper.sol` CCIP infra addresses are genuine on the target chain (script `ValidateConfig.s.sol`; pairs with the pure `precheck-helper`).
 - `make check-links`           — verify Chainlink `docs.chain.link` URLs in tracked sources still resolve (pre-release gate; not in PR CI — see RUNBOOK §0.5).
 - `make deploy-eth RPC=...`    — scripts 01→05 on the Ethereum side.
@@ -105,7 +105,7 @@ Everything goes through the `Makefile`. The full sequence is documented in `RUNB
 make install                                             # submodules + patch-pragmas
 forge build
 make test                                                # mock-based suite; fork tests self-skip when ETH_RPC/BSC_RPC unset
-make test-fork ETH_RPC=<url> BSC_RPC=<url>              # 9 mainnet fork tests
+make test-fork ETH_RPC=<url> BSC_RPC=<url>              # 10 mainnet fork tests
 make test-unit                                           # WrappedON.t.sol only
 make test-e2e                                            # PoolRoundtrip + DeploymentE2E only
 forge coverage --report summary
