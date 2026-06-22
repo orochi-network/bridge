@@ -107,6 +107,9 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     ///         a named event in addition to the inherited ERC20 `Transfer(account, 0, amount)`.
     ///         SECURITY: WON-4.
     event CCIPBurned(address indexed account, uint256 amount, uint256 ccipMintHeadroomUsed);
+    /// @notice Emitted by `mint` when the wrap reserve fully covers a CCIP arrival and native
+    ///         ON is delivered instead of minting wON (issue #1). Mints 0 wON; cap untouched.
+    event CCIPAutoUnwrapped(address indexed account, uint256 amount);
     event CCIPAdminTransferProposed(address indexed currentAdmin, address indexed proposed);
     event CCIPAdminTransferred(address indexed previousAdmin, address indexed newAdmin);
     /// @notice Emitted when an in-flight `setCCIPAdmin` proposal is overwritten by a new
@@ -195,7 +198,13 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
     // ─── IBurnMintERC20 (pool-only) ───────────────────────────────────────────
 
     /// @notice CCIP `BurnMintTokenPool.releaseOrMint` entrypoint.
-    /// @dev Capped at `MAX_CCIP_MINTED` via `ccipMintHeadroomUsed`. See the contract-level
+    /// @dev Auto-unwrap (issue #1, all-or-nothing): when the wrap reserve fully covers this
+    ///      CCIP arrival, native ON is delivered to `account` and 0 wON is minted — the cap
+    ///      counter stays untouched because nothing is minted. The safety invariant holds
+    ///      because BSC lock += amount and reserve -= amount net out. A compromised pool can
+    ///      thus also drain the reserve — see SECURITY.
+    ///      Otherwise, falls through to cap-checked wON mint as before.
+    ///      Capped at `MAX_CCIP_MINTED` via `ccipMintHeadroomUsed`. See the contract-level
     ///      CAP REPLENISHMENT block (CCIP-7) for the cycling-refill semantics — the cap
     ///      is a live BSC-balance approximation, not a lifetime CCIP-mint ceiling.
     ///      WON-17: `nonReentrant` is defensive — OZ 5.x ERC20 has no hooks, so re-entry
@@ -207,6 +216,16 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         // SECURITY: WON-1.
         if (amount == 0) {
             revert ZeroAmount();
+        }
+        // Auto-unwrap (issue #1, all-or-nothing): if the wrap reserve fully covers this CCIP
+        // arrival, deliver native ON and mint 0 wON. The cap counter is untouched (nothing
+        // minted); the safety invariant holds because BSC lock += amount and reserve -= amount
+        // net out. A compromised pool can thus also drain the reserve — see SECURITY.
+        uint256 reserve = ON.balanceOf(address(this));
+        if (reserve >= amount) {
+            ON.safeTransfer(account, amount);
+            emit CCIPAutoUnwrapped(account, amount);
+            return;
         }
         uint256 wouldBe = ccipMintHeadroomUsed + amount;
         if (wouldBe > MAX_CCIP_MINTED) {
