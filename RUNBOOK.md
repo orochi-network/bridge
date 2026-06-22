@@ -64,7 +64,7 @@ It prints each path and, with `DEPLOYER` set, reverts on the path-4 fallthrough 
 Use `cast call` to read each path's discriminator against the live BSC RPC and compare against the deployer EOA. This is purely read-only — no fork, no broadcast, no key needed. Script 04's path probes test whether **the broadcaster** is the admin holder, so the question to answer here is "would `$DEPLOYER_ADDR` match any of paths 1/2/3?" (an earlier draft of this section used `anvil --fork-url` with a well-known anvil pre-funded key, but the anvil key isn't `$DEPLOYER_ADDR`, so on a fork the script always fell through to path-4 regardless of which path the real deployer would have hit on mainnet — invalidating the mitigation goal):
 
 ```bash
-DEPLOYER_ADDR=0x<your deployer EOA, address derived from $DEPLOYER_PK>
+DEPLOYER_ADDR=$(cast wallet address --account deployer)   # your deployer EOA
 BSC_ON=0x0e4F6209eD984b21EDEA43acE6e09559eD051D48
 
 # Path 1 — does the token expose getCCIPAdmin() and does it return the deployer?
@@ -118,14 +118,13 @@ ETH_RPC=https://...
 SEPOLIA_RPC=https://...
 BSC_RPC=https://...
 BSC_TESTNET_RPC=https://...
-DEPLOYER_PK=0x...
 ETHERSCAN_API_KEY=...
 BSCSCAN_API_KEY=...
 ```
 
 Then `source .env`.
 
-**Key-handling note:** the Makefile passes `--private-key $(DEPLOYER_PK)` on the command line, which means the key is visible in `ps aux` and shell history while the broadcast is running. For mainnet broadcasts prefer Foundry's encrypted keystore (`cast wallet import deployer --interactive`, then run scripts with `--account deployer` instead of `--private-key`). The deployer EOA holds critical authority throughout the handoff window.
+**Key-handling note:** signing is via a Foundry encrypted keystore account, so no raw private key is ever passed on the CLI or stored in `.env`. Create the keystore once with `cast wallet import deployer --interactive`; the `make deploy-*` / `make update-limits` targets then sign with `--account deployer` (override with `ACCOUNT=<name>`) and forge prompts for the keystore password per broadcast. The deployer EOA holds critical authority throughout the handoff window.
 
 ### 0.4 Build & test locally
 
@@ -167,7 +166,7 @@ Before running the deploy targets on testnet, deploy a simple `MockERC20("Orochi
 # deploys are not bridge-funds-bearing.
 forge create test/mocks/MockON.sol:MockON \
     --rpc-url sepolia \
-    --private-key $DEPLOYER_PK \
+    --account deployer \
     --constructor-args "Orochi Network (Testnet)" "ON"
 # Take the printed Deployed-to address and patch `script/Helper.sol` so the
 # chainid 11_155_111 / 97 branch returns it under `onToken`. Then proceed to §1.1.
@@ -335,7 +334,7 @@ make update-limits RPC=eth \
     INBOUND_CAPACITY=200000000000000000000000 \
     INBOUND_RATE=20000000000000000
 
-# Post-handoff (delegated rateLimitAdmin via §4.1.1, or any non-DEPLOYER_PK key):
+# Post-handoff (delegated rateLimitAdmin via §4.1.1, or any account other than the deployer):
 CALLER_FLAGS='--account ratelimit-admin' \
 make update-limits RPC=eth \
     OUTBOUND_CAPACITY=200000000000000000000000 \
@@ -344,7 +343,7 @@ make update-limits RPC=eth \
     INBOUND_RATE=20000000000000000
 ```
 
-(All values in wei. Above = 200,000 cap, 0.02 ON/sec rate.) Caller must be the pool owner (the multisig) or the rate-limit admin. SECURITY: OPS-2 — `make update-limits` falls back to `DEPLOYER_PK` only when `CALLER_FLAGS` is unset; after handoff that key is unauthorised on the pool and the transaction would revert. Either set `CALLER_FLAGS` to a delegated credential (preferred) or queue the equivalent `setChainRateLimiterConfig` call from the multisig directly.
+(All values in wei. Above = 200,000 cap, 0.02 ON/sec rate.) Caller must be the pool owner (the multisig) or the rate-limit admin. SECURITY: OPS-2 — `make update-limits` falls back to the deployer keystore account (`--account deployer`) only when `CALLER_FLAGS` is unset; after handoff the deployer is unauthorised on the pool and the transaction would revert. Either set `CALLER_FLAGS` to a delegated credential (preferred) or queue the equivalent `setChainRateLimiterConfig` call from the multisig directly.
 
 **CCIP validation rules** (mirror these — the preflight in script 07 enforces them so a mid-broadcast revert is impossible):
 - `isEnabled = true` requires `rate > 0` AND `rate < capacity` (strict — `rate == capacity` is rejected).

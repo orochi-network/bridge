@@ -12,7 +12,7 @@ Do the **whole testnet pass first** (Sepolia ⇄ BSC Testnet) before touching ma
 - [x] `make validate-config RPC=eth` and `RPC=bsc` — live staticcall confirms the addresses are genuine CCIP contracts + the lane is real *(both OK 2026-06-14: Router 1.2.0, TokenAdminRegistry 1.5.0, RegistryModuleOwnerCustom 1.6.0, ARMProxy 1.0.0, LINK + 18-dec onToken; both lanes supported)*
 - [~] **BSC admin path** — `make validate-bsc-admin RPC=bsc`: **path-4 confirmed** 2026-06-14 (no `getCCIPAdmin`, `owner()==0`, no AccessControl) → script 04 **will revert**. CCIP-admin must be registered **out-of-band with Chainlink before the BSC deploy.** ⏳ Still owed: `DEPLOYER=0x<eoa>`-gated re-run at deploy time (§0.2, SECURITY `TEST-7`)
 - [ ] **BSC ON supply is fixed at 100M** with no live minter — the `MAX_CCIP_MINTED = 100M` cap depends on this (§0.2, `OPS-29`) *(not yet probed)*
-- [ ] `.env` filled and sourced; for mainnet prefer an encrypted keystore (`--account deployer`) over `--private-key` (§0.3) *(.env present + RPC vars load; keystore not yet set up)*
+- [ ] `.env` filled and sourced (RPC + Etherscan keys only — no raw private key); deployer keystore created via `cast wallet import deployer --interactive` so deploys sign with `--account deployer` (§0.3) *(.env present + RPC vars load; keystore not yet set up)*
 - [~] `make build` ✅ and non-fork tests ✅ (**141 green**) and `make fmt-check` ✅ (§0.4). ⚠️ Full `make test` shows **3 fork suites failing in `setUp`** (self-skip broken under forge 1.7.1) — tooling, not contract; see `issue.md`. Note: doc count 130 is stale → **141** non-fork
 - [x] `make check-links` — Chainlink doc URLs still resolve (release gate) (§0.5) *(7/7 OK 2026-06-14)*
 

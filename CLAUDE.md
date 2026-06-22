@@ -23,7 +23,7 @@ A Foundry project implementing a **Chainlink CCIP Cross-Chain Token (CCT) bridge
 
 ## Secrets handling
 
-**Never read `.env`, `.env.local`, or any `.env.*` file in this repo.** Don't `cat`, `Read`, `head`, `grep`, or otherwise dump their contents to stdout or into the conversation — they hold live RPC API keys and the deployer private key. If you need to know which variables exist, refer to `.env.example` (which only has placeholders). If a deployment script needs an env var, just invoke `forge script` and let the user/shell pass it in.
+**Never read `.env`, `.env.local`, or any `.env.*` file in this repo.** Don't `cat`, `Read`, `head`, `grep`, or otherwise dump their contents to stdout or into the conversation — they hold live RPC and block-explorer API keys. (The deployer key lives in an encrypted Foundry keystore, not in `.env` — signing is via `--account deployer`.) If you need to know which variables exist, refer to `.env.example` (which only has placeholders). If a deployment script needs an env var, just invoke `forge script` and let the user/shell pass it in.
 
 ## Conventions
 

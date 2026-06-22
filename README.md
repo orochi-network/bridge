@@ -74,14 +74,13 @@ ETH_RPC=...
 SEPOLIA_RPC=...
 BSC_RPC=...
 BSC_TESTNET_RPC=...
-DEPLOYER_PK=0x...
 ETHERSCAN_API_KEY=...
 BSCSCAN_API_KEY=...
 ```
 
 Then **edit `script/Helper.sol`** and replace the `address(0)` placeholders with the live CCIP infrastructure addresses for each chain you'll deploy on. Get them from the official [CCIP directory](https://docs.chain.link/ccip/directory). Scripts call `_requireSet` on every address they consume, so a missed placeholder fails fast with a `MissingAddress` revert before any broadcast.
 
-> **Mainnet key handling** (SECURITY: OPS-1). The default `make deploy-*` targets pass `--private-key $(DEPLOYER_PK)` on the CLI, which makes the key visible in `ps aux` and shell history. For mainnet broadcasts, use Foundry's encrypted keystore instead: `cast wallet import deployer --interactive`, then run forge scripts with `--account deployer` rather than `--private-key`. See `RUNBOOK.md §0.3` for the full procedure. Treat this as mandatory on mainnet; the deployer EOA holds critical authority throughout the handoff window.
+> **Key handling** (SECURITY: OPS-1). Signing is via a Foundry encrypted keystore account — no raw private key on the CLI or in `.env`. Create it once with `cast wallet import deployer --interactive`; the `make deploy-*` targets then sign with `--account deployer` (override with `ACCOUNT=<name>`) and forge prompts for the keystore password per broadcast. See `RUNBOOK.md §0.3` for the full procedure. The deployer EOA holds critical authority throughout the handoff window.
 
 ### 5. Deploy — testnet first (Sepolia ⇄ BSC Testnet)
 
@@ -177,8 +176,8 @@ The script pre-asserts that the multisig already holds `DEFAULT_ADMIN_ROLE` AND 
 - **Update rate limits** (multisig or delegated `rateLimitAdmin`):
   ```bash
   # Post-handoff, set CALLER_FLAGS to a Foundry credential authorised on the pool
-  # (e.g. an encrypted keystore for the delegated rateLimitAdmin). DEPLOYER_PK is no
-  # longer authorised once ownership has moved to the multisig.
+  # (e.g. another keystore account for the delegated rateLimitAdmin). The deployer
+  # keystore account is no longer authorised once ownership has moved to the multisig.
   CALLER_FLAGS='--account ratelimit-admin' \
   OUTBOUND_CAPACITY=200000000000000000000000 OUTBOUND_RATE=20000000000000000 \
   INBOUND_CAPACITY=200000000000000000000000  INBOUND_RATE=20000000000000000  \

@@ -105,7 +105,7 @@ run with `MULTISIG` unset/removed from forge's view.
 
 ## Tooling added this session
 
-- `Makefile`: `deploy-eth-keystore`, `deploy-bsc-keystore` targets (sign via `--account`, no `DEPLOYER_PK`).
+- `Makefile`: `deploy-eth` / `deploy-bsc` sign via `--account` (keystore-only); the raw `DEPLOYER_PK` / `--private-key` path was removed.
 - `complete-bsc-deployment.sh`: finishes BSC registration + wiring + verification once admin is granted.
 - `MAINNET_CHECKLIST.md`: pre-flight checklist (§0 verified 2026-06-14).
 - `issue.md`: fork-test self-skip regression under forge 1.7.1 (`make test` shows 3 fork-suite failures; 141 non-fork tests pass — tooling, not contract).

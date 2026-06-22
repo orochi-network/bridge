@@ -749,7 +749,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 
 ### OPS-1: Mainnet deployment via README leaks private key on `ps aux`
 - **Severity:** HIGH
-- **Status:** FIXED — README §4 now carries a "Mainnet key handling" callout pointing at the `cast wallet import` + `--account deployer` flow already documented in RUNBOOK §0.3. The Makefile retains the `--private-key` default for the testnet case (less risk, lower setup friction) but the README is now explicit that mainnet operators must switch.
+- **Status:** FIXED — the raw-key path was removed entirely: `DEPLOY_FLAGS` signs via `--account $(ACCOUNT)` (keystore, default `deployer`), `DEPLOYER_PK` is gone from `.env.example`, and the Makefile/README/RUNBOOK document keystore signing as the only path (`cast wallet import deployer --interactive` + `--account deployer`). No `--private-key` remains anywhere in the deploy tooling, so there is no longer a default that leaks the key on `ps aux`.
 - **Location:** `Makefile:6`, `README.md` (§4, §8)
 - **Description:** `DEPLOY_FLAGS` hardcodes `--private-key $(DEPLOYER_PK)`, putting the raw key in process arguments visible to any process on the host and recorded in shell history. RUNBOOK §0.3 recommends `cast wallet import` + `--account deployer` — README does not mention it.
 - **Impact:** An operator following README alone on mainnet exposes their key for the duration of the broadcast window.
@@ -757,7 +757,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 
 ### OPS-2: `make update-limits` post-handoff will revert — operator pays gas for nothing
 - **Severity:** HIGH
-- **Status:** FIXED — `make update-limits` now accepts `CALLER_FLAGS` (e.g. `CALLER_FLAGS='--account ratelimit-admin'`) for post-handoff callers. Falls back to `DEPLOYER_PK` when unset (pre-handoff path). The Makefile guard refuses to run when neither is provided.
+- **Status:** FIXED — `make update-limits` accepts `CALLER_FLAGS` (e.g. `CALLER_FLAGS='--account ratelimit-admin'`) for post-handoff callers, and falls back to the deployer keystore account (`--account $(ACCOUNT)`) pre-handoff. The raw `DEPLOYER_PK` fallback was removed (keystore-only), so the pre-handoff path no longer puts a key in process args either.
 - **Location:** `Makefile:144-151`, `README.md:173-178`, `RUNBOOK.md §4.1`
 - **Description:** `update-limits` expands `DEPLOY_FLAGS` (hardcoded `--private-key $(DEPLOYER_PK)`). After handoff, the deployer is neither pool owner nor rate-limit admin; the call reverts `onlyOwner`. The Makefile guard only checks that `DEPLOYER_PK` is *set*.
 - **Impact:** Operator broadcasts a revert-bound tx after handoff. The Makefile has no path for the multisig or a delegated `rateLimitAdmin` to make the call.
