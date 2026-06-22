@@ -184,6 +184,7 @@ contract Fork_ETH is Test {
         assertEq(IERC20(ON_ETH).balanceOf(rcv), amount, "receiver got native ON");
         assertEq(won.balanceOf(rcv), 0, "no wON minted to receiver");
         assertEq(won.totalSupply(), supplyBefore, "totalSupply unchanged (auto-unwrap)");
+        assertEq(won.ccipMintHeadroomUsed(), 0, "cap untouched");
     }
 
     // ─── Bridge direction 2: ETH → BSC (OnRamp burns wON) ───────────────────────

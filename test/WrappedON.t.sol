@@ -1064,6 +1064,23 @@ contract WrappedONTest is Test {
         assertEq(won.ccipMintHeadroomUsed(), 100 ether, "cap counter incremented");
     }
 
+    /// @notice Reserve one wei below the amount → no auto-unwrap, wON minted.
+    function test_MintMintsWonWhenReserveOneWeiShort() public {
+        uint256 amount = 100 ether;
+        vm.startPrank(alice);
+        on.approve(address(won), amount - 1);
+        won.deposit(amount - 1);
+        vm.stopPrank();
+
+        vm.prank(pool);
+        won.mint(bob, amount);
+
+        assertEq(won.balanceOf(bob), amount, "wON minted (reserve 1 wei short)");
+        assertEq(on.balanceOf(bob), 0, "no ON delivered");
+        assertEq(on.balanceOf(address(won)), amount - 1, "reserve untouched");
+        assertEq(won.ccipMintHeadroomUsed(), amount, "cap incremented");
+    }
+
     /// @notice CCIP mint up to the cap succeeds; one wei over reverts. Boundary fuzz around
     ///         `MAX_CCIP_MINTED` to catch off-by-one regressions.
     function testFuzz_CcipMintCapBoundary(uint128 underBy) public {

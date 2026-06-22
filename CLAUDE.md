@@ -8,7 +8,7 @@ A Foundry project implementing a **Chainlink CCIP Cross-Chain Token (CCT) bridge
 
 - **BSC side**: stock `LockReleaseTokenPool` against the existing ON token. CCIP 1.6.1 removed the `acceptLiquidity` ctor flag; `provideLiquidity`/`withdrawLiquidity` are gated on `msg.sender == s_rebalancer`, so deploying with **no rebalancer set** keeps them disabled (same launch posture as the old `acceptLiquidity = false`). The operator multisig takes custody of the reserve via `setRebalancer` → `withdrawLiquidity` (Chainlink CCT trust model — see [Trust model](#trust-model-bsc-reserve-custody)).
 - **Ethereum side**: stock `BurnMintTokenPool` against a new **wON** token (this repo's only custom contract). The CCIP `mint` path is bounded by `MAX_CCIP_MINTED = 100M` (tracked via `ccipMintHeadroomUsed`); `deposit` is uncapped and bounded naturally by ETH-side ON supply.
-- **wON** is also a 1:1 wrapper holding a reserve of native ETH-side ON. `deposit` mints wON 1:1 against deposited ON (received-amount accounting, `nonReentrant`); `withdraw` burns wON and returns ON when the reserve allows.
+- **wON** is also a 1:1 wrapper holding a reserve of native ETH-side ON. `deposit` mints wON 1:1 against deposited ON (received-amount accounting, `nonReentrant`); `withdraw` burns wON and returns ON when the reserve allows. On BSC→ETH arrivals, `mint` auto-unwraps — delivers native ON when the reserve covers the amount (all-or-nothing), else mints wON.
 
 ## Token addresses (canonical)
 
