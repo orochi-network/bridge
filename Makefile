@@ -1,9 +1,14 @@
 .PHONY: help install patch-pragmas build test test-unit test-e2e test-fork fmt fmt-check coverage clean check-links \
-        precheck-helper validate-config validate-bsc-admin deploy-eth deploy-eth-keystore deploy-bsc deploy-bsc-keystore verify-eth verify-bsc handoff handoff-all renounce update-limits
+        precheck-helper validate-config validate-bsc-admin deploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce update-limits
 
 # ─── Defaults ──────────────────────────────────────────────────────────────────
 SHELL := /bin/bash
-DEPLOY_FLAGS := --broadcast --verify --private-key $(DEPLOYER_PK)
+# Deploys are signed by a Foundry encrypted keystore account — no raw private key on the CLI
+# or in .env. ACCOUNT defaults to `deployer`; override with `make ... ACCOUNT=<name>`. forge
+# prompts for the keystore password per broadcast. Create one with:
+#   cast wallet import deployer --interactive
+ACCOUNT ?= deployer
+DEPLOY_FLAGS := --broadcast --verify --account $(ACCOUNT)
 
 help:
 	@echo "Common targets:"
@@ -21,7 +26,7 @@ help:
 	@echo "  make clean           remove cache/, out/, broadcast/"
 	@echo ""
 	@echo "Deployment (load .env first; values in capitals come from env):"
-	@echo "  ETH_RPC, BSC_RPC, SEPOLIA_RPC, BSC_TESTNET_RPC, DEPLOYER_PK, DEPLOYER, MULTISIG"
+	@echo "  ETH_RPC, BSC_RPC, SEPOLIA_RPC, BSC_TESTNET_RPC, ACCOUNT, DEPLOYER, MULTISIG"
 	@echo ""
 	@echo "  make precheck-helper RPC=...                         # Helper.sol non-zero placeholder check (pure)"
 	@echo "  make validate-config RPC=...                         # live staticcall check of CCIP infra addrs (#21)"
@@ -130,46 +135,24 @@ validate-bsc-admin:
 	@test -n "$(RPC)" || (echo "RPC required (BSC RPC)"; exit 1)
 	forge script script/ValidateBscAdmin.s.sol --rpc-url $(RPC)
 
-# Ethereum sequence (Sepolia or mainnet).
+# Ethereum sequence (Sepolia or mainnet). Signed by the keystore ACCOUNT (see top of file);
+# forge prompts for the keystore password per script. --verify needs ETHERSCAN_API_KEY set.
 deploy-eth: precheck-helper
-	@test -n "$(RPC)"         || (echo "RPC=sepolia|eth required"; exit 1)
-	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
+	@test -n "$(RPC)" || (echo "RPC=sepolia|eth required"; exit 1)
 	forge script script/01_DeployWrappedON.s.sol      --rpc-url $(RPC) $(DEPLOY_FLAGS)
 	forge script script/02_DeployPools.s.sol          --rpc-url $(RPC) $(DEPLOY_FLAGS)
 	forge script script/03_GrantRoles.s.sol           --rpc-url $(RPC) $(DEPLOY_FLAGS)
 	forge script script/04_RegisterAdminAndPool.s.sol --rpc-url $(RPC) $(DEPLOY_FLAGS)
 	forge script script/05_ApplyChainUpdates.s.sol    --rpc-url $(RPC) $(DEPLOY_FLAGS)
 
-# Ethereum sequence signed by an encrypted keystore account instead of a raw private key
-# (RUNBOOK §0.3 — preferred for mainnet). No DEPLOYER_PK anywhere; forge prompts for the
-# keystore password per script. ACCOUNT defaults to `deployer`; --verify still needs
-# ETHERSCAN_API_KEY in the environment.
-deploy-eth-keystore: precheck-helper
-	@test -n "$(RPC)" || (echo "RPC=sepolia|eth required"; exit 1)
-	forge script script/01_DeployWrappedON.s.sol      --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
-	forge script script/02_DeployPools.s.sol          --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
-	forge script script/03_GrantRoles.s.sol           --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
-	forge script script/04_RegisterAdminAndPool.s.sol --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
-	forge script script/05_ApplyChainUpdates.s.sol    --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
-
-# BSC sequence (testnet or mainnet). Skips 01 and 03 (wON only exists on ETH).
+# BSC sequence (testnet or mainnet). Skips 01 and 03 (wON only exists on ETH). Signed by the
+# keystore ACCOUNT. Note: on BSC mainnet script 04 reverts CannotResolveCCIPAdmin (path-4)
+# until the ON CCIP-admin is registered out-of-band with Chainlink — see RUNBOOK §0.2.
 deploy-bsc: precheck-helper
-	@test -n "$(RPC)"         || (echo "RPC=bsc_testnet|bsc required"; exit 1)
-	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
+	@test -n "$(RPC)" || (echo "RPC=bsc_testnet|bsc required"; exit 1)
 	forge script script/02_DeployPools.s.sol          --rpc-url $(RPC) $(DEPLOY_FLAGS)
 	forge script script/04_RegisterAdminAndPool.s.sol --rpc-url $(RPC) $(DEPLOY_FLAGS)
 	forge script script/05_ApplyChainUpdates.s.sol    --rpc-url $(RPC) $(DEPLOY_FLAGS)
-
-# BSC sequence signed by an encrypted keystore account (RUNBOOK §0.3 — preferred for
-# mainnet). Mirrors deploy-bsc (02 + 04 + 05, no 01/03) with no DEPLOYER_PK; forge prompts
-# for the keystore password per script. ACCOUNT defaults to `deployer`. Note: on BSC mainnet
-# script 04 reverts CannotResolveCCIPAdmin (path-4) until the ON CCIP-admin is registered
-# out-of-band with Chainlink — see RUNBOOK §0.2.
-deploy-bsc-keystore: precheck-helper
-	@test -n "$(RPC)" || (echo "RPC=bsc_testnet|bsc required"; exit 1)
-	forge script script/02_DeployPools.s.sol          --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
-	forge script script/04_RegisterAdminAndPool.s.sol --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
-	forge script script/05_ApplyChainUpdates.s.sol    --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
 
 # SECURITY: DEP-8 — the post-handoff renounce check needs the deployer EOA's address. In
 # view-only mode `forge script` resolves `msg.sender` to Foundry's default sender, so
@@ -194,7 +177,6 @@ handoff: precheck-helper
 # --- TEMPORARILY DISABLED 2026-06-19 (do not hand off pre-operational; see STATE.md) ---
 #	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
 #	@test -n "$(RPC)"         || (echo "RPC required"; exit 1)
-#	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
 #	MULTISIG=$(MULTISIG) forge script script/06_TransferOwnership.s.sol:TransferOwnership \
 #	    --rpc-url $(RPC) $(DEPLOY_FLAGS) --sig "run()"
 
@@ -210,7 +192,6 @@ handoff-all:
 #	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
 #	@test -n "$(ETH_RPC)"     || (echo "ETH_RPC env var required"; exit 1)
 #	@test -n "$(BSC_RPC)"     || (echo "BSC_RPC env var required"; exit 1)
-#	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
 #	$(MAKE) handoff MULTISIG=$(MULTISIG) RPC=$(ETH_RPC)
 #	$(MAKE) handoff MULTISIG=$(MULTISIG) RPC=$(BSC_RPC)
 
@@ -222,15 +203,12 @@ renounce: precheck-helper
 # --- TEMPORARILY DISABLED 2026-06-19 (do not renounce pre-handoff; see STATE.md) ---
 #	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
 #	@test -n "$(RPC)"         || (echo "RPC required"; exit 1)
-#	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
 #	MULTISIG=$(MULTISIG) forge script script/06_TransferOwnership.s.sol:RenounceDeployerAdmin \
 #	    --rpc-url $(RPC) $(DEPLOY_FLAGS) --sig "run()"
 
-# SECURITY: OPS-2 — post-handoff, the deployer EOA is neither pool owner nor rate-limit
-# admin, so `--private-key $(DEPLOYER_PK)` would broadcast a tx that reverts on `onlyOwner`.
-# Operators must supply a caller authorised at the time of the call:
-#   - pre-handoff   : CALLER_FLAGS unset → falls back to DEPLOYER_PK (current behaviour).
-#   - post-handoff  : CALLER_FLAGS='--account multisig-signer' (or an encrypted keystore
+# SECURITY: OPS-2 — the caller must be authorised on the pool at the time of the call:
+#   - pre-handoff   : CALLER_FLAGS unset → falls back to the keystore ACCOUNT (`deployer`).
+#   - post-handoff  : CALLER_FLAGS='--account multisig-signer' (or another keystore account
 #                     for the delegated `rateLimitAdmin`). The multisig itself queues this
 #                     call via the Safe UI; this Makefile target is for the delegated
 #                     hot-key path described in RUNBOOK §4.1.1.
@@ -240,7 +218,5 @@ update-limits:
 	@test -n "$(OUTBOUND_RATE)"     || (echo "OUTBOUND_RATE required"; exit 1)
 	@test -n "$(INBOUND_CAPACITY)"  || (echo "INBOUND_CAPACITY required"; exit 1)
 	@test -n "$(INBOUND_RATE)"      || (echo "INBOUND_RATE required"; exit 1)
-	@test -n "$(CALLER_FLAGS)$(DEPLOYER_PK)" || \
-	    (echo "Set CALLER_FLAGS=--account ... (post-handoff) OR DEPLOYER_PK (pre-handoff)"; exit 1)
 	forge script script/07_UpdateRateLimits.s.sol --rpc-url $(RPC) --broadcast \
-	    $(if $(CALLER_FLAGS),$(CALLER_FLAGS),--private-key $(DEPLOYER_PK))
+	    $(if $(CALLER_FLAGS),$(CALLER_FLAGS),--account $(ACCOUNT))

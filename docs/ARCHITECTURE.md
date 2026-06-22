@@ -602,10 +602,9 @@ Disclosure: `security@orochi.network`.
   is the immutable 100M `MAX_CCIP_MINTED` ceiling. Confirm with `cast call`
   in RUNBOOK §0.2 that no minter / unbounded mint function exists on
   `0x0e4F62…` before mainnet broadcast.
-- **Mainnet key handling**: deploy via Foundry's encrypted keystore
-  (`cast wallet import deployer --interactive` + `--account deployer`)
-  rather than `--private-key $DEPLOYER_PK`, which leaks the key into
-  `ps aux` and shell history. See RUNBOOK §0.3 + SECURITY `OPS-1`.
+- **Key handling**: signing is via a Foundry encrypted keystore account
+  (`cast wallet import deployer --interactive` + `--account deployer`) —
+  no raw private key on the CLI or in `.env`. See RUNBOOK §0.3 + SECURITY `OPS-1`.
 
 ---
 
