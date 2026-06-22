@@ -94,19 +94,27 @@ cast call $BSC_ON 'totalSupply()(uint256)' --rpc-url $BSC_RPC
 
 If any mint surface is present and gated to an address that could plausibly mint more, halt the deployment — the cap-vs-supply relationship is load-bearing for the entire CCIP-7 / cap-replenishment safety story.
 
+**Auto-unwrap on BSC→ETH arrivals.** When a BSC→ETH CCIP message arrives, `WrappedON.mint`
+first checks whether `ON.balanceOf(wON) >= amount` (the ETH-side reserve). If so, it
+transfers native ON directly to the receiver (all-or-nothing) and emits `CCIPAutoUnwrapped`
+without incrementing `ccipMintHeadroomUsed` — the receiver gets canonical ETH ON, not wON.
+If the reserve does not cover the full amount, it falls through to the standard wON mint
+path. Operators should expect `CCIPAutoUnwrapped` events during normal operation whenever
+the reserve holds sufficient ON; this is expected and benign.
+
 **Incident response: an inbound CCIP message reverting with `CCIPMintCapExceeded`.** The mint
 cap makes `WrappedON.mint` — and therefore the offRamp's `releaseOrMint` — revert once
-`ccipMintedSupply + amount > MAX_CCIP_MINTED`. Treat this as a **deliberate fail-safe trip,
+`ccipMintHeadroomUsed + amount > MAX_CCIP_MINTED`. Treat this as a **deliberate fail-safe trip,
 not a transient.** CCIP will surface the message as failed-execution and allow manual
 re-execution, but the retry calls the same `mint` and will keep reverting until
-`ccipMintedSupply` drops below the cap (i.e. until matching wON is burned/bridged out on
+`ccipMintHeadroomUsed` drops below the cap (i.e. until matching wON is burned/bridged out on
 ETH). Under honest operation this is unreachable: only 100M ON exists on BSC,
-`ccipMintedSupply ≈ lockedON_BSC ≤ 100M`, and burns saturating-decrement the counter. So a
+`ccipMintHeadroomUsed ≈ lockedON_BSC ≤ 100M`, and burns saturating-decrement the counter. So a
 live `CCIPMintCapExceeded` on an inbound message means one of: (a) BSC ON supply exceeded
 100M (OPS-29 above — the surplus is stranded by design), or (b) the ETH pool minted without
 a matching BSC lock (compromise/bug — the cap is the circuit-breaker that stopped it). In
 both cases do **not** treat the stuck message as a delivery bug to force through; page the
-on-call rotation and reconcile `ccipMintedSupply` against
+on-call rotation and reconcile `ccipMintHeadroomUsed` against
 `IERC20(ON).balanceOf(BSC_LockReleaseTokenPool)` before any manual re-execution.
 
 ### 0.3 Environment
@@ -252,7 +260,7 @@ The single target runs the handoff sequentially against both chains with the sam
 
 Each per-chain invocation:
 - Calls `pool.transferOwnership(multisig)` (two-step Ownable).
-- (ETH only) Grants wON `DEFAULT_ADMIN_ROLE` **and `LIQUIDITY_MANAGER_ROLE`** (M3 / #25 — the `deposit` reserve-wrap gate) to the multisig, and proposes the new CCIP admin (two-step — multisig must call `acceptCCIPAdmin`). The deployer renounces both roles in 3.4. Before handoff, the deployer holds `LIQUIDITY_MANAGER_ROLE` (granted at construction) and uses it to seed the initial ETH-side reserve via `deposit`; post-handoff the multisig manages it and may re-delegate to a dedicated liquidity manager.
+- (ETH only) Grants wON `DEFAULT_ADMIN_ROLE` to the multisig and proposes the new CCIP admin (two-step — multisig must call `acceptCCIPAdmin`). The deployer renounces `DEFAULT_ADMIN_ROLE` in 3.4. Note: `deposit` is permissionless — there is no `LIQUIDITY_MANAGER_ROLE` to grant or manage.
 - Calls `TokenAdminRegistry.transferAdminRole(token, multisig)` (two-step).
 
 **Minimize the handoff window (`DEP-3` + `CCIP-1` — legacy audit tags H-2 + C-1).** Between the grant in 3.1 and the multisig accepts in 3.2, the deployer EOA still holds:
@@ -318,7 +326,7 @@ The script now pre-asserts (`DEP-3` — legacy audit tag H-1):
 - Multisig is `getCCIPAdmin()` (i.e. it called `acceptCCIPAdmin`).
 - The deployer still holds the role at call time.
 
-Then calls `won.renounceRole(DEFAULT_ADMIN_ROLE, deployer)` and, if held, `won.renounceRole(LIQUIDITY_MANAGER_ROLE, deployer)` (M3 / #25). After this point, only the multisig can grant/revoke wON roles and only multisig-designated liquidity managers can `deposit`. **Do not skip this step.**
+Then calls `won.renounceRole(DEFAULT_ADMIN_ROLE, deployer)`. After this point, only the multisig can grant/revoke wON roles. `deposit` is permissionless — no liquidity-manager role exists. **Do not skip this step.**
 
 ---
 
