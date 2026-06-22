@@ -73,8 +73,8 @@ contract Fork_Bridge is Test {
 
         // SECURITY: TEST-1 — pin both forks to specific blocks. Defaults match the
         // per-chain fork tests; override via ETH_FORK_BLOCK / BSC_FORK_BLOCK to refresh.
-        uint256 ethBlock = vm.envOr("ETH_FORK_BLOCK", uint256(22_000_000));
-        uint256 bscBlock = vm.envOr("BSC_FORK_BLOCK", uint256(50_000_000));
+        uint256 ethBlock = vm.envOr("ETH_FORK_BLOCK", uint256(25_000_000));
+        uint256 bscBlock = vm.envOr("BSC_FORK_BLOCK", uint256(66_000_000));
         ethFork = vm.createFork(ethRpc, ethBlock);
         bscFork = vm.createFork(bscRpc, bscBlock);
 
