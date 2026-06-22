@@ -75,7 +75,7 @@ test/Script06Renounce.t.sol       renounce precondition assertions
 test/Script07Preflight.t.sol      rate-limit preflight checks
 test/Script08Verify.t.sol         post-deploy verification coverage
 test/mocks/                       MockRouter, MockRMN
-test/fork/Fork_ETH.t.sol          ETH mainnet fork — deploy + registry + bridge simulation (4)
+test/fork/Fork_ETH.t.sol          ETH mainnet fork — deploy + registry + bridge simulation (5)
 test/fork/Fork_BSC.t.sol          BSC mainnet fork — token ownership probe + pool + bridge sim (4)
 test/fork/Fork_Bridge.t.sol       dual-fork full roundtrip BSC→ETH→BSC against live CCIP (1)
 deployments/<chainId>.json        written by scripts via vm.writeJson
@@ -86,10 +86,10 @@ deployments/<chainId>.json        written by scripts via vm.writeJson
 Everything goes through the `Makefile`. The full sequence is documented in `RUNBOOK.md`. Key targets:
 
 - `make install`               — submodule init + patch-pragmas (one-time after clone).
-- `make test`                  — full test suite, no fork: 130 tests total (126 unit/integration + 4 stateful invariants).
+- `make test`                  — full test suite, no fork: 139 tests total (135 unit/integration + 4 stateful invariants).
 - `make test-unit`             — WrappedON.t.sol unit tests only.
 - `make test-e2e`              — PoolRoundtrip + DeploymentE2E integration tests.
-- `make test-fork ETH_RPC=... BSC_RPC=...` — fork tests against live mainnet (9 tests).
+- `make test-fork ETH_RPC=... BSC_RPC=...` — fork tests against live mainnet (10 tests).
 - `make validate-config RPC=...` — live staticcall check that `Helper.sol` CCIP infra addresses are genuine on the target chain (script `ValidateConfig.s.sol`; pairs with the pure `precheck-helper`).
 - `make check-links`           — verify Chainlink `docs.chain.link` URLs in tracked sources still resolve (pre-release gate; not in PR CI — see RUNBOOK §0.5).
 - `make deploy-eth RPC=...`    — scripts 01→05 on the Ethereum side.
@@ -105,7 +105,7 @@ Everything goes through the `Makefile`. The full sequence is documented in `RUNB
 make install                                             # submodules + patch-pragmas
 forge build
 make test                                                # mock-based suite; fork tests self-skip when ETH_RPC/BSC_RPC unset
-make test-fork ETH_RPC=<url> BSC_RPC=<url>              # 9 mainnet fork tests
+make test-fork ETH_RPC=<url> BSC_RPC=<url>              # 10 mainnet fork tests
 make test-unit                                           # WrappedON.t.sol only
 make test-e2e                                            # PoolRoundtrip + DeploymentE2E only
 forge coverage --report summary
