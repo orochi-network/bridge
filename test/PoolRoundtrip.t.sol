@@ -48,6 +48,7 @@ contract PoolRoundtripTest is Test {
     MockRMN internal ethRmn;
     address internal ethOnRamp = makeAddr("ethOnRamp");
     address internal ethOffRamp = makeAddr("ethOffRamp");
+    MockON internal onEth; // canonical ON on the ETH side (state variable for deal/approve access)
 
     // ── BSC side ────────────────────────────────────────────────────────────
     MockON internal onBsc;
@@ -73,8 +74,8 @@ contract PoolRoundtripTest is Test {
 
         // ── ETH side deploy ─────────────────────────────────────────────────
         // Need an ERC20 to back wON; for this isolated test it's never deposited so a
-        // placeholder ERC20 with no supply is fine.
-        MockON onEth = new MockON("ON", 0, address(0xdead));
+        // placeholder ERC20 with no supply is fine (except in the auto-unwrap test).
+        onEth = new MockON("ON", 0, address(0xdead));
         vm.prank(admin);
         won = new WrappedON(IERC20(address(onEth)), admin);
         ethPool = new BurnMintTokenPool(
@@ -168,6 +169,51 @@ contract PoolRoundtripTest is Test {
         assertEq(outMint.destinationAmount, amount);
         assertEq(won.balanceOf(alice), amount, "alice minted wON 1:1");
         assertEq(won.totalSupply(), amount);
+    }
+
+    /// @notice Issue #1 (pool-level): when the wON wrap reserve fully covers a BSC→ETH arrival,
+    ///         `mint` auto-unwraps — delivering native ON to the receiver and minting 0 wON.
+    ///         `totalSupply` is unchanged and `ccipMintHeadroomUsed` stays at zero.
+    ///
+    ///         Differences from `test_BscToEth_LockAndMint`: alice seeds the reserve via
+    ///         `deposit` before the OffRamp call, a fresh `carol` receives the bridged amount,
+    ///         and the assertions check native ON rather than wON.
+    function test_BscToEth_AutoUnwrapWhenReserveCovers() public {
+        uint256 amount = 1000 ether;
+        address carol = makeAddr("carol");
+
+        // Give alice enough onEth to seed the reserve, then deposit into wON.
+        deal(address(onEth), alice, amount);
+        vm.startPrank(alice);
+        onEth.approve(address(won), amount);
+        won.deposit(amount);
+        vm.stopPrank();
+
+        // Capture state AFTER alice's deposit: totalSupply == amount (alice holds wON),
+        // reserve == amount. The auto-unwrap test will leave totalSupply unchanged.
+        uint256 supplyBefore = won.totalSupply();
+        uint256 carolOnBefore = onEth.balanceOf(carol);
+
+        // OffRamp delivers 1000 ON worth from BSC to carol on ETH.
+        // sourcePoolData is empty — BurnMintTokenPool accepts it for mint paths.
+        Pool.ReleaseOrMintInV1 memory inMint = Pool.ReleaseOrMintInV1({
+            originalSender: abi.encode(carol),
+            remoteChainSelector: BSC_SELECTOR,
+            receiver: carol,
+            sourceDenominatedAmount: amount,
+            localToken: address(won),
+            sourcePoolAddress: abi.encode(address(bscPool)),
+            sourcePoolData: "",
+            offchainTokenData: ""
+        });
+        vm.prank(ethOffRamp);
+        Pool.ReleaseOrMintOutV1 memory outMint = ethPool.releaseOrMint(inMint);
+
+        assertEq(outMint.destinationAmount, amount, "destinationAmount");
+        assertEq(onEth.balanceOf(carol), carolOnBefore + amount, "carol got native ON");
+        assertEq(won.balanceOf(carol), 0, "no wON minted to carol");
+        assertEq(won.totalSupply(), supplyBefore, "totalSupply unchanged (auto-unwrap)");
+        assertEq(won.ccipMintHeadroomUsed(), 0, "cap counter untouched");
     }
 
     // ─── Direction 2: ETH → BSC (burn wON on ETH, release ON on BSC) ──────────
