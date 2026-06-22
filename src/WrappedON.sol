@@ -67,13 +67,6 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
 
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
-    /// @notice Gates `deposit` (the wrap path). SECURITY: M3 (#25) — `deposit` is the
-    ///         protocol-managed reserve seed, NOT a public arbitrage layer; an uncapped
-    ///         permissionless wrap could grow wON supply (and ETH→BSC redemption demand)
-    ///         past the BSC liquidity / rate limits a launch was sized for. `DEFAULT_ADMIN_ROLE`
-    ///         is the role admin (OZ default), so the admin (deployer, then multisig) grants
-    ///         it to whoever manages the reserve. Granted to the bootstrap `admin` at deploy.
-    bytes32 public constant LIQUIDITY_MANAGER_ROLE = keccak256("LIQUIDITY_MANAGER_ROLE");
 
     /// @notice Cap on `ccipMintHeadroomUsed`. Matches canonical BSC ON supply — the upper bound
     ///         on ON that can ever be locked on the BSC pool.
@@ -152,29 +145,19 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuard, IGetCCIPAdmin {
         }
         ON = onToken;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
-        // M3 (#25): seed the reserve manager. Admin can re-delegate / revoke; the multisig
-        // takes it over at handoff (script 06) and the deployer renounces it on renounce.
-        _grantRole(LIQUIDITY_MANAGER_ROLE, admin);
         s_ccipAdmin = admin;
         emit CCIPAdminTransferred(address(0), admin);
     }
 
     // ─── Wrap / Unwrap (1:1 against native ON) ────────────────────────────────
 
-    /// @notice Pulls `amount` ON and mints wON to `msg.sender` (1:1).
+    /// @notice Pulls `amount` ON and mints wON to `msg.sender` (1:1). Permissionless.
     /// @dev Received-amount accounting keeps the wrap exact under fee-on-transfer variants
     ///      (defensive; canonical ON is plain ERC20). `nonReentrant` guards against future
     ///      hook-bearing tokens. Uncapped — bounded by ETH-side ON supply; independent of
     ///      `MAX_CCIP_MINTED` so heavy wrap usage can't starve inbound CCIP.
-    /// @dev WON-14: also rejects `received == 0` after the transfer. A 100%-fee or buggy
-    ///      ERC20 whose `transferFrom` returned `true` without actually moving anything
-    ///      would otherwise let a `deposit(N)` call mint 0 wON and emit `Wrapped(_, 0)`.
-    ///      Canonical ON cannot hit this, but the received-amount guard is what mints the
-    ///      defensive accounting; rejecting `received == 0` matches the WON-1 mint guard.
-    /// @dev M3 (#25): `onlyRole(LIQUIDITY_MANAGER_ROLE)`. The wrap path is the protocol-managed
-    ///      reserve, not a public arbitrage layer — restricting it bounds wON supply growth
-    ///      (and ETH→BSC redemption demand) to what the launch liquidity / rate limits support.
-    function deposit(uint256 amount) external nonReentrant onlyRole(LIQUIDITY_MANAGER_ROLE) {
+    /// @dev WON-14: also rejects `received == 0` after the transfer (see existing rationale).
+    function deposit(uint256 amount) external nonReentrant {
         if (amount == 0) {
             revert ZeroAmount();
         }

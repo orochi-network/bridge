@@ -152,8 +152,6 @@ contract WrappedONTest is Test {
         vm.startPrank(admin);
         won.grantRole(won.MINTER_ROLE(), pool);
         won.grantRole(won.BURNER_ROLE(), pool);
-        // M3 (#25): deposit is gated to LIQUIDITY_MANAGER_ROLE; alice is the test depositor.
-        won.grantRole(won.LIQUIDITY_MANAGER_ROLE(), alice);
         vm.stopPrank();
     }
 
@@ -185,11 +183,6 @@ contract WrappedONTest is Test {
         WrappedON nullWon = new WrappedON(IERC20(address(mock)), admin);
         mock.mint(address(this), 100 ether);
         mock.approve(address(nullWon), 100 ether);
-        // M3 (#25): this test deposits as address(this); grant it the liquidity role so the
-        // call reaches the received==0 guard rather than reverting on the role check first.
-        bytes32 lmRole = nullWon.LIQUIDITY_MANAGER_ROLE();
-        vm.prank(admin);
-        nullWon.grantRole(lmRole, address(this));
 
         vm.expectRevert(WrappedON.ZeroAmount.selector);
         nullWon.deposit(50 ether);
@@ -206,58 +199,16 @@ contract WrappedONTest is Test {
         assertEq(won.totalSupply(), 100 ether);
     }
 
-    /// @notice M3 (#25): `deposit` is gated to `LIQUIDITY_MANAGER_ROLE`. An account with ON
-    ///         and approval but no role must be rejected with the OZ AccessControl error.
-    function test_DepositRevertsWithoutLiquidityManagerRole() public {
-        // bob holds ON and has approved, but does NOT hold the liquidity-manager role.
-        vm.prank(alice);
-        on.transfer(bob, 50 ether);
-        vm.startPrank(bob);
-        on.approve(address(won), 50 ether);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                IAccessControl.AccessControlUnauthorizedAccount.selector, bob, keccak256("LIQUIDITY_MANAGER_ROLE")
-            )
-        );
-        won.deposit(50 ether);
-        vm.stopPrank();
-    }
-
-    /// @notice M3 (#25): a granted liquidity manager can deposit normally.
-    function test_DepositSucceedsWithLiquidityManagerRole() public {
-        bytes32 lmRole = won.LIQUIDITY_MANAGER_ROLE();
-        vm.prank(admin);
-        won.grantRole(lmRole, bob);
-
+    /// @notice Issue 2: `deposit` is permissionless — any holder with ON + approval can wrap.
+    function test_DepositPermissionlessForAnyCaller() public {
         vm.prank(alice);
         on.transfer(bob, 50 ether);
         vm.startPrank(bob);
         on.approve(address(won), 50 ether);
         won.deposit(50 ether);
         vm.stopPrank();
-
         assertEq(won.balanceOf(bob), 50 ether);
         assertEq(on.balanceOf(address(won)), 50 ether);
-    }
-
-    /// @notice M3 (#25): the constructor seeds LIQUIDITY_MANAGER_ROLE to the bootstrap admin,
-    ///         and DEFAULT_ADMIN_ROLE is its role admin so the admin can manage it.
-    function test_ConstructorGrantsLiquidityManagerRoleToAdmin() public view {
-        assertTrue(won.hasRole(won.LIQUIDITY_MANAGER_ROLE(), admin));
-        assertEq(won.getRoleAdmin(won.LIQUIDITY_MANAGER_ROLE()), won.DEFAULT_ADMIN_ROLE());
-    }
-
-    /// @notice M3 (#25): admin can revoke the role, after which deposit is rejected again.
-    function test_AdminCanRevokeLiquidityManagerRole() public {
-        bytes32 lmRole = won.LIQUIDITY_MANAGER_ROLE();
-        vm.prank(admin);
-        won.revokeRole(lmRole, alice);
-
-        vm.startPrank(alice);
-        on.approve(address(won), 10 ether);
-        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, alice, lmRole));
-        won.deposit(10 ether);
-        vm.stopPrank();
     }
 
     function test_WithdrawEmitsUnwrapped() public {
@@ -895,11 +846,6 @@ contract WrappedONTest is Test {
         ReentrantMockON rOn = new ReentrantMockON();
         WrappedON rWon = new WrappedON(IERC20(address(rOn)), admin);
         rOn.setTarget(address(rWon));
-        // M3 (#25): outer depositor is address(this); grant it the liquidity role. The inner
-        // reentry hits `nonReentrant` (applied before `onlyRole`) and reverts regardless.
-        bytes32 lmRole = rWon.LIQUIDITY_MANAGER_ROLE();
-        vm.prank(admin);
-        rWon.grantRole(lmRole, address(this));
 
         // Mock token mints supply to test contract; approve from here as the depositor.
         rOn.approve(address(rWon), 10 ether);
@@ -925,12 +871,6 @@ contract WrappedONTest is Test {
         ReentrantWithdrawMockON rOn = new ReentrantWithdrawMockON();
         WrappedON rWon = new WrappedON(IERC20(address(rOn)), admin);
 
-        // M3 (#25): alice is the depositor; grant her LIQUIDITY_MANAGER_ROLE on the fresh wON.
-        // Cache the role constant so `vm.prank(admin)` applies to `grantRole`, not to the
-        // intervening `LIQUIDITY_MANAGER_ROLE()` view call.
-        bytes32 lmRole = rWon.LIQUIDITY_MANAGER_ROLE();
-        vm.prank(admin);
-        rWon.grantRole(lmRole, alice);
         // Fund alice with rON BEFORE arming the reentrancy so this transfer doesn't trip it.
         rOn.transfer(alice, 1000 ether);
 
