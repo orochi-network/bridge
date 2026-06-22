@@ -37,7 +37,7 @@ contract Fork_ETH is Test {
     address internal constant ETH_ROUTER = 0x80226fc0Ee2b096224EeAc085Bb9a8cba1146f7D;
     address internal constant ETH_RMN = 0x411dE17f12D1A34ecC7F45f49844626267c75e81;
     address internal constant ETH_ADMIN_REGISTRY = 0xb22764f98dD05c789929716D677382Df22C05Cb6;
-    address internal constant ETH_REGISTRY_MOD = 0x4855174e9479e211337832E109e7721d43F4cA64;
+    address internal constant ETH_REGISTRY_MOD = 0x4855174E9479E211337832E109E7721d43A4CA64;
     address internal constant ON_ETH = 0x33f6BE84becfF45ea6aA2952d7eF890B44bFB59d;
     address internal constant ON_BSC = 0x0e4F6209eD984b21EDEA43acE6e09559eD051D48;
 
@@ -59,7 +59,7 @@ contract Fork_ETH is Test {
         // live mainnet can't silently change test behaviour. Operators can override via
         // ETH_FORK_BLOCK (e.g. to verify against a freshly observed registry). Update the
         // default deliberately when CCIP-side state changes warrant it.
-        uint256 forkBlock = vm.envOr("ETH_FORK_BLOCK", uint256(22_000_000));
+        uint256 forkBlock = vm.envOr("ETH_FORK_BLOCK", uint256(25_000_000));
         vm.createSelectFork(rpc, forkBlock);
 
         fakeRemoteBscPool = makeAddr("bscPoolPlaceholder");

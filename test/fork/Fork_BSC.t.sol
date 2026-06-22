@@ -43,7 +43,11 @@ contract Fork_BSC is Test {
     address internal constant BSC_ADMIN_REGISTRY = 0x736Fd8660c443547a85e4Eaf70A49C1b7Bb008fc;
     address internal constant BSC_REGISTRY_MOD = 0x47Db76c9c97F4bcFd54D8872FDb848Cab696092d;
     address internal constant ON_BSC = 0x0e4F6209eD984b21EDEA43acE6e09559eD051D48;
-    address internal constant ON_ETH_WON = address(0); // not deployed here; placeholder
+    // Placeholder for the wON-on-ETH token. wON is not deployed in this single-chain BSC fork, so
+    // the remote token registered for the ETH lane is a non-zero stand-in; lockOrBurn must echo it
+    // back as destTokenAddress (asserted in test_Fork_BSC_BscToEth_Lock), mirroring how the ETH-side
+    // fork asserts destTokenAddress == ON_BSC.
+    address internal constant ON_ETH_WON = 0x000000000000000000000000000000000000c0DE; // placeholder (not deployed here)
 
     uint64 internal constant ETH_SELECTOR = 5_009_297_550_715_157_269;
     uint64 internal constant BSC_SELECTOR = 11_344_663_589_394_136_015;
@@ -59,7 +63,7 @@ contract Fork_BSC is Test {
             return;
         }
         // SECURITY: TEST-1 — pin to a specific block by default; override via BSC_FORK_BLOCK.
-        uint256 forkBlock = vm.envOr("BSC_FORK_BLOCK", uint256(50_000_000));
+        uint256 forkBlock = vm.envOr("BSC_FORK_BLOCK", uint256(66_000_000));
         vm.createSelectFork(rpc, forkBlock);
 
         fakeRemoteEthPool = makeAddr("ethPoolPlaceholder");
@@ -165,8 +169,12 @@ contract Fork_BSC is Test {
             })
         );
 
-        // destTokenAddress is the wON address on ETH — we used a placeholder, which is fine here.
-        assertEq(abi.decode(out.destTokenAddress, (address)), fakeRemoteEthPool);
+        // destTokenAddress is the remote token registered for the ETH lane (the wON address on
+        // ETH). wON is not deployed in this single-chain fork, so it was wired as the ON_ETH_WON
+        // placeholder in setUp; lockOrBurn must echo that exact value back.
+        assertEq(
+            abi.decode(out.destTokenAddress, (address)), ON_ETH_WON, "dest token must be the wired remote ETH token"
+        );
     }
 
     // ─── Bridge direction 2: ETH → BSC (OffRamp releases ON) ────────────────────
