@@ -251,13 +251,23 @@ Bridge a small amount in each direction. Use a private wallet — this confirms 
 
 Once the bridge is verified on mainnet, hand off control to the operations multisig (Gnosis Safe recommended).
 
+> **Manual-trigger gate (decision 2026-06-19).** Handoff and renounce are deliberate,
+> custody-grade, one-way steps, so they do **not** run by default — they are gated behind an
+> explicit confirmation env var rather than commented-out source. This makes them impossible
+> to fire accidentally (e.g. from a stray `make handoff` in a script) while keeping them
+> triggerable by hand the moment the bridge is wired + verified end-to-end — no Makefile edit
+> required. Add `CONFIRM_HANDOFF=yes` to handoff commands and `CONFIRM_RENOUNCE=yes` to the
+> renounce command (renounce has its own flag so a handoff confirmation can never cascade into
+> the irreversible renounce). Without the flag the target prints how to confirm and exits
+> non-zero. Same `precheck-helper` gate (`DEP-2`) still runs first.
+
 ### 3.1 Begin handoff (deployer EOA)
 
 ```bash
-make handoff-all ETH_RPC=eth BSC_RPC=bsc MULTISIG=0x<safe-address>
+make handoff-all ETH_RPC=eth BSC_RPC=bsc MULTISIG=0x<safe-address> CONFIRM_HANDOFF=yes
 ```
 
-The single target runs the handoff sequentially against both chains with the same multisig — preventing the half-handed-off-on-one-chain footgun (legacy audit tag H-5, now operational mitigation only — no current ledger entry). For single-chain handoffs (e.g. during testnet dry runs) use `make handoff RPC=<chain> MULTISIG=…`.
+The single target runs the handoff sequentially against both chains with the same multisig — preventing the half-handed-off-on-one-chain footgun (legacy audit tag H-5, now operational mitigation only — no current ledger entry). It propagates `CONFIRM_HANDOFF=yes` to each per-chain leg automatically. For single-chain handoffs (e.g. during testnet dry runs) use `make handoff RPC=<chain> MULTISIG=… CONFIRM_HANDOFF=yes`.
 
 Each per-chain invocation:
 - Calls `pool.transferOwnership(multisig)` (two-step Ownable).
@@ -332,7 +342,7 @@ This adds an ownership-handoff check: `pool.owner() == multisig` on each chain.
 After 3.2 + 3.3 confirm the multisig holds every role:
 
 ```bash
-make renounce RPC=eth MULTISIG=0x<safe-address>
+make renounce RPC=eth MULTISIG=0x<safe-address> CONFIRM_RENOUNCE=yes
 ```
 
 The script now pre-asserts (`DEP-3` — legacy audit tag H-1):

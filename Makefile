@@ -41,9 +41,9 @@ help:
 	@echo "  make deploy-bsc      RPC=bsc_testnet                 # 02 -> 04 -> 05"
 	@echo "  make verify-eth      RPC=sepolia                     # script 08 view-only"
 	@echo "  make verify-bsc      RPC=bsc_testnet"
-	@echo "  make handoff         RPC=sepolia     MULTISIG=0x..   # script 06 (one chain)"
-	@echo "  make handoff-all     ETH_RPC=.. BSC_RPC=.. MULTISIG=0x..   # two-chain handoff"
-	@echo "  make renounce        RPC=sepolia                     # script 06 (renounce step)"
+	@echo "  make handoff         RPC=sepolia MULTISIG=0x.. CONFIRM_HANDOFF=yes   # script 06 (one chain)"
+	@echo "  make handoff-all     ETH_RPC=.. BSC_RPC=.. MULTISIG=0x.. CONFIRM_HANDOFF=yes  # two-chain handoff"
+	@echo "  make renounce        RPC=sepolia MULTISIG=0x.. CONFIRM_RENOUNCE=yes   # script 06 (renounce step)"
 	@echo "  make update-limits   RPC=...  OUTBOUND_CAPACITY=..   # script 07"
 
 # ─── Dev loop ──────────────────────────────────────────────────────────────────
@@ -213,15 +213,25 @@ verify-bsc:
 
 # SECURITY: DEP-2 — gate handoff and renounce on precheck-helper to surface unfilled
 # Helper placeholders BEFORE the deployer-EOA broadcast moves authority around.
+#
+# Manual-trigger guard (decision 2026-06-19, see STATE.md): the handoff is a deliberate,
+# custody-grade step run ONLY after the bridge is wired + verified end-to-end. It will NOT
+# run by default — it requires an explicit `CONFIRM_HANDOFF=yes`, so it can never fire
+# accidentally, while remaining triggerable by hand WITHOUT editing this file (mirrors the
+# redeploy-eth.sh type-to-confirm pattern).
 handoff: precheck-helper
-	@echo "handoff is TEMPORARILY DISABLED (decision 2026-06-19, see STATE.md): keep the"; \
-	 echo "deployer EOA in control until the bridge is wired + verified end-to-end."; \
-	 echo "To re-enable: uncomment the lines below in the Makefile."; exit 1
-# --- TEMPORARILY DISABLED 2026-06-19 (do not hand off pre-operational; see STATE.md) ---
-#	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
-#	@test -n "$(RPC)"         || (echo "RPC required"; exit 1)
-#	MULTISIG=$(MULTISIG) forge script script/06_TransferOwnership.s.sol:TransferOwnership \
-#	    --rpc-url $(RPC) $(DEPLOY_FLAGS) --sig "run()"
+	@if [ "$(CONFIRM_HANDOFF)" != "yes" ]; then \
+	  echo "handoff is GATED (decision 2026-06-19, see STATE.md): keep the deployer EOA in"; \
+	  echo "control until the bridge is wired + verified end-to-end, then run it deliberately."; \
+	  echo "This is a custody-grade step."; \
+	  echo ""; \
+	  echo "Trigger manually:  make handoff RPC=<rpc> MULTISIG=0x.. CONFIRM_HANDOFF=yes"; \
+	  exit 1; \
+	fi
+	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
+	@test -n "$(RPC)"         || (echo "RPC required"; exit 1)
+	MULTISIG=$(MULTISIG) forge script script/06_TransferOwnership.s.sol:TransferOwnership \
+	    --rpc-url $(RPC) $(DEPLOY_FLAGS) --sig "run()"
 
 # Two-chain handoff. Sequential, NOT atomic — if the BSC leg fails after the ETH leg
 # succeeds, the bridge is half-handed-off until the operator re-runs the BSC leg. The
@@ -229,25 +239,35 @@ handoff: precheck-helper
 # at the same operational environment (testnet pair OR mainnet pair) so the same MULTISIG
 # ends up wired on both sides.
 handoff-all:
-	@echo "handoff-all is TEMPORARILY DISABLED (decision 2026-06-19, see STATE.md)."; \
-	 echo "To re-enable: uncomment the lines below in the Makefile."; exit 1
-# --- TEMPORARILY DISABLED 2026-06-19 (do not hand off pre-operational; see STATE.md) ---
-#	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
-#	@test -n "$(ETH_RPC)"     || (echo "ETH_RPC env var required"; exit 1)
-#	@test -n "$(BSC_RPC)"     || (echo "BSC_RPC env var required"; exit 1)
-#	$(MAKE) handoff MULTISIG=$(MULTISIG) RPC=$(ETH_RPC)
-#	$(MAKE) handoff MULTISIG=$(MULTISIG) RPC=$(BSC_RPC)
+	@if [ "$(CONFIRM_HANDOFF)" != "yes" ]; then \
+	  echo "handoff-all is GATED (decision 2026-06-19, see STATE.md). Sequential, NOT atomic —"; \
+	  echo "if the BSC leg fails after the ETH leg, the bridge is half-handed-off until you"; \
+	  echo "re-run (the calls are idempotent)."; \
+	  echo ""; \
+	  echo "Trigger manually:  make handoff-all ETH_RPC=.. BSC_RPC=.. MULTISIG=0x.. CONFIRM_HANDOFF=yes"; \
+	  exit 1; \
+	fi
+	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
+	@test -n "$(ETH_RPC)"     || (echo "ETH_RPC env var required"; exit 1)
+	@test -n "$(BSC_RPC)"     || (echo "BSC_RPC env var required"; exit 1)
+	$(MAKE) handoff MULTISIG=$(MULTISIG) RPC=$(ETH_RPC) CONFIRM_HANDOFF=yes
+	$(MAKE) handoff MULTISIG=$(MULTISIG) RPC=$(BSC_RPC) CONFIRM_HANDOFF=yes
 
 # Final renounce — only after multisig has accepted everything on both chains.
+# Renounce is even more final than handoff (it irreversibly drops the deployer's roles), so
+# it has its OWN confirmation var — a handoff confirmation can never cascade into a renounce.
 renounce: precheck-helper
-	@echo "renounce is TEMPORARILY DISABLED (decision 2026-06-19, see STATE.md): the deployer"; \
-	 echo "must keep its roles until the bridge is wired, verified, and handed off."; \
-	 echo "To re-enable: uncomment the lines below in the Makefile."; exit 1
-# --- TEMPORARILY DISABLED 2026-06-19 (do not renounce pre-handoff; see STATE.md) ---
-#	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
-#	@test -n "$(RPC)"         || (echo "RPC required"; exit 1)
-#	MULTISIG=$(MULTISIG) forge script script/06_TransferOwnership.s.sol:RenounceDeployerAdmin \
-#	    --rpc-url $(RPC) $(DEPLOY_FLAGS) --sig "run()"
+	@if [ "$(CONFIRM_RENOUNCE)" != "yes" ]; then \
+	  echo "renounce is GATED (decision 2026-06-19, see STATE.md): run ONLY after the multisig"; \
+	  echo "has accepted everything on BOTH chains. This irreversibly drops the deployer's roles."; \
+	  echo ""; \
+	  echo "Trigger manually:  make renounce RPC=<rpc> MULTISIG=0x.. CONFIRM_RENOUNCE=yes"; \
+	  exit 1; \
+	fi
+	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
+	@test -n "$(RPC)"         || (echo "RPC required"; exit 1)
+	MULTISIG=$(MULTISIG) forge script script/06_TransferOwnership.s.sol:RenounceDeployerAdmin \
+	    --rpc-url $(RPC) $(DEPLOY_FLAGS) --sig "run()"
 
 # SECURITY: OPS-2 — the caller must be authorised on the pool at the time of the call:
 #   - pre-handoff   : CALLER_FLAGS unset → falls back to the keystore ACCOUNT (`deployer`).
