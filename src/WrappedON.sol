@@ -119,6 +119,11 @@ contract WrappedON is
     bytes32 private constant _STORAGE_LOCATION = 0xc9356e8aa19da270b9a132fda93e9af24668c8487450db15f9b9e8baeb751900;
 
     function _s() private pure returns (WrappedONStorage storage $) {
+        // ERC-7201 storage accessor — deliberate, OZ-documented assembly binding a struct ref
+        // to a fixed slot. Silence Slither's informational `assembly` detector (its only finding
+        // in `src/`) so the Slither CI check is green, mirroring the workflow's documented
+        // `naming-convention` exclusion. OPS-12.
+        // slither-disable-next-line assembly
         assembly {
             $.slot := _STORAGE_LOCATION
         }
