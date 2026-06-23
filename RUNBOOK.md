@@ -511,7 +511,9 @@ Target: <wrappedON proxy address>
 Function: unpause()
 ```
 
-Pause is a liveness tool, not a theft-prevention tool — it cannot prevent a compromised `MINTER_ROLE` pool from minting nor stop ERC20 transfers. A compromised `PAUSER_ROLE` can indefinitely halt value paths but cannot steal funds (griefing only). Treat any unexpected `Paused(address)` event as a Critical alert. Do not leave the bridge paused without a documented incident reason and a scheduled resume.
+Pause is a liveness tool, not a complete theft-prevention tool. It halts every value path — `mint`, all `burn` overloads, `deposit`, and `withdraw` are `whenNotPaused`, so while paused even a compromised `MINTER_ROLE` pool cannot mint (proven in `test/WrappedONPause.t.sol::test_PausedBlocksValuePaths`) — but it does NOT stop plain ERC20 `transfer`/`transferFrom` of already-circulating wON, and every value path resumes the instant the bridge is unpaused. A compromised `PAUSER_ROLE` can indefinitely halt value paths but cannot steal funds (griefing only). Treat any unexpected `Paused(address)` event as a Critical alert. Do not leave the bridge paused without a documented incident reason and a scheduled resume.
+
+**Effect on in-flight inbound (BSC→ETH) CCIP messages.** `mint` carries `whenNotPaused`, so while the bridge is paused the offRamp's `releaseOrMint → WrappedON.mint` reverts for any BSC→ETH message that arrives during the paused window. This is intended (SECURITY UPG-4): such a message is **delayed, not stuck**. CCIP surfaces it as failed-execution; once you `unpause`, recover it via CCIP **manual re-execution** (the same mechanism described in §0.2 — re-execute the failed message from the CCIP Explorer, and the now-unpaused `mint` succeeds). No funds are lost — the matching ON stays locked on BSC until the ETH-side `mint` completes. Outbound (ETH→BSC) is symmetric: `burn*` is also `whenNotPaused`, so users simply cannot initiate ETH→BSC transfers until `unpause`.
 
 ### 4.7 Upgrading the wON implementation
 
