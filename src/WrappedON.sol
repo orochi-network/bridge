@@ -82,8 +82,13 @@ contract WrappedON is
     /// @notice Gates `_authorizeUpgrade`. Held by a `TimelockController` so upgrades carry a
     ///         mandatory (48h) delay; never granted to an EOA in production.
     bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
-    /// @notice Gates the emergency `pause`/`unpause`. Halts the value paths
-    ///         (mint/burn/deposit/withdraw); plain ERC20 transfers stay live.
+    /// @notice Gates the emergency `pause`/`unpause`. Halts ALL value paths
+    ///         (deposit/mint/burn AND withdraw); plain ERC20 transfers stay live.
+    /// @dev Pausing `withdraw` is deliberate and custody-affecting: it freezes 1:1 redemption of
+    ///      the native-ON reserve while wON keeps trading. It is an emergency control to protect
+    ///      the reserve from being drained via `withdraw` during a bridge/protocol compromise
+    ///      (e.g. improperly minted wON cashed out for real ON), so it is NOT merely
+    ///      "liveness-only". Accepted trade-off — see WON-21 / issue #56.
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
     /// @notice Cap on `ccipMintHeadroomUsed`. Matches canonical BSC ON supply — the upper bound
@@ -182,8 +187,10 @@ contract WrappedON is
     ///      NO timelock delay. Self-administering it means only the timelock (the role holder)
     ///      can grant/revoke upgrade authority, and every such grant is itself a timelocked tx —
     ///      so the 48h reaction window is enforced, not advisory (SECURITY: UPG-1). `PAUSER_ROLE`
-    ///      intentionally keeps the default `DEFAULT_ADMIN_ROLE` admin: pause is halt-only
-    ///      (UPG-4), a liveness-only authority, so the multisig managing pausers is acceptable.
+    ///      intentionally keeps the default `DEFAULT_ADMIN_ROLE` admin: pause is an emergency halt
+    ///      (UPG-4) that CAN freeze 1:1 redemption (custody-affecting, not merely liveness-only —
+    ///      WON-21/#56), but it can only HALT flow (never move funds or upgrade), so the multisig
+    ///      managing pausers is acceptable.
     function initialize(IERC20 onToken, address admin, address timelock) external initializer {
         if (address(onToken) == address(0) || admin == address(0) || timelock == address(0)) {
             revert ZeroAddress();
@@ -220,7 +227,9 @@ contract WrappedON is
     ///      mandatory delay lives in the `TimelockController`, not here.
     function _authorizeUpgrade(address newImplementation) internal override onlyRole(UPGRADER_ROLE) {}
 
-    /// @notice Emergency stop on the value paths (mint/burn/deposit/withdraw). Transfers stay live.
+    /// @notice Emergency stop on ALL value paths (deposit/mint/burn AND withdraw); plain ERC20
+    ///         transfers stay live. Pausing `withdraw` deliberately freezes 1:1 redemption — an
+    ///         emergency control against reserve drain, custody-affecting (WON-21 / #56).
     function pause() external onlyRole(PAUSER_ROLE) {
         _pause();
     }
@@ -260,6 +269,11 @@ contract WrappedON is
     ///      and never triggers a BSC release, so decrementing would desync from BSC balance.
     ///      Cost: a CCIP-minted holder can drain the deposit reserve (intended arbitrage
     ///      layer).
+    /// @dev `whenNotPaused` is intentional and custody-affecting: PAUSER can halt redemption as an
+    ///      emergency stop protecting the native-ON reserve from being drained via `withdraw`
+    ///      during a bridge/protocol compromise (e.g. improperly minted wON). It also freezes
+    ///      honest redemption while paused — an accepted trade-off (WON-21 / #56). Making
+    ///      `withdraw` unpausable was considered and rejected (product decision 2026-06-23).
     function withdraw(uint256 amount) external nonReentrant whenNotPaused {
         if (amount == 0) {
             revert ZeroAmount();
