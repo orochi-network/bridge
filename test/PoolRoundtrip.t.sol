@@ -14,6 +14,7 @@ import {IBurnMintERC20} from "@chainlink/contracts/src/v0.8/shared/token/ERC20/I
 import {
     IERC20 as ICCIP_IERC20
 } from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
 import {DeployWON} from "./helpers/DeployWON.sol";
@@ -217,6 +218,91 @@ contract PoolRoundtripTest is Test {
         assertEq(won.totalSupply(), supplyBefore + amount, "totalSupply grew by bridged amount");
         assertEq(onEth.balanceOf(address(won)), reserveBefore, "reserve untouched by mint");
         assertEq(won.ccipMintHeadroomUsed(), amount, "cap counter incremented");
+    }
+
+    // ─── #57: ETH-inbound mint revert strands the message (mirror of BSC M2) ──
+
+    /// @notice #57: an inbound BSC→ETH message reverts at `ethPool.releaseOrMint` when it would
+    ///         push `ccipMintHeadroomUsed` past `MAX_CCIP_MINTED`. This is the mirror of the
+    ///         BSC-side M2/CCIP-2 stuck-release: the user's ON is already locked on BSC, but the
+    ///         ETH mint reverts. Asserts the message is RETRYABLE — nothing minted, headroom
+    ///         unchanged, and the inbound rate-limit consumption rolled back with the revert.
+    ///         Previously `CCIPMintCapExceeded` was only hit via direct `WrappedON.mint` unit
+    ///         calls; this drives it THROUGH the pool's `releaseOrMint`.
+    function test_BscToEth_ReleaseOrMintRevertsOnCapExceeded() public {
+        uint256 cap = won.MAX_CCIP_MINTED();
+        // Seed headroom to just below the cap. Use a direct pool-authorised `mint` (the pool holds
+        // MINTER_ROLE) rather than a series of rate-limited inbound messages: this leaves the
+        // inbound rate-limit bucket FULL, so the assertion below — that the overflowing message
+        // leaves the bucket unchanged — is meaningful (it would consume `over` if it succeeded).
+        uint256 seed = cap - 100 ether;
+        vm.prank(address(ethPool));
+        won.mint(alice, seed);
+        assertEq(won.ccipMintHeadroomUsed(), seed, "seeded near cap");
+
+        RateLimiter.TokenBucket memory bucketBefore = ethPool.getCurrentInboundRateLimiterState(BSC_SELECTOR);
+
+        // An arriving message for 200 ON would push headroom to cap + 100 -> revert.
+        uint256 over = 200 ether;
+        vm.prank(ethOffRamp);
+        vm.expectRevert(abi.encodeWithSelector(WrappedON.CCIPMintCapExceeded.selector, cap, seed + over));
+        ethPool.releaseOrMint(_mintMsg(alice, over));
+
+        // Retryable: nothing minted, headroom unchanged, inbound bucket rolled back.
+        assertEq(won.ccipMintHeadroomUsed(), seed, "headroom unchanged after revert");
+        assertEq(
+            ethPool.getCurrentInboundRateLimiterState(BSC_SELECTOR).tokens,
+            bucketBefore.tokens,
+            "inbound rate-limit consumption rolled back"
+        );
+    }
+
+    /// @notice #57: while wON is paused, an inbound BSC→ETH message reverts at
+    ///         `ethPool.releaseOrMint` (mint carries `whenNotPaused`). Asserts the message is
+    ///         delayed, not lost: nothing minted, inbound rate-limit rolled back, and the SAME
+    ///         message succeeds once `unpause`d (CCIP manual re-execution). Sibling of the cap
+    ///         test above; previously the pause path was only hit via direct `WrappedON.mint`.
+    function test_BscToEth_ReleaseOrMintRevertsWhenPaused() public {
+        vm.prank(admin);
+        won.pause();
+
+        RateLimiter.TokenBucket memory bucketBefore = ethPool.getCurrentInboundRateLimiterState(BSC_SELECTOR);
+
+        uint256 amount = 1000 ether;
+        Pool.ReleaseOrMintInV1 memory inMint = _mintMsg(alice, amount);
+        vm.prank(ethOffRamp);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        ethPool.releaseOrMint(inMint);
+
+        assertEq(won.balanceOf(alice), 0, "no wON minted while paused");
+        assertEq(won.ccipMintHeadroomUsed(), 0, "headroom untouched");
+        assertEq(
+            ethPool.getCurrentInboundRateLimiterState(BSC_SELECTOR).tokens,
+            bucketBefore.tokens,
+            "inbound rate-limit consumption rolled back"
+        );
+
+        // After unpause, the SAME message re-executes successfully (delayed, not lost).
+        vm.prank(admin);
+        won.unpause();
+        vm.prank(ethOffRamp);
+        ethPool.releaseOrMint(inMint);
+        assertEq(won.balanceOf(alice), amount, "retry after unpause delivers wON");
+        assertEq(won.ccipMintHeadroomUsed(), amount, "headroom consumed on successful retry");
+    }
+
+    /// @dev Build a BSC→ETH inbound message delivering `amount` wON to `receiver`.
+    function _mintMsg(address receiver, uint256 amount) internal view returns (Pool.ReleaseOrMintInV1 memory) {
+        return Pool.ReleaseOrMintInV1({
+            originalSender: abi.encode(receiver),
+            remoteChainSelector: BSC_SELECTOR,
+            receiver: receiver,
+            sourceDenominatedAmount: amount,
+            localToken: address(won),
+            sourcePoolAddress: abi.encode(address(bscPool)),
+            sourcePoolData: "",
+            offchainTokenData: ""
+        });
     }
 
     // ─── Direction 2: ETH → BSC (burn wON on ETH, release ON on BSC) ──────────

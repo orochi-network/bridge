@@ -604,6 +604,7 @@ This means the multisig effectively has custody of the BSC-side locked-ON reserv
 | `CCIPAdminTransferProposed` / `CCIPAdminTransferred` | wON | High |
 | `AdministratorTransferRequested` / `AdministratorTransferred` (registry — OPS-28) | TokenAdminRegistry | High |
 | `CCIPMinted` cumulative > BSC `IERC20(ON).balanceOf(LockReleaseTokenPool)` | wON ↔ BSC pool | **Critical** |
+| `ccipMintHeadroomUsed` approaching `MAX_CCIP_MINTED` (e.g. ≥ 90%) — inbound BSC→ETH `mint` will start reverting `CCIPMintCapExceeded`, stranding messages (precursor; CCIP-15 / §0.2) | wON | High |
 | `BSC_ON.balanceOf(BSC pool)` < ETH→BSC rate-limit capacity + buffer (M2 / CCIP-2 — stuck-transfer precursor; see §4.5) | BSC pool ↔ ETH pool config | High |
 | `CCIPAdminProposalCancelled` | wON | High |
 | `Upgraded(implementation)` (ERC1967) | wON proxy | **Critical** |
