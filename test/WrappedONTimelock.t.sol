@@ -66,9 +66,6 @@ contract WrappedONTimelockTest is Test {
     ///         UPGRADER_ROLE — the timelock does) must revert.
     function test_DirectUpgradeBypassingTimelockReverts() public {
         WrappedONV2Mock v2 = new WrappedONV2Mock();
-        // Cache role before prank — won.UPGRADER_ROLE() is an external call that would
-        // consume the vm.prank if called inside the expectRevert block.
-        won.UPGRADER_ROLE();
         vm.prank(multisig); // multisig is NOT the UPGRADER — the timelock is
         vm.expectRevert();
         won.upgradeToAndCall(address(v2), "");

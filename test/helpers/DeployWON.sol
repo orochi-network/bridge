@@ -18,10 +18,4 @@ library DeployWON {
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), data);
         return WrappedON(address(proxy));
     }
-
-    /// @notice Convenience overload using `admin` as the upgrader identity too. For tests that
-    ///         don't exercise upgrades, the upgrader is irrelevant.
-    function deploy(IERC20 on, address admin) internal returns (WrappedON) {
-        return deploy(on, admin, admin);
-    }
 }

@@ -294,7 +294,9 @@ contract RenounceDeployerAdmin is Script, Helper {
         _assertReadyToRenounce(won, multisig, deployer, pool, cfg.tokenAdminRegistry, timelockAddr);
 
         vm.startBroadcast();
-        won.renounceRole(adminRole, deployer);
+        if (won.hasRole(adminRole, deployer)) {
+            won.renounceRole(adminRole, deployer);
+        }
 
         // Renounce the deployer's PAUSER_ROLE on wON (multisig already holds it from
         // the _handoff step). Only renounce when held to avoid spurious reverts on
