@@ -1,5 +1,5 @@
 .PHONY: help install patch-pragmas build test test-unit test-e2e test-fork fmt fmt-check coverage clean check-links \
-        precheck-helper validate-config validate-bsc-admin deploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce update-limits
+        precheck-helper validate-config validate-bsc-admin deploy-eth redeploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce update-limits
 
 # ─── Defaults ──────────────────────────────────────────────────────────────────
 SHELL := /bin/bash
@@ -9,6 +9,9 @@ SHELL := /bin/bash
 #   cast wallet import deployer --interactive
 ACCOUNT ?= deployer
 DEPLOY_FLAGS := --broadcast --verify --account $(ACCOUNT)
+# redeploy-eth knobs (consumed by script/redeploy-eth.sh): simulate unless BROADCAST=1.
+BROADCAST ?= 0
+CHAIN_ID  ?= 1
 
 help:
 	@echo "Common targets:"
@@ -144,6 +147,15 @@ deploy-eth: precheck-helper
 	forge script script/03_GrantRoles.s.sol           --rpc-url $(RPC) $(DEPLOY_FLAGS)
 	forge script script/04_RegisterAdminAndPool.s.sol --rpc-url $(RPC) $(DEPLOY_FLAGS)
 	forge script script/05_ApplyChainUpdates.s.sol    --rpc-url $(RPC) $(DEPLOY_FLAGS)
+
+# Redeploy the ETH side (RUNBOOK §4.4 Step 1): backs up + clears the stale ETH artifacts in
+# deployments/<chainId>.json so scripts 01/02 deploy fresh, then runs 01->05. Simulates by
+# default; pass BROADCAST=1 to send transactions. Does NOT touch BSC — finish §4.4 by hand.
+#   make redeploy-eth RPC=eth                 # simulate (safe)
+#   make redeploy-eth RPC=eth BROADCAST=1     # broadcast for real
+redeploy-eth: precheck-helper
+	@test -n "$(RPC)" || (echo "RPC=sepolia|eth required"; exit 1)
+	RPC=$(RPC) ACCOUNT=$(ACCOUNT) BROADCAST=$(BROADCAST) CHAIN_ID=$(CHAIN_ID) ./script/redeploy-eth.sh
 
 # BSC sequence (testnet or mainnet). Skips 01 and 03 (wON only exists on ETH). Signed by the
 # keystore ACCOUNT. Note: on BSC mainnet script 04 reverts CannotResolveCCIPAdmin (path-4)

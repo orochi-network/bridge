@@ -396,15 +396,16 @@ Use this procedure when the wON contract must be replaced (e.g. the 2026-06-23 r
 
 #### Step 1: ETH — deploy new wON + new BurnMintTokenPool, wire ETH side (scripts 01→05)
 
-Delete the existing ETH artifact entries so scripts 01 and 02 redeploy rather than skip:
+Use `make redeploy-eth` (wraps `script/redeploy-eth.sh`). It backs up `deployments/<chainId>.json` to a `.superseded-<timestamp>` file, clears the stale ETH artifact entries (`wrappedON`, `wrappedONImpl`, `wrappedONTimelock`, `pool`) so scripts 01/02 redeploy instead of skipping, then runs 01→05. It **simulates by default** (restoring the JSON afterwards so the dry run leaves no trace); pass `BROADCAST=1` to send the real transactions:
 
 ```bash
-# Remove the stale ETH artifact (or delete/zero-out the wON + ETH pool entries)
-# then re-run the full ETH deploy sequence:
-make deploy-eth RPC=eth
+make redeploy-eth RPC=eth                 # simulate (safe)
+make redeploy-eth RPC=eth BROADCAST=1     # broadcast the real redeploy (prompts to confirm)
 ```
 
-`make deploy-eth` runs scripts 01 → 02 → 03 → 04 → 05 in sequence:
+Manual equivalent: delete the `wrappedON` / `wrappedONImpl` / `wrappedONTimelock` / `pool` entries from `deployments/1.json`, then `make deploy-eth RPC=eth`.
+
+The sequence runs scripts 01 → 02 → 03 → 04 → 05:
 - Script 01: deploys a new wON (`WrappedON`), writes address to `deployments/1.json`.
 - Script 02: deploys a new `BurnMintTokenPool` for the new wON, writes to `deployments/1.json`.
 - Script 03: grants `MINTER_ROLE` + `BURNER_ROLE` on the new wON to the new ETH pool.
