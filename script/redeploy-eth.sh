@@ -73,6 +73,7 @@ fi
 
 # ── Back up + clear the stale ETH artifacts so 01/02 redeploy ────────────────
 BACKUP=""
+JSON_WAS_ABSENT=0
 if [ -f "$JSON" ]; then
   BACKUP="$JSON.superseded-$(date -u +%Y%m%dT%H%M%SZ)"
   cp "$JSON" "$BACKUP"
@@ -84,15 +85,28 @@ if [ -f "$JSON" ]; then
   jq "$del_filter" "$JSON" > "$tmp" && mv "$tmp" "$JSON"
   echo "Cleared stale ETH artifact keys: ${STALE_KEYS[*]}"
 else
+  JSON_WAS_ABSENT=1
   echo "No existing $JSON — treating as a fresh deploy."
 fi
 
-# In simulation, restore the original JSON on exit so vm.writeJson's simulated addresses
-# don't persist. On a real broadcast the new (real) addresses are kept.
+# In simulation, undo any deployments JSON that Foundry's FS cheatcodes wrote. The FS
+# cheatcodes (vm.writeJson) run during simulation too — they are NOT gated on --broadcast —
+# so a dry run otherwise persists SIMULATED addresses, and the next real run's idempotency
+# guard would treat them as "already deployed" and skip. Undo on exit so a dry run leaves no
+# trace (#59):
+#   - file pre-existed -> restore it from the backup;
+#   - file was absent  -> delete the file the simulation created.
+# On a real broadcast the new (real) addresses are kept.
 restore_on_sim() {
-  if [ "$BROADCAST" != "1" ] && [ -n "$BACKUP" ] && [ -f "$BACKUP" ]; then
+  if [ "$BROADCAST" = "1" ]; then
+    return
+  fi
+  if [ -n "$BACKUP" ] && [ -f "$BACKUP" ]; then
     cp "$BACKUP" "$JSON"
     echo "Simulation: restored $JSON from backup (no addresses written)."
+  elif [ "$JSON_WAS_ABSENT" = "1" ] && [ -f "$JSON" ]; then
+    rm -f "$JSON"
+    echo "Simulation: removed $JSON created during the dry run (no addresses written)."
   fi
 }
 trap restore_on_sim EXIT
