@@ -1,0 +1,50 @@
+{
+  "_comment": "Storage-layout snapshot of WrappedON.WrappedONStorage (ERC-7201 slot orochi.storage.WrappedON). Guards wON UUPS upgrades (issue #50). Regenerate with `make update-storage-layout` ONLY for an intentional append; any reorder/insert/remove/retype is a proxy-state-corrupting change.",
+  "struct": {
+    "encoding": "inplace",
+    "label": "struct WrappedON.WrappedONStorage",
+    "members": [
+      {
+        "label": "on",
+        "offset": 0,
+        "slot": "0",
+        "type": {
+          "encoding": "inplace",
+          "label": "contract IERC20",
+          "numberOfBytes": "20"
+        }
+      },
+      {
+        "label": "ccipMintHeadroomUsed",
+        "offset": 0,
+        "slot": "1",
+        "type": {
+          "encoding": "inplace",
+          "label": "uint256",
+          "numberOfBytes": "32"
+        }
+      },
+      {
+        "label": "ccipAdmin",
+        "offset": 0,
+        "slot": "2",
+        "type": {
+          "encoding": "inplace",
+          "label": "address",
+          "numberOfBytes": "20"
+        }
+      },
+      {
+        "label": "pendingCcipAdmin",
+        "offset": 0,
+        "slot": "3",
+        "type": {
+          "encoding": "inplace",
+          "label": "address",
+          "numberOfBytes": "20"
+        }
+      }
+    ],
+    "numberOfBytes": "128"
+  }
+}
