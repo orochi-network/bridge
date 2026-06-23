@@ -38,6 +38,14 @@ jobs:
       - name: Forge fmt check
         run: forge fmt --check
 
+      # wON storage-layout regression guard (issue #50). wON is a UUPS proxy whose state lives
+      # in the ERC-7201 `WrappedONStorage` struct; this fails the build if a future impl
+      # reorders/inserts/removes/retypes a field vs the committed snapshot. Uses python3
+      # (preinstalled on ubuntu-latest) for stable normalisation. An intentional append is
+      # accepted only via `make update-storage-layout` + a committed snapshot bump.
+      - name: Storage-layout guard (wON)
+        run: make check-storage-layout
+
       - name: Forge test
         run: forge test -vvv
 

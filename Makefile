@@ -1,4 +1,5 @@
 .PHONY: help install patch-pragmas build test test-unit test-e2e test-fork fmt fmt-check coverage clean check-links \
+        check-storage-layout update-storage-layout \
         precheck-helper validate-config validate-bsc-admin deploy-eth redeploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce update-limits
 
 # ─── Defaults ──────────────────────────────────────────────────────────────────
@@ -26,6 +27,8 @@ help:
 	@echo "  make fmt-check       forge fmt --check"
 	@echo "  make coverage        forge coverage --report summary"
 	@echo "  make check-links     verify Chainlink doc URLs in tracked sources still resolve (pre-release)"
+	@echo "  make check-storage-layout   diff wON's WrappedONStorage layout vs the committed snapshot (#50)"
+	@echo "  make update-storage-layout  refresh that snapshot after an intentional struct APPEND"
 	@echo "  make clean           remove cache/, out/, broadcast/"
 	@echo ""
 	@echo "Deployment (load .env first; values in capitals come from env):"
@@ -106,6 +109,20 @@ fmt-check:
 
 coverage:
 	forge coverage --report summary
+
+# wON storage-layout regression guard (issue #50). wON is a UUPS proxy whose entire state
+# lives in the ERC-7201 namespaced struct `WrappedONStorage` — which `forge inspect` reports
+# as EMPTY on the contract itself, so nothing in CI would catch a field reorder/insert in a
+# future impl (silent proxy-state corruption). `check-storage-layout` inspects the dedicated
+# probe (test/storage/StorageLayoutProbe.sol), normalises the struct layout, and diffs it
+# against the committed snapshot (storage/WrappedON.storage-layout.json), failing on ANY
+# change. Run `update-storage-layout` ONLY after an intentional, layout-compatible APPEND.
+# Wired into CI (.github/workflows/ci.yml). See script/storage-layout.sh.
+check-storage-layout:
+	./script/storage-layout.sh check
+
+update-storage-layout:
+	./script/storage-layout.sh update
 
 clean:
 	forge clean

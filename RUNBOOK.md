@@ -520,7 +520,7 @@ wON is UUPS-upgradeable via `upgradeToAndCall` on the proxy, gated by `UPGRADER_
 **Before upgrading:**
 
 1. Verify the new implementation compiles cleanly: `forge build`.
-2. Check storage-layout compatibility manually — the new impl MUST NOT reorder or resize fields in the ERC-7201 `WrappedONStorage` struct. Adding new fields at the END of the struct is safe.
+2. Check storage-layout compatibility: `make check-storage-layout` (issue #50). The new impl MUST NOT reorder, insert, remove, or resize fields in the ERC-7201 `WrappedONStorage` struct — any of those corrupts live proxy state, and the guard fails the build on it. Adding a new field at the END of the struct is the ONLY safe change; for an intentional append, run `make update-storage-layout` to refresh the committed snapshot at `storage/WrappedON.storage-layout.json` and commit it alongside the `WrappedON.sol` change. This check is also wired into PR CI (`.github/workflows/ci.yml`), so a layout-breaking change cannot merge silently. (Mechanics: the guard inspects `test/storage/StorageLayoutProbe.sol` because `WrappedON`'s ERC-7201 storage is invisible to a plain `forge inspect` of the contract; see `script/storage-layout.sh`.)
 3. Run the full test suite against the new impl: `make test`.
 
 **Upgrade procedure (multisig + timelock):**
