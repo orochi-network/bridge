@@ -75,8 +75,9 @@ No reserve read, no `safeTransfer`, no `CCIPAutoUnwrapped`. Every BSC→ETH arri
 ## Out of scope (unchanged)
 
 Permissionless `deposit`/`withdraw`; `MAX_CCIP_MINTED` cap and counter mechanics; UUPS proxy,
-`TimelockController`, and pause. The historical `docs/superpowers/{plans,specs}/*autounwrap*`
-files are left as a record of what #45 shipped; this doc supersedes them.
+`TimelockController`, and pause. The now-superseded auto-unwrap plan/spec docs were removed
+when auto-unwrap was deleted; the behaviour they described lives on only in git history and in
+SECURITY.md WON-20.
 
 ## Alternatives rejected
 

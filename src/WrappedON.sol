@@ -273,18 +273,13 @@ contract WrappedON is
     // ─── IBurnMintERC20 (pool-only) ───────────────────────────────────────────
 
     /// @notice CCIP `BurnMintTokenPool.releaseOrMint` entrypoint.
-    /// @dev Always mints wON — the registered token — to `account`, EOA or contract alike. It
-    ///      NEVER reads the reserve or delivers native ON, so the asset a BSC→ETH receiver
-    ///      gets is deterministic and not front-runnable via the permissionless
-    ///      `deposit`/`withdraw` reserve (issue #48). Holders who want native ON call
-    ///      `withdraw`. The reserve can therefore only ever leave via `withdraw`, never via a
-    ///      CCIP arrival.
-    ///      Capped at `MAX_CCIP_MINTED` via `ccipMintHeadroomUsed`. See the contract-level
-    ///      CAP REPLENISHMENT block (CCIP-7) for the cycling-refill semantics — the cap
-    ///      is a live BSC-balance approximation, not a lifetime CCIP-mint ceiling.
-    ///      WON-17: `nonReentrant` is defensive — OZ 5.x ERC20 has no hooks, so re-entry
-    ///      via `_mint` cannot happen today. The guard locks the cap-counter / mint
-    ///      ordering against a future subclass that overrides `_update`.
+    /// @dev Always mints wON to `account` (EOA or contract); never reads the reserve or
+    ///      delivers native ON, so the delivered asset is deterministic, not front-runnable
+    ///      via the permissionless reserve (issue #48). Native ON is obtained via `withdraw`.
+    ///      Capped at `MAX_CCIP_MINTED` via `ccipMintHeadroomUsed` (CAP REPLENISHMENT / CCIP-7
+    ///      — a live BSC-balance approximation, not a lifetime ceiling). WON-17: `nonReentrant`
+    ///      is defensive (OZ 5.x ERC20 has no hooks) — it pins the cap-counter / mint ordering
+    ///      against a future `_update`-overriding subclass.
     function mint(address account, uint256 amount) external onlyRole(MINTER_ROLE) nonReentrant whenNotPaused {
         // Zero-amount mints emit a Transfer(pool, account, 0) log and otherwise no-op,
         // matching the asymmetry the `deposit`/`withdraw` guards exist to prevent.

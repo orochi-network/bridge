@@ -86,7 +86,7 @@ deployments/<chainId>.json        written by scripts via vm.writeJson
 Everything goes through the `Makefile`. The full sequence is documented in `RUNBOOK.md`. Key targets:
 
 - `make install`               — submodule init + patch-pragmas (one-time after clone).
-- `make test`                  — full test suite, no fork: 139 tests total (135 unit/integration + 4 stateful invariants).
+- `make test`                  — full suite: 174 tests total (incl. 4 stateful invariants); fork tests self-skip when ETH_RPC/BSC_RPC unset.
 - `make test-unit`             — WrappedON.t.sol unit tests only.
 - `make test-e2e`              — PoolRoundtrip + DeploymentE2E integration tests.
 - `make test-fork ETH_RPC=... BSC_RPC=...` — fork tests against live mainnet (10 tests).
