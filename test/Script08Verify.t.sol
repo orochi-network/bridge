@@ -102,6 +102,29 @@ contract PostDeployVerifyHarness is PostDeployVerify {
     function exposeCheckTimelockHandoff(address timelock, address multisig, address deployer) external view {
         _checkTimelockHandoff(timelock, multisig, deployer);
     }
+
+    /// @notice DEP-25: expose the registry admin-role handoff check so each branch can be
+    ///         exercised against a `MockRegistryConfig` without a full registry fixture.
+    function exposeCheckRegistryAdminHandoff(address registry, address token, address multisig) external view {
+        _checkRegistryAdminHandoff(registry, token, multisig);
+    }
+}
+
+/// @dev DEP-25: minimal TokenAdminRegistry returning a settable
+///      {administrator, pendingAdministrator} so the handoff-verification branches are
+///      exercisable. Third struct member (tokenPool) is irrelevant to this check.
+contract MockRegistryConfig {
+    address public administrator;
+    address public pendingAdministrator;
+
+    function set(address admin, address pending) external {
+        administrator = admin;
+        pendingAdministrator = pending;
+    }
+
+    function getTokenConfig(address) external view returns (address, address, address) {
+        return (administrator, pendingAdministrator, address(0));
+    }
 }
 
 /// @notice Locks `_assertEnabledAndConfigured` against the four cases that matter for
@@ -410,5 +433,63 @@ contract Script08VerifyTest is Test {
             abi.encodeWithSelector(PostDeployVerify.RoleNotRenounced.selector, "timelock DEFAULT_ADMIN_ROLE", deployer)
         );
         h.exposeCheckTimelockHandoff(address(tl), multisig, deployer);
+    }
+
+    // ─── DEP-25: registry admin-role handoff verification ──────────────────────────
+
+    /// @notice Happy path: the multisig is the ACTIVE registry administrator with no
+    ///         transfer mid-flight — passes.
+    function test_CheckRegistryAdmin_PassesWhenMultisigIsActiveAdmin() public {
+        address multisig = makeAddr("multisig");
+        address token = makeAddr("token");
+        MockRegistryConfig reg = new MockRegistryConfig();
+        reg.set(multisig, address(0));
+        h.exposeCheckRegistryAdminHandoff(address(reg), token, multisig);
+    }
+
+    /// @notice `transferAdminRole` never broadcast: admin still the deployer. Previously
+    ///         `make verify-*` printed "all passed" here (only `getPool` was checked).
+    function test_CheckRegistryAdmin_RevertsWhenAdminStillDeployer() public {
+        address multisig = makeAddr("multisig");
+        address deployer = makeAddr("deployer");
+        address token = makeAddr("token");
+        MockRegistryConfig reg = new MockRegistryConfig();
+        reg.set(deployer, address(0));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(PostDeployVerify.RegistryAdminNotHandedOff.selector, token, multisig, deployer)
+        );
+        h.exposeCheckRegistryAdminHandoff(address(reg), token, multisig);
+    }
+
+    /// @notice The exact gap on the BSC leg: `transferAdminRole(token, multisig)` broadcast
+    ///         but the multisig never called `acceptAdminRole` — admin is still the deployer,
+    ///         pending == multisig. A half-handed-off registry whose admin can still re-point
+    ///         the pool via `setPool`. Must revert (active admin != multisig).
+    function test_CheckRegistryAdmin_RevertsWhenTransferOnlyPending() public {
+        address multisig = makeAddr("multisig");
+        address deployer = makeAddr("deployer");
+        address token = makeAddr("token");
+        MockRegistryConfig reg = new MockRegistryConfig();
+        reg.set(deployer, multisig);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(PostDeployVerify.RegistryAdminNotHandedOff.selector, token, multisig, deployer)
+        );
+        h.exposeCheckRegistryAdminHandoff(address(reg), token, multisig);
+    }
+
+    /// @notice Admin IS the multisig, but an outbound transfer to a third party is mid-flight
+    ///         — surfaces the dedicated `RegistryAdminTransferPending` so the operator does
+    ///         not treat an in-flight away-transfer as a settled handoff.
+    function test_CheckRegistryAdmin_RevertsWhenOutboundTransferPending() public {
+        address multisig = makeAddr("multisig");
+        address other = makeAddr("other");
+        address token = makeAddr("token");
+        MockRegistryConfig reg = new MockRegistryConfig();
+        reg.set(multisig, other);
+
+        vm.expectRevert(abi.encodeWithSelector(PostDeployVerify.RegistryAdminTransferPending.selector, token, other));
+        h.exposeCheckRegistryAdminHandoff(address(reg), token, multisig);
     }
 }

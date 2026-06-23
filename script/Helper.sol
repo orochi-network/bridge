@@ -94,6 +94,20 @@ abstract contract Helper {
         }
     }
 
+    /// @notice True if `s` begins with `prefix`. Shared by the scripts that do CCIP
+    ///         `typeAndVersion()` identity checks (`ValidateConfig`, `03_GrantRoles`) so a
+    ///         contract's patch-version suffix can drift across submodule bumps without a
+    ///         source edit — the check anchors on the immutable TYPE name, not the version.
+    function _startsWith(string memory s, string memory prefix) internal pure returns (bool) {
+        bytes memory sb = bytes(s);
+        bytes memory pb = bytes(prefix);
+        if (sb.length < pb.length) return false;
+        for (uint256 i = 0; i < pb.length; i++) {
+            if (sb[i] != pb[i]) return false;
+        }
+        return true;
+    }
+
     /// @notice Chain id of the CCIP counterpart (ETH <-> BSC, Sepolia <-> BSC testnet).
     /// @dev Shared by the deploy/ops scripts that wire or verify the remote side. Reverts
     ///      `UnsupportedChain` for any chain the bridge is not configured for.

@@ -15,6 +15,13 @@
 # volatile astId / source-path noise, keeps field order + slot + offset + resolved type) into
 # a stable JSON snapshot at storage/WrappedON.storage-layout.json.
 #
+# Scope note (UPG-5): this snapshot guards the MEMBER layout (order/slot/offset/type). It does
+# NOT catch a relocation of the whole WrappedONStorage struct via a changed _STORAGE_LOCATION /
+# namespace annotation — the members stay byte-identical relative to the (moved) base slot.
+# That case is covered separately by `test_Erc7201BaseSlotMatchesNamespace`, which derives the
+# base slot from the "orochi.storage.WrappedON" namespace and asserts V1 state lives there.
+# The snapshot diff and that test together are the full guard.
+#
 # Modes:
 #   check  (default) — regenerate the layout and diff it against the committed snapshot.
 #                      Exits non-zero on ANY difference (including appends — by design: an

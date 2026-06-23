@@ -14,6 +14,13 @@ import {Deployments} from "./Deployments.sol";
 
 interface ITokenAdminRegistry {
     function getPool(address localToken) external view returns (address);
+    /// @dev 96-byte static struct {administrator, pendingAdministrator, tokenPool}. CCIP's
+    ///      `getTokenConfig` returns the struct; flat-decoding to three addresses is ABI-
+    ///      equivalent for an all-static-member struct (the same shape scripts 04/06 use).
+    function getTokenConfig(address localToken)
+        external
+        view
+        returns (address administrator, address pendingAdministrator, address tokenPool);
 }
 
 /// @notice Programmatic verification that the deployment on the current chain is correctly wired.
@@ -59,6 +66,14 @@ contract PostDeployVerify is Script, Helper {
     ///      `prefer-custom-errors` detector stays quiet and `vm.expectRevert(selector)` works.
     error BscRebalancerReadFailed(address pool);
     error PoolOwnerReadFailed(address pool);
+    /// @dev DEP-25: `make verify-*` previously printed "all checks passed" while the
+    ///      TokenAdminRegistry admin role was still pending-acceptance by the multisig (or,
+    ///      if `transferAdminRole` was never broadcast, still held by the deployer). The
+    ///      registry administrator can re-point the token's pool via `setPool`, so a half-
+    ///      handed-off registry is a custody-relevant gap — especially on the BSC leg, which
+    ///      has no `RenounceDeployerAdmin` precondition to compensate. Surface both states.
+    error RegistryAdminNotHandedOff(address token, address expectedMultisig, address actualAdmin);
+    error RegistryAdminTransferPending(address token, address pendingAdmin);
 
     function run() external view {
         NetworkConfig memory local = getConfig(block.chainid);
@@ -128,6 +143,10 @@ contract PostDeployVerify is Script, Helper {
             }
         } else {
             _checkOwnershipHandoff(localPool, multisig);
+            // DEP-25: the registry admin role must also have fully landed on the multisig.
+            // Runs on BOTH chains in the MULTISIG-set branch — the BSC leg is the one with
+            // no renounce precondition to otherwise catch a half-completed registry handoff.
+            _checkRegistryAdminHandoff(local.tokenAdminRegistry, localToken, multisig);
             if (block.chainid == 1 || block.chainid == 11_155_111) {
                 // DEP-8: read DEPLOYER from env explicitly. View-only `forge script`
                 // resolves `msg.sender` to Foundry's default sender (`0x1804c8AB…`),
@@ -166,6 +185,21 @@ contract PostDeployVerify is Script, Helper {
             revert PoolNotRegistered(token, expectedPool, actualPool);
         }
         console.log("[ok] TokenAdminRegistry.getPool(%s) == %s", token, expectedPool);
+    }
+
+    /// @dev DEP-25: verify the TokenAdminRegistry admin-role handoff completed — the multisig
+    ///      is the ACTIVE `administrator` (not merely pending) and no transfer is mid-flight.
+    ///      Symmetric with `RenounceDeployerAdmin._assertReadyToRenounce`'s registry check
+    ///      (script 06), but unlike renounce this also runs on the BSC leg.
+    function _checkRegistryAdminHandoff(address registry, address token, address multisig) internal view {
+        (address administrator, address pendingAdministrator,) = ITokenAdminRegistry(registry).getTokenConfig(token);
+        if (administrator != multisig) {
+            revert RegistryAdminNotHandedOff(token, multisig, administrator);
+        }
+        if (pendingAdministrator != address(0)) {
+            revert RegistryAdminTransferPending(token, pendingAdministrator);
+        }
+        console.log("[ok] registry administrator == multisig %s", multisig);
     }
 
     function _checkPoolWiring(address pool, address expectedRouter, address expectedRmn) internal view {

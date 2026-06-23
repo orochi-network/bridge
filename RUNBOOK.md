@@ -8,7 +8,7 @@ This walks the deploy + handoff sequence end to end. Run on **testnet first** (S
 
 ### 0.1 Fill in CCIP infrastructure addresses
 
-Edit `script/Helper.sol` for **each chain** you'll deploy on. The address fields are intentional `address(0)` placeholders; fill them in from the [CCIP directory](https://docs.chain.link/ccip/directory):
+The CCIP infrastructure addresses in `script/Helper.sol` are already populated from the [CCIP directory](https://docs.chain.link/ccip/directory) for the four supported chains. **Re-verify them against the target chain before any broadcast** with `make validate-config RPC=<target>`. The only `address(0)` fields are the testnet `onToken`s (no canonical ON on Sepolia/BSC-testnet — deploy a mock). When adding a NEW chain, fill in these fields:
 
 - `router`
 - `rmnProxy`

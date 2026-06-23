@@ -78,7 +78,7 @@ ETHERSCAN_API_KEY=...
 BSCSCAN_API_KEY=...
 ```
 
-Then **edit `script/Helper.sol`** and replace the `address(0)` placeholders with the live CCIP infrastructure addresses for each chain you'll deploy on. Get them from the official [CCIP directory](https://docs.chain.link/ccip/directory). Scripts call `_requireSet` on every address they consume, so a missed placeholder fails fast with a `MissingAddress` revert before any broadcast.
+The CCIP infrastructure addresses in **`script/Helper.sol`** are already populated from the official [CCIP directory](https://docs.chain.link/ccip/directory) for the four supported chains (ETH mainnet, BSC mainnet, Sepolia, BSC testnet). **Re-verify them against the target chain before any broadcast** with `make validate-config RPC=<target>` (staticcalls each address and checks `typeAndVersion()`/`isChainSupported()`). The only `address(0)` fields are the testnet `onToken`s — there is no canonical ON on Sepolia/BSC-testnet, so deploy a mock there. Scripts call `_requireSet` on every address they consume, so any missed value fails fast with a `MissingAddress` revert before any broadcast.
 
 > **Key handling** (SECURITY: OPS-1). Signing is via a Foundry encrypted keystore account — no raw private key on the CLI or in `.env`. Create it once with `cast wallet import deployer --interactive`; the `make deploy-*` targets then sign with `--account deployer` (override with `ACCOUNT=<name>`) and forge prompts for the keystore password per broadcast. See `RUNBOOK.md §0.3` for the full procedure. The deployer EOA holds critical authority throughout the handoff window.
 
