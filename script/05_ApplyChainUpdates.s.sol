@@ -66,9 +66,14 @@ contract ApplyChainUpdates is Script, Helper {
                     break;
                 }
             }
+            // #55: script 05 only ADDS new lanes — it cannot re-point an existing one (the
+            // protocol rejects a re-add with `ChainAlreadyExists`, and there is no `setRemoteToken`
+            // to change the lane's remote token). When a remote redeploy leaves this lane stale,
+            // reconcile it with script 09 (atomic `applyChainUpdates` remove+add), NOT by re-running
+            // script 05 (which would just hit this revert again).
             require(
                 wired,
-                "stale remote pool wiring: local pool's remotePools for this chain do not include the remotePool in deployments JSON. Owner must reconcile via addRemotePool/removeRemotePool (or applyChainUpdates) and re-run."
+                "stale remote pool wiring: this lane does not include the remotePool in deployments JSON (remote redeploy?). Reconcile with `make reconcile-remote-pool RPC=<chain>` (script 09); re-running script 05 will not help."
             );
             console.log(
                 "Pool %s already wired to remote selector %d - skipping (rate-limit changes are NOT applied here; use `make update-limits`)",
