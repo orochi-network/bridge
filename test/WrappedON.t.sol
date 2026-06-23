@@ -12,7 +12,7 @@ import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.so
 
 import {IBurnMintERC20} from "@chainlink/contracts/src/v0.8/shared/token/ERC20/IBurnMintERC20.sol";
 import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/interfaces/IGetCCIPAdmin.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
 
@@ -61,7 +61,7 @@ contract ReentrantMockON is ERC20 {
             // cause (insufficient balance, allowance, etc.) doesn't masquerade as the
             // guard firing. Foundry surfaces the inner revert reason as a 4-byte selector.
             require(
-                ret.length >= 4 && bytes4(ret) == ReentrancyGuard.ReentrancyGuardReentrantCall.selector,
+                ret.length >= 4 && bytes4(ret) == ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector,
                 "expected ReentrancyGuardReentrantCall"
             );
             reentered = false;
@@ -100,7 +100,7 @@ contract ReentrantWithdrawMockON is ERC20 {
             // Assert the specific selector so an inner revert from a *different* cause doesn't
             // masquerade as the guard firing.
             require(
-                ret.length >= 4 && bytes4(ret) == ReentrancyGuard.ReentrancyGuardReentrantCall.selector,
+                ret.length >= 4 && bytes4(ret) == ReentrancyGuardTransient.ReentrancyGuardReentrantCall.selector,
                 "expected ReentrancyGuardReentrantCall"
             );
             reentered = false;
