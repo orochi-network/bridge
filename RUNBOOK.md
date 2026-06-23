@@ -315,6 +315,18 @@ MULTISIG=0x<safe-address> make verify-bsc RPC=bsc
 
 This adds an ownership-handoff check: `pool.owner() == multisig` on each chain.
 
+> **Verify the ACCEPTED CCIP admin, not just the pending proposal (#58).** `ccipAdmin` lives in
+> its own storage slot, **outside** AccessControl, and rotates independently of `DEFAULT_ADMIN_ROLE`
+> via the two-step `setCCIPAdmin` → `acceptCCIPAdmin`. There is **no on-chain path for
+> `DEFAULT_ADMIN_ROLE` to reclaim or reset `ccipAdmin`** — if the multisig accepts
+> `DEFAULT_ADMIN_ROLE` but the CCIP-admin handoff is botched (`acceptCCIPAdmin` never called, or
+> accepted by a wrong/lost address), the registry-facing admin is stranded with no on-chain
+> remediation (re-registration would require Chainlink, the `TokenAdminRegistry` owner). So
+> confirm the **accepted** `getCCIPAdmin() == multisig`, not merely `pendingCCIPAdmin() == multisig`.
+> Both `make verify-eth` (script 08 `_checkDeployerRenounced`) and `make renounce` (script 06's
+> renounce precondition) enforce this: each asserts `getCCIPAdmin() == multisig` and reverts if the
+> multisig holds only an unaccepted pending proposal. See SECURITY.md WON-22.
+
 ### 3.4 Deployer renounces wON admin role (ETH only)
 
 After 3.2 + 3.3 confirm the multisig holds every role:

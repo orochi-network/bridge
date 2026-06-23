@@ -201,6 +201,33 @@ contract Script08VerifyTest is Test {
         h.exposeCheckDeployerRenounced(won, multisig, deployer);
     }
 
+    /// @notice #58: post-deploy verification asserts the ACCEPTED ccipAdmin (`getCCIPAdmin()`),
+    ///         not merely `pendingCCIPAdmin()`. Botched-handoff state: DEFAULT_ADMIN_ROLE fully
+    ///         handed off + deployer renounced, but ccipAdmin was only PROPOSED to the multisig
+    ///         (never accepted), so `getCCIPAdmin()` is still the deployer. The check must revert
+    ///         on the `ccipAdmin` RoleMissing branch — the asymmetry operators must verify so the
+    ///         two admin authorities coincide. Previously no test reached this branch.
+    function test_CheckDeployerRenounced_RevertsWhenCcipAdminOnlyProposed() public {
+        _MockON18 on = new _MockON18();
+        address deployer = makeAddr("deployer");
+        address multisig = makeAddr("multisig");
+
+        WrappedON won = DeployWON.deploy(IERC20(address(on)), deployer, deployer);
+        vm.startPrank(deployer);
+        won.grantRole(won.DEFAULT_ADMIN_ROLE(), multisig);
+        won.grantRole(won.PAUSER_ROLE(), multisig);
+        won.setCCIPAdmin(multisig); // PROPOSE only — multisig never accepts
+        won.renounceRole(won.DEFAULT_ADMIN_ROLE(), deployer); // earlier checks pass
+        vm.stopPrank();
+
+        // Botched: pending == multisig, but the accepted ccipAdmin is still the deployer.
+        assertEq(won.pendingCCIPAdmin(), multisig, "pending == multisig");
+        assertEq(won.getCCIPAdmin(), deployer, "accepted ccipAdmin still the deployer");
+
+        vm.expectRevert(abi.encodeWithSelector(PostDeployVerify.RoleMissing.selector, "ccipAdmin", multisig));
+        h.exposeCheckDeployerRenounced(won, multisig, deployer);
+    }
+
     // ─── TEST-20: BSC rebalancer + remote-link typed-revert paths ─────────────
 
     /// @notice TEST-20: an `UnexpectedRebalancer` revert fires when the BSC pool's slot is
