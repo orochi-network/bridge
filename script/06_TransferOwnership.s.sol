@@ -60,6 +60,14 @@ contract TransferOwnership is Script, Helper {
     ///      `deployments/<chainId>.json` cannot redirect the handoff to a foreign pool.
     error PoolTokenMismatch(address pool, address poolToken, address expectedToken);
     error PoolGetTokenCallFailed(address pool);
+    /// @dev DEP-26: BSC-only pre-handoff guard. The `LockReleaseTokenPool` launches with no
+    ///      rebalancer (script 02 sets none); a non-zero rebalancer means the locked-ON reserve
+    ///      can be drained via `withdrawLiquidity` the moment a setter acts. Asserting it is
+    ///      zero BEFORE transferring custody-grade ownership to the multisig is defense-in-depth
+    ///      at the broadcast itself, not just on the post-handoff `make verify-bsc` gate
+    ///      (script 08 `_checkBscRebalancer`). SECURITY: CCIP-1.
+    error UnexpectedRebalancer(address pool, address rebalancer);
+    error RebalancerReadFailed(address pool);
 
     function run() external {
         // Use envOr so the MissingMULTISIG case yields our own clear error rather than
@@ -112,6 +120,14 @@ contract TransferOwnership is Script, Helper {
             }
         } catch {
             revert PoolGetTokenCallFailed(pool);
+        }
+
+        // DEP-26: BSC leg only. Refuse to hand custody-grade pool ownership to the multisig
+        // while a rebalancer is set — otherwise the multisig inherits a pool whose locked-ON
+        // reserve is already drainable via `withdrawLiquidity`. ETH (BurnMintTokenPool) has no
+        // rebalancer concept, so this is gated to the non-ETH chains.
+        if (block.chainid != 1 && block.chainid != 11_155_111) {
+            _assertPoolHasNoRebalancer(pool);
         }
 
         vm.startBroadcast();
@@ -240,6 +256,21 @@ contract TransferOwnership is Script, Helper {
         console.log("  1. multisig.acceptOwnership() on pool", pool);
         console.log("  2. multisig.acceptAdminRole(token) on registry", cfg.tokenAdminRegistry);
         console.log("  3. After verifying multisig works, run RenounceDeployerAdmin.s.sol");
+    }
+
+    /// @dev DEP-26: assert the (BSC) pool's rebalancer slot is empty. Mirrors script 08's
+    ///      `_checkBscRebalancer` so the same custody-grade condition is enforced at handoff
+    ///      time, not only on the post-handoff verify run.
+    function _assertPoolHasNoRebalancer(address pool) internal view {
+        (bool ok, bytes memory data) = pool.staticcall(abi.encodeWithSignature("getRebalancer()"));
+        if (!ok || data.length != 32) {
+            revert RebalancerReadFailed(pool);
+        }
+        address rebalancer = abi.decode(data, (address));
+        if (rebalancer != address(0)) {
+            revert UnexpectedRebalancer(pool, rebalancer);
+        }
+        console.log("[ok] BSC pool.getRebalancer() == address(0) (pre-handoff)");
     }
 }
 

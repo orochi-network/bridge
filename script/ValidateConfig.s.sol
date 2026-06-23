@@ -190,15 +190,7 @@ contract ValidateConfig is Script, Helper {
         }
     }
 
-    function _startsWith(string memory s, string memory p) internal pure returns (bool) {
-        bytes memory sb = bytes(s);
-        bytes memory pb = bytes(p);
-        if (sb.length < pb.length) return false;
-        for (uint256 i = 0; i < pb.length; i++) {
-            if (sb[i] != pb[i]) return false;
-        }
-        return true;
-    }
+    // `_startsWith` is inherited from Helper (shared with 03_GrantRoles — DEP-27).
 
     function _eq(string memory a, string memory b) internal pure returns (bool) {
         return keccak256(bytes(a)) == keccak256(bytes(b));

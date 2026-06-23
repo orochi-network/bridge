@@ -477,7 +477,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 
 ### DEP-22: CCIP-4 `getToken()` check is forgeable; strengthened with multi-surface identity probes
 - **Severity:** LOW (filesystem-tamper required; impact high if hit)
-- **Status:** FIXED — script 03 now cross-checks `typeAndVersion() == "BurnMintTokenPool 1.5.0"`, `getRouter() == cfg.router`, AND `getRmnProxy() == cfg.rmnProxy` in addition to the existing `getToken() == wonAddr`. Each check is individually forgeable by a custom mock, but the combined surface raises the cost of a deployments JSON tamper from "write a 30-line `FakePool { getToken() returns wON; … }`" to "match four pool-identity surfaces simultaneously, including the cfg-bound router and RMN addresses".
+- **Status:** FIXED — script 03 now cross-checks the pool TYPE (`typeAndVersion()` begins with `"BurnMintTokenPool "` — see DEP-27 for why this is a prefix match, not the exact `"BurnMintTokenPool 1.6.1"`), `getRouter() == cfg.router`, AND `getRmnProxy() == cfg.rmnProxy` in addition to the existing `getToken() == wonAddr`. Each check is individually forgeable by a custom mock, but the combined surface raises the cost of a deployments JSON tamper from "write a 30-line `FakePool { getToken() returns wON; … }`" to "match four pool-identity surfaces simultaneously, including the cfg-bound router and RMN addresses".
 - **Location:** `script/03_GrantRoles.s.sol:36-86`
 - **Description:** A filesystem-write-attack between script 02 broadcast and script 03 read could install a `FakePool { getToken() returns wON; drain() { wON.mint(attacker, 100M); } }` and harvest `MINTER_ROLE`/`BURNER_ROLE`. The CCIP-4 check was a real defence but raised the forgery cost by a constant; DEP-22 raises it meaningfully.
 - **Impact:** Up to 100M wON mint authority granted to a forged pool if all four checks are passed.
@@ -498,6 +498,30 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Description:** Script 01 deployed the timelock with `admin = address(0)`, so only the timelock itself held `DEFAULT_ADMIN_ROLE`. Script 06's `_handoff` calls `tl.grantRole(PROPOSER_ROLE, multisig)` **as the deployer**, which is admin'd by `DEFAULT_ADMIN_ROLE` — so the call reverts `AccessControlUnauthorizedAccount(deployer, 0x00)`. The handoff (`make handoff-all`) would revert on the ETH side. The bug was masked by `Script06Renounce.t.sol` deploying the fixture timelock with `admin = address(this)`, and by no test exercising the actual `_handoff` grant.
 - **Impact:** The multisig handoff could not complete — the bridge could be deployed but never handed off to the ops multisig (deployer EOA stuck as the sole proposer/executor).
 - **Recommendation:** (Implemented) deploy the timelock with the deployer as setup-admin; renounce it after the operational-role handoff.
+
+### DEP-25: post-deploy verification (script 08) did not check the `TokenAdminRegistry` admin-role handoff
+- **Severity:** LOW
+- **Status:** FIXED — `08_PostDeployVerify` now calls `_checkRegistryAdminHandoff(registry, token, multisig)` in the `MULTISIG`-set branch on **both** chains. It reads `getTokenConfig(token)` and asserts the active `administrator == multisig` (reverts `RegistryAdminNotHandedOff`) and `pendingAdministrator == address(0)` (reverts `RegistryAdminTransferPending`). Tests: `test_CheckRegistryAdmin_*` (Script08Verify.t.sol).
+- **Location:** `script/08_PostDeployVerify.s.sol`.
+- **Description:** The always-on `_checkRegistry` only asserted `TokenAdminRegistry.getPool(token) == pool` — never the registry `administrator`. So `make verify-eth/bsc MULTISIG=..` printed "All checks passed" while the registry admin role was still pending-acceptance by the multisig (or, if `transferAdminRole` was never broadcast, still held by the deployer). On the ETH leg `RenounceDeployerAdmin._assertReadyToRenounce` blocks the renounce on `_registryAdministrator == multisig`, partly compensating; but verify is run/relied on independently of renounce, and the **BSC leg has no renounce step at all**, so the gap was real there.
+- **Impact:** A false-green on a half-handed-off registry. The registry administrator can re-point the token's pool via `setPool` — a custody-relevant authority.
+- **Recommendation:** (Implemented) assert the registry administrator and pending state in script 08, symmetric with the script-06 renounce precondition.
+
+### DEP-26: Script 06 BSC handoff did not assert `rebalancer == address(0)` before transferring pool ownership
+- **Severity:** LOW
+- **Status:** FIXED — `TransferOwnership._handoff` now calls `_assertPoolHasNoRebalancer(pool)` on the BSC leg (chainid ∉ {1, 11155111}) **before** `vm.startBroadcast()`. It staticcalls `getRebalancer()` and reverts `UnexpectedRebalancer` on a non-zero slot or `RebalancerReadFailed` on a malformed read. Tests: `Script06RebalancerTest` (Script06Rebalancer.t.sol).
+- **Location:** `script/06_TransferOwnership.s.sol`.
+- **Description:** The BSC `_handoff` did the DEP-20 `getToken()` cross-check but never read `getRebalancer()` before transferring custody-grade `LockReleaseTokenPool` ownership. If a rebalancer were set (accidentally or maliciously) before handoff, the multisig would inherit a pool whose locked-ON reserve is already drainable via `withdrawLiquidity`. Compensated only by script 08's always-on `_checkBscRebalancer` — and only if the operator actually runs `make verify-bsc` after handoff and before trusting it. Defense-in-depth at the handoff broadcast itself was absent. Sibling to CCIP-1 / DEP-3 (which cover the verify-side and the renounce reminder, not the handoff-time assertion).
+- **Impact:** Custody-grade if a non-zero rebalancer were present at handoff time and went unnoticed.
+- **Recommendation:** (Implemented) assert `getRebalancer() == address(0)` on the BSC leg of `_handoff`.
+
+### DEP-27: Script 03 `typeAndVersion` exact-match is brittle across CCIP patch bumps
+- **Severity:** LOW (fail-closed; maintenance/operational)
+- **Status:** FIXED — script 03's pool-type check matches the `"BurnMintTokenPool "` TYPE prefix (`_isExpectedPoolType` → `Helper._startsWith`) instead of the exact `keccak256("BurnMintTokenPool 1.6.1")`. `_startsWith` is now shared on `Helper` (also used by `ValidateConfig`, whose local copy was removed). Tests: `Script03GrantRolesTest` (Script03GrantRoles.t.sol) — accepts `1.6.1`/`1.6.2`/`2.0.0`, rejects `LockReleaseTokenPool …`, the empty string, a bare unversioned name, and a `BurnMintTokenPoolEvil` impostor.
+- **Location:** `script/03_GrantRoles.s.sol`, `script/Helper.sol`, `script/ValidateConfig.s.sol`.
+- **Description:** The exact-string keccak check would revert a perfectly legitimate pool on any CCIP patch bump (e.g. `1.6.2`), blocking `make deploy-eth` until the literal was hand-edited — silent breakage on a submodule update. The submodule pin already controls the deployed version, so this guard's job is TYPE identity (reject a LockReleaseTokenPool / non-pool), not version pinning. This matches the prefix-matching approach `ValidateConfig` already uses for the Router/Registry/RMN identity checks. The trailing space in the prefix ensures a version suffix must follow, so a bare-name or differently-named impostor is still rejected. The check remains defense-in-depth (the type string is forgeable, as DEP-22 notes); loosening from exact-version to type-prefix does not weaken the combined multi-surface probe.
+- **Impact:** Maintenance/operational only — fail-closed (a bumped pool reverts loudly rather than mis-granting).
+- **Recommendation:** (Implemented) prefix-match the pool type; share `_startsWith` on `Helper`.
 
 ---
 
@@ -1095,6 +1119,14 @@ redeploy + re-register"; that remains an option but is no longer the only path._
   2. **`reinitializer(2)` scaffold.** Added `test/mocks/WrappedONReinitV2Mock.sol` (new field in its own `orochi.storage.WrappedON.v2` namespace, `initializeV2` gated by `reinitializer(2)`) + tests `test_ReinitializerV2RunsExactlyOnce`, `test_ReinitializerV2DoesNotCollideWithV1`, `test_V1InitializeCannotBeReplayedAfterV2`. Proves the first stateful-upgrade pattern runs exactly once, keeps V1 state, and cannot reopen version 1. RUNBOOK §4.7 documents the atomic `upgradeToAndCall(newImpl, abi.encodeCall(initializeV2, …))` pattern.
   3. **`supportsInterface` checklist.** `supportsInterface` enumerates interface IDs manually; added an explicit "extend `supportsInterface`" item to the RUNBOOK §4.7 upgrade-PR checklist so a future interface-advertising module is not silently un-advertised.
 - **Location:** `test/WrappedONUpgrade.t.sol`, `test/mocks/WrappedONReinitV2Mock.sol`, `RUNBOOK.md §4.7`.
+
+### UPG-6: `DEFAULT_ADMIN_ROLE` → `MINTER_ROLE` self-grant is a no-delay mint path (parallel to, but NOT gated by, the upgrade timelock)
+- **Severity:** INFO (documentation of an accepted, inherent property)
+- **Status:** DESIGN ACK (documented 2026-06-23). `MINTER_ROLE`, `BURNER_ROLE`, and `PAUSER_ROLE` are all admin'd by `DEFAULT_ADMIN_ROLE` (OZ default — `initialize` reassigns only the admin of `UPGRADER_ROLE`, the UPG-1 self-admin). So a `DEFAULT_ADMIN_ROLE` holder (the ops multisig post-handoff) can `grantRole(MINTER_ROLE, self)` and `mint` up to `MAX_CCIP_MINTED = 100M` unbacked wON in a **single multisig transaction** — there is NO 48h delay on this path, unlike `upgradeToAndCall` which the UPGRADER timelock gates. This is inherent to the AccessControl model and consistent with the documented trust model (the multisig is a custody-grade authority on the ETH side); it is called out explicitly here so the asymmetry vs the timelocked upgrade path is on the record.
+- **Location:** `src/WrappedON.sol` (`initialize` role wiring; `mint`).
+- **Description:** Upgrades are deliberately slowed by the 48h `TimelockController` (UPG-1). Minting is not — it is bounded by the `MAX_CCIP_MINTED` cap and by who holds `MINTER_ROLE`, not by any delay. A compromised or malicious multisig is the dominant ETH-side custody risk regardless, and it could equally push a malicious upgrade (after the timelock) or grant itself `MINTER_ROLE` (immediately). The mint path is the faster of the two.
+- **Impact:** No new vector beyond the already-accepted "multisig is custody-grade" assumption; the point is that the *fastest* custody-drain on ETH does not route through the timelock.
+- **Recommendation:** Accepted (inherent to AccessControl; adding a delay would require a custom minter-gating module — rejected per the "keep surface small / use stock contracts" policy). Mitigation is operational: the RUNBOOK §3 monitoring table already pages on `RoleGranted(MINTER_ROLE, *)` where grantee ≠ ETH pool at **Critical** — this is the correct severity precisely because it is the fastest no-delay drain path. Verified present (RUNBOOK monitoring table).
 
 ---
 

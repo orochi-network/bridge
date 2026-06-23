@@ -77,13 +77,17 @@ contract GrantRoles is Script, Helper {
         } catch {
             revert PoolMisidentified(pool, "rmnProxy", cfg.rmnProxy, address(0));
         }
-        // typeAndVersion is "BurnMintTokenPool 1.6.1" on the chainlink-ccip
-        // contracts-ccip-v1.6.1 BurnMintTokenPool. Compare by keccak so the literal can drift
-        // without source-code text edits going stale in two places. Failure modes:
+        // DEP-27: match the pool TYPE prefix ("BurnMintTokenPool ") rather than pinning the
+        // exact patch version. The previous exact-string check reverted a perfectly legitimate
+        // pool on any CCIP patch bump (e.g. 1.6.2), blocking `make deploy-eth` until the literal
+        // was hand-edited. The submodule pin already controls the deployed version, so this
+        // guard's job is TYPE identity (reject a LockReleaseTokenPool / non-pool), not version
+        // pinning. Same prefix-matching approach `ValidateConfig` already uses for the CCIP infra.
+        // Failure modes:
         //   - selector missing (non-pool contract): caught below as PoolTypeMismatch with "".
-        //   - selector returns a different string: caught below with the actual value.
+        //   - selector returns a non-BurnMintTokenPool string: caught below with the actual value.
         try ITypeAndVersion(pool).typeAndVersion() returns (string memory typeStr) {
-            if (keccak256(bytes(typeStr)) != keccak256(bytes("BurnMintTokenPool 1.6.1"))) {
+            if (!_isExpectedPoolType(typeStr)) {
                 revert PoolTypeMismatch(pool, typeStr);
             }
         } catch {
@@ -111,5 +115,12 @@ contract GrantRoles is Script, Helper {
         vm.stopBroadcast();
 
         console.log("Granted MINTER+BURNER on wON %s to pool %s", address(won), pool);
+    }
+
+    /// @dev DEP-27: TYPE-identity check for the CCIP pool, robust to patch-version bumps.
+    ///      Anchors on the `"BurnMintTokenPool "` prefix (trailing space ⇒ a version suffix
+    ///      must follow, so a bare-name or differently-named impostor is rejected).
+    function _isExpectedPoolType(string memory typeStr) internal pure returns (bool) {
+        return _startsWith(typeStr, "BurnMintTokenPool ");
     }
 }
