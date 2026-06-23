@@ -994,7 +994,7 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 
 ### OPS-30: `RoleAdminChanged` not in handoff-window monitoring
 - **Severity:** LOW (forward-compat / defence-in-depth)
-- **Status:** FIXED — added `RoleAdminChanged(role, prev, new)` on `MINTER_ROLE`/`BURNER_ROLE` (wON) to the monitoring table at **High**. Annotated as forward-compat because OZ AccessControl 5.x's `_setRoleAdmin` is internal and wON does not expose it externally — but if a future redeploy ever does, the monitor catches the rotation.
+- **Status:** FIXED — added `RoleAdminChanged(role, prev, new)` on `MINTER_ROLE`/`BURNER_ROLE` (wON) to the monitoring table at **High**. Annotated as forward-compat because OZ AccessControl 5.x's `_setRoleAdmin` is internal; wON calls it exactly once at `initialize` (the one-time `UPGRADER_ROLE` self-admin — UPG-1, mitigation #3) and does not expose it externally, so no post-deploy admin rotation of `MINTER_ROLE`/`BURNER_ROLE` is reachable — but the monitor catches one if a future impl ever adds an external path.
 - **Location:** `RUNBOOK.md` §3 (monitoring table)
 - **Description:** §3.1 alerts on `RoleGranted` but not on a `RoleAdminChanged` swap that would silently re-parent who can grant.
 - **Impact:** Forward-compat only.
@@ -1012,15 +1012,16 @@ redeploy + re-register"; that remains an option but is no longer the only path._
 ### UPG-1: Upgrade authority is custody-grade
 
 - **Severity:** HIGH (by design — mitigated to DESIGN ACK)
-- **Status:** DESIGN ACK (mitigations documented below)
+- **Status:** DESIGN ACK (mitigations documented below). The `UPGRADER_ROLE`-admin timelock-bypass flagged in PR #47 review was CLOSED 2026-06-23 — see mitigation #3.
 - **Description:** `_authorizeUpgrade` is gated by `UPGRADER_ROLE`, held by the `TimelockController`. A TimelockController whose proposer/executor roles are held by a compromised multisig can schedule and execute an upgrade to a malicious implementation, which could drain the wON reserve, mint unbacked wON past `MAX_CCIP_MINTED`, or destroy any other state. This is a custody-grade risk analogous to the BSC pool's `setRebalancer` path.
 - **Mitigations:**
-  1. **48h mandatory delay** (the `TimelockController` default; `minDelay = 172800 seconds`). Any upgrade attempt is visible on-chain for 48 hours before it can execute. Monitoring on `CallScheduled` from the timelock gives the community and security team time to respond (revoke, cancel, or redeploy).
+  1. **48h mandatory delay** (the `TimelockController` default; `minDelay = 172800 seconds`). Any upgrade attempt is visible on-chain for 48 hours before it can execute. Monitoring on `CallScheduled` from the timelock gives the community and security team time to respond (revoke, cancel, or redeploy). This window is genuinely enforced because of mitigation #3.
   2. **Emergency pause** — the multisig's `PAUSER_ROLE` lets it halt value paths immediately if a malicious upgrade is in flight, limiting damage before the timelock executes.
-  3. **Two-step handoff** — `UPGRADER_ROLE` is set at `initialize` to the deployed `TimelockController`; it is never transferred or granted to an EOA.
+  3. **Self-administered `UPGRADER_ROLE` (on-chain enforced)** — `initialize` calls `_setRoleAdmin(UPGRADER_ROLE, UPGRADER_ROLE)`, so the role's admin is `UPGRADER_ROLE` itself (held only by the `TimelockController`), NOT `DEFAULT_ADMIN_ROLE`. Without this, OZ's default makes `DEFAULT_ADMIN_ROLE` (the ops multisig post-handoff) the admin of `UPGRADER_ROLE`, letting it `grantRole(UPGRADER_ROLE, itself)` and `upgradeToAndCall` in one transaction with **no delay** — making mitigation #1's 48h window advisory, not enforced. With self-administration, only the timelock can grant/revoke upgrade authority and every such grant is itself a 48h-timelocked tx; the role is set to the timelock at `initialize` and never granted to an EOA. Tests: `test_UpgraderRoleIsSelfAdministered`, `test_DefaultAdminCannotGrantUpgraderRole`, `test_TimelockCanGrantUpgraderRole` (WrappedONUpgrade.t.sol).
   4. **Implementation address monitoring** — `Upgraded(implementation)` on the proxy (ERC1967 standard event) must be a Critical alert in the monitoring table (RUNBOOK §Trust model).
   5. **Storage hygiene** — state is in ERC-7201 namespaced storage; accidental collision from a future impl adding fields is prevented by the namespace isolation. Field ordering in `WrappedONStorage` must not change across upgrades.
-- **Residual risk:** A compromised multisig that also holds `PAUSER_ROLE` (post-handoff) could pause AND schedule an upgrade. The 48h window is the only mitigation after that point. Key management of the multisig signers is the load-bearing control.
+- **`PAUSER_ROLE` admin:** intentionally left as the OZ default `DEFAULT_ADMIN_ROLE` (the ops multisig manages pausers). Acceptable because pause is halt-only (UPG-4) — a liveness authority, not an upgrade/custody one; a malicious pauser can at worst freeze the value paths, which `unpause` (also multisig) reverses. Pinned by `test_PauserRoleAdminIsDefaultAdmin`.
+- **Residual risk:** A compromised multisig that also holds `PAUSER_ROLE` (post-handoff) could pause AND schedule an upgrade — but it must still route the upgrade through the 48h timelock (mitigation #3 removes the no-delay bypass), so the window stands. Key management of the multisig signers is the load-bearing control.
 
 ### UPG-2: `_disableInitializers` in constructor prevents impl takeover
 

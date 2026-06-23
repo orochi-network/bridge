@@ -183,6 +183,14 @@ contract WrappedON is
     ///      tokens — same guards the old constructor enforced. The CCIP admin and the
     ///      `DEFAULT_ADMIN_ROLE` both hand off to the multisig (two-step each) before the
     ///      deployer renounces.
+    /// @dev `UPGRADER_ROLE` is made SELF-ADMINISTERED (`_setRoleAdmin(UPGRADER_ROLE,
+    ///      UPGRADER_ROLE)`): without this, OZ defaults its admin to `DEFAULT_ADMIN_ROLE`, so
+    ///      the post-handoff multisig could `grantRole(UPGRADER_ROLE, itself)` and upgrade with
+    ///      NO timelock delay. Self-administering it means only the timelock (the role holder)
+    ///      can grant/revoke upgrade authority, and every such grant is itself a timelocked tx —
+    ///      so the 48h reaction window is enforced, not advisory (SECURITY: UPG-1). `PAUSER_ROLE`
+    ///      intentionally keeps the default `DEFAULT_ADMIN_ROLE` admin: pause is halt-only
+    ///      (UPG-4), a liveness-only authority, so the multisig managing pausers is acceptable.
     function initialize(IERC20 onToken, address admin, address timelock) external initializer {
         if (address(onToken) == address(0) || admin == address(0) || timelock == address(0)) {
             revert ZeroAddress();
@@ -205,6 +213,9 @@ contract WrappedON is
         }
         WrappedONStorage storage $ = _s();
         $.on = onToken;
+        // UPGRADER_ROLE self-administers so DEFAULT_ADMIN_ROLE (the multisig post-handoff)
+        // cannot re-grant it and bypass the timelock — see the function NatSpec / UPG-1.
+        _setRoleAdmin(UPGRADER_ROLE, UPGRADER_ROLE);
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(PAUSER_ROLE, admin);
         _grantRole(UPGRADER_ROLE, timelock);

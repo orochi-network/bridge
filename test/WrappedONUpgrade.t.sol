@@ -69,6 +69,55 @@ contract WrappedONUpgradeTest is Test {
         won.upgradeToAndCall(address(v2), "");
     }
 
+    // ─── UPGRADER_ROLE admin model (timelock self-administers) ─────────────────
+    // The 48h timelock guarantee only holds if the role that GRANTS upgrade authority is
+    // itself timelocked. OZ defaults every role's admin to DEFAULT_ADMIN_ROLE, which would let
+    // the post-handoff multisig (DEFAULT_ADMIN_ROLE holder) grant ITSELF UPGRADER_ROLE and
+    // upgrade with no delay — bypassing the timelock entirely. `initialize` reassigns
+    // UPGRADER_ROLE's admin to UPGRADER_ROLE itself, so only the timelock can grant/revoke it,
+    // and any such grant is a timelocked transaction. (PR #47 reviewer blocker; SECURITY UPG-1.)
+
+    /// @notice UPGRADER_ROLE is self-administered, NOT admin'd by DEFAULT_ADMIN_ROLE.
+    function test_UpgraderRoleIsSelfAdministered() public view {
+        assertEq(won.getRoleAdmin(won.UPGRADER_ROLE()), won.UPGRADER_ROLE(), "UPGRADER_ROLE admin == UPGRADER_ROLE");
+        assertTrue(
+            won.getRoleAdmin(won.UPGRADER_ROLE()) != won.DEFAULT_ADMIN_ROLE(),
+            "UPGRADER_ROLE admin != DEFAULT_ADMIN_ROLE"
+        );
+    }
+
+    /// @notice The DEFAULT_ADMIN_ROLE holder (post-handoff: the multisig) CANNOT grant
+    ///         UPGRADER_ROLE — this is what closes the no-delay timelock-bypass path.
+    function test_DefaultAdminCannotGrantUpgraderRole() public {
+        bytes32 upgraderRole = won.UPGRADER_ROLE();
+        address attacker = makeAddr("attacker");
+        // admin holds DEFAULT_ADMIN_ROLE but is no longer the admin of UPGRADER_ROLE.
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, admin, upgraderRole)
+        );
+        vm.prank(admin);
+        won.grantRole(upgraderRole, attacker);
+    }
+
+    /// @notice The timelock (UPGRADER_ROLE holder) CAN grant UPGRADER_ROLE — the role is still
+    ///         manageable, but only through the timelocked path.
+    function test_TimelockCanGrantUpgraderRole() public {
+        bytes32 upgraderRole = won.UPGRADER_ROLE();
+        address newUpgrader = makeAddr("newUpgrader");
+        vm.prank(timelock);
+        won.grantRole(upgraderRole, newUpgrader);
+        assertTrue(won.hasRole(upgraderRole, newUpgrader), "timelock granted UPGRADER_ROLE");
+    }
+
+    /// @notice PAUSER_ROLE stays admin'd by DEFAULT_ADMIN_ROLE — the multisig manages pausers.
+    ///         Documented posture: pause is halt-only (UPG-4), so DEFAULT_ADMIN control here is
+    ///         a liveness-only authority, not an upgrade/custody one.
+    function test_PauserRoleAdminIsDefaultAdmin() public view {
+        assertEq(
+            won.getRoleAdmin(won.PAUSER_ROLE()), won.DEFAULT_ADMIN_ROLE(), "PAUSER_ROLE admin == DEFAULT_ADMIN_ROLE"
+        );
+    }
+
     /// @notice initialize cannot be called a second time on the proxy (re-init guard).
     function test_InitializeCannotBeCalledTwice() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);

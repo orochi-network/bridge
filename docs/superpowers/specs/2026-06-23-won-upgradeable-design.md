@@ -62,7 +62,9 @@ ERC1967Proxy (stable wON address, registered in TokenAdminRegistry)
         _authorizeUpgrade ── onlyRole(UPGRADER_ROLE) ── held by ──► TimelockController (48h)
                                                                        proposers/cancellers = multisig
         PAUSER_ROLE (multisig, immediate) ──► pause()/unpause()
-        DEFAULT_ADMIN_ROLE ──► multisig (role admin)
+        DEFAULT_ADMIN_ROLE ──► multisig (role admin of MINTER/BURNER/PAUSER — NOT UPGRADER)
+        UPGRADER_ROLE self-administers (_setRoleAdmin → itself) so the multisig can't
+            re-grant it and bypass the 48h timelock (PR #47 review; SECURITY UPG-1)
         MINTER_ROLE / BURNER_ROLE ──► stock BurnMintTokenPool
 ```
 
@@ -82,7 +84,11 @@ ERC1967Proxy (stable wON address, registered in TokenAdminRegistry)
   into an ERC-7201 namespaced storage struct.
 - `_authorizeUpgrade(address) internal override onlyRole(UPGRADER_ROLE)`.
 - New roles: `UPGRADER_ROLE` (granted to the timelock), `PAUSER_ROLE` (granted to the
-  multisig). `DEFAULT_ADMIN_ROLE` is their role admin.
+  multisig). `DEFAULT_ADMIN_ROLE` is the role admin of `PAUSER_ROLE` (and
+  `MINTER_ROLE`/`BURNER_ROLE`). `UPGRADER_ROLE` is made **self-administered** via
+  `_setRoleAdmin(UPGRADER_ROLE, UPGRADER_ROLE)` so `DEFAULT_ADMIN_ROLE` (the multisig
+  post-handoff) cannot grant itself upgrade authority and bypass the timelock — the 48h delay
+  is then genuinely enforced (PR #47 review; SECURITY UPG-1).
 - Add `whenNotPaused` to `mint`, `burn(uint256)`, `burn(address,uint256)`, `burnFrom`,
   `deposit`, `withdraw`. `pause()`/`unpause()` gated to `PAUSER_ROLE`.
 - The existing auto-unwrap, permissionless-deposit, cap-counter, and CCIP-admin two-step

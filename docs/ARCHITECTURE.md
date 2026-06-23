@@ -170,10 +170,10 @@ pool's `staticcall`-based interface probes succeed.
 
 | Role | Held by | Purpose |
 |---|---|---|
-| `DEFAULT_ADMIN_ROLE` | deployer → multisig (handoff) | OZ AccessControl admin. Can grant/revoke `MINTER_ROLE` / `BURNER_ROLE`. |
+| `DEFAULT_ADMIN_ROLE` | deployer → multisig (handoff) | OZ AccessControl admin. Can grant/revoke `MINTER_ROLE` / `BURNER_ROLE` / `PAUSER_ROLE` — but NOT `UPGRADER_ROLE` (self-administered, see below). |
 | `MINTER_ROLE` | Ethereum `BurnMintTokenPool` only | CCIP inbound — calls `mint(account, amount)`. |
 | `BURNER_ROLE` | Ethereum `BurnMintTokenPool` only | CCIP outbound — calls one of three `burn` overloads. |
-| `UPGRADER_ROLE` | `TimelockController` (48h delay) | Gates `_authorizeUpgrade` / `upgradeToAndCall`. Never granted to an EOA in production. |
+| `UPGRADER_ROLE` | `TimelockController` (48h delay) | Gates `_authorizeUpgrade` / `upgradeToAndCall`. **Self-administered** (`_setRoleAdmin(UPGRADER_ROLE, UPGRADER_ROLE)` in `initialize`) so `DEFAULT_ADMIN_ROLE` cannot re-grant it and bypass the timelock (SECURITY UPG-1). Never granted to an EOA in production. |
 | `PAUSER_ROLE` | deployer's `admin` arg → multisig (handoff) | Emergency `pause()`/`unpause()`. Halts value paths (mint/burn/deposit/withdraw); ERC20 transfers stay live. |
 | (logical) `s_ccipAdmin` | deployer → multisig (separate two-step) | Independent of `DEFAULT_ADMIN_ROLE`. Read by registry. |
 
