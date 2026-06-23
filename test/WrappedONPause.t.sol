@@ -146,4 +146,30 @@ contract WrappedONPauseTest is Test {
         won.mint(alice, 5 ether);
         assertEq(won.balanceOf(alice), 5 ether);
     }
+
+    /// @notice After unpause, 1:1 redemption (`withdraw`) is restored — the emergency redemption
+    ///         halt (WON-21 / #56) is reversible, not a permanent freeze. Completes the
+    ///         pause→unpause matrix alongside `test_UnpauseRestoresValuePaths` (mint).
+    function test_UnpauseRestoresWithdraw() public {
+        vm.startPrank(alice);
+        on.approve(address(won), 100 ether);
+        won.deposit(100 ether); // alice holds 100 wON; reserve = 100 ON
+        vm.stopPrank();
+
+        vm.prank(admin);
+        won.pause();
+        // While paused, redemption is frozen (WON-21).
+        vm.prank(alice);
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        won.withdraw(40 ether);
+
+        vm.prank(admin);
+        won.unpause();
+
+        uint256 onBefore = on.balanceOf(alice);
+        vm.prank(alice);
+        won.withdraw(40 ether); // must succeed once unpaused
+        assertEq(won.balanceOf(alice), 60 ether, "wON burned on redemption");
+        assertEq(on.balanceOf(alice) - onBefore, 40 ether, "native ON returned");
+    }
 }
