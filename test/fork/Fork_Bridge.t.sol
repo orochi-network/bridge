@@ -101,8 +101,8 @@ contract Fork_Bridge is Test {
                 remoteChainSelector: BSC_SELECTOR,
                 remotePoolAddresses: _remote(abi.encode(address(bscPool))),
                 remoteTokenAddress: abi.encode(ON_BSC),
-                outboundRateLimiterConfig: _limit(),
-                inboundRateLimiterConfig: _limit()
+                outboundRateLimiterConfig: _limitOut(),
+                inboundRateLimiterConfig: _limitIn()
             });
             vm.prank(deployer);
             ethPool.applyChainUpdates(new uint64[](0), up);
@@ -116,8 +116,8 @@ contract Fork_Bridge is Test {
                 remoteChainSelector: ETH_SELECTOR,
                 remotePoolAddresses: _remote(abi.encode(address(ethPool))),
                 remoteTokenAddress: abi.encode(address(won)),
-                outboundRateLimiterConfig: _limit(),
-                inboundRateLimiterConfig: _limit()
+                outboundRateLimiterConfig: _limitOut(),
+                inboundRateLimiterConfig: _limitIn()
             });
             vm.prank(deployer);
             bscPool.applyChainUpdates(new uint64[](0), up);
@@ -226,8 +226,13 @@ contract Fork_Bridge is Test {
 
     // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-    function _limit() internal pure returns (RateLimiter.Config memory) {
+    // Asymmetric defaults mirroring script 05 (#61): outbound (80k/8) below inbound (100k/10).
+    function _limitIn() internal pure returns (RateLimiter.Config memory) {
         return RateLimiter.Config({isEnabled: true, capacity: 100_000 ether, rate: 10 ether});
+    }
+
+    function _limitOut() internal pure returns (RateLimiter.Config memory) {
+        return RateLimiter.Config({isEnabled: true, capacity: 80_000 ether, rate: 8 ether});
     }
 
     /// @dev CCIP 1.6.1 `ChainUpdate.remotePoolAddresses` is `bytes[]`; wrap a single encoded pool.

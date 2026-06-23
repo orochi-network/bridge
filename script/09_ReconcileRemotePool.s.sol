@@ -43,10 +43,13 @@ import {Deployments} from "./Deployments.sol";
 ///   forge script script/09_ReconcileRemotePool.s.sol --rpc-url bsc --broadcast --account deployer
 ///   make reconcile-remote-pool RPC=bsc
 contract ReconcileRemotePool is Script, Helper {
-    // Same defaults as script 05; the atomic remove+add resets the rate-limiter buckets, so they
-    // must be re-supplied here. Keep in lockstep with `05_ApplyChainUpdates`.
-    uint128 internal constant DEFAULT_CAPACITY = 100_000 ether;
-    uint128 internal constant DEFAULT_RATE = 10 ether;
+    // Same asymmetric defaults as script 05 (#61): the atomic remove+add resets the rate-limiter
+    // buckets, so they must be re-supplied here. Outbound is set slightly below inbound per
+    // Chainlink's heuristic. KEEP IN LOCKSTEP with `05_ApplyChainUpdates`.
+    uint128 internal constant INBOUND_CAPACITY = 100_000 ether;
+    uint128 internal constant INBOUND_RATE = 10 ether;
+    uint128 internal constant OUTBOUND_CAPACITY = 80_000 ether;
+    uint128 internal constant OUTBOUND_RATE = 8 ether;
 
     /// @notice What `run()` will do for a given lane. Exposed (via `planAction`) so the decision
     ///         logic is unit-testable without a broadcast.
@@ -142,10 +145,10 @@ contract ReconcileRemotePool is Script, Helper {
             remotePoolAddresses: remotePoolAddresses,
             remoteTokenAddress: abi.encode(remoteToken),
             outboundRateLimiterConfig: RateLimiter.Config({
-                isEnabled: true, capacity: DEFAULT_CAPACITY, rate: DEFAULT_RATE
+                isEnabled: true, capacity: OUTBOUND_CAPACITY, rate: OUTBOUND_RATE
             }),
             inboundRateLimiterConfig: RateLimiter.Config({
-                isEnabled: true, capacity: DEFAULT_CAPACITY, rate: DEFAULT_RATE
+                isEnabled: true, capacity: INBOUND_CAPACITY, rate: INBOUND_RATE
             })
         });
     }

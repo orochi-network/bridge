@@ -83,7 +83,8 @@ contract Fork_ETH is Test {
             remoteChainSelector: BSC_SELECTOR,
             remotePoolAddresses: _remote(abi.encode(fakeRemoteBscPool)),
             remoteTokenAddress: abi.encode(ON_BSC),
-            outboundRateLimiterConfig: RateLimiter.Config({isEnabled: true, capacity: 100_000 ether, rate: 10 ether}),
+            // Asymmetric defaults mirroring script 05 (#61): outbound (80k/8) below inbound (100k/10).
+            outboundRateLimiterConfig: RateLimiter.Config({isEnabled: true, capacity: 80_000 ether, rate: 8 ether}),
             inboundRateLimiterConfig: RateLimiter.Config({isEnabled: true, capacity: 100_000 ether, rate: 10 ether})
         });
         ethPool.applyChainUpdates(new uint64[](0), updates);

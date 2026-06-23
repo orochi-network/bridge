@@ -225,7 +225,7 @@ CCIP infrastructure addresses on mainnet can change. Re-confirm against the [CCI
 
 ### 2.2 Calibrate rate limits
 
-Default in script 05 is 100,000 ON capacity + 10 ON/sec (~864k/day). Confirm with ops or adjust the constants in `script/05_ApplyChainUpdates.s.sol` before broadcasting.
+Defaults in script 05 are **directional** (#61, per Chainlink's "outbound slightly below inbound" guidance): **inbound 100,000 ON / 10 ON/sec** (~864k/day), **outbound 80,000 ON / 8 ON/sec**, on both pools. Confirm with ops or adjust the `INBOUND_*`/`OUTBOUND_*` constants in `script/05_ApplyChainUpdates.s.sol` (and the matching constants in `script/09_ReconcileRemotePool.s.sol`) before broadcasting. **Before mainnet: finalize the BSC-inbound (ETH→BSC release) bucket against the actual seeded BSC reserve liquidity** — that is the binding M2/CCIP-2 constraint (see §4.5).
 
 ### 2.3 Deploy
 
@@ -485,9 +485,11 @@ the Ethereum side** — this is enforced operationally.
 **Prevention (at launch and on every rate-limit change):**
 - Size the **ETH→BSC (BSC-inbound) rate-limit** bucket so its capacity never
   exceeds the BSC pool's releasable ON balance minus a safety buffer — the
-  outbound burst the ETH side will accept must be releasable on BSC. This is the
-  asymmetry `CCIP-2` warns about; do not leave limits symmetric if BSC liquidity
-  is thin. Tune via `make update-limits` (§4.1).
+  outbound burst the ETH side will accept must be releasable on BSC. Script 05's
+  directional defaults (#61) ship outbound below inbound per Chainlink guidance,
+  but the BSC-inbound capacity (100k default) is a placeholder that MUST be
+  finalized against the actual seeded BSC liquidity before broadcast — this is the
+  asymmetry `CCIP-2` warns about. Tune via `make update-limits` (§4.1).
 - Keep the §3 monitoring alert live: page when
   `BSC_ON.balanceOf(BSC_LockReleaseTokenPool)` falls below the configured ETH→BSC
   rate-limit capacity plus buffer.
