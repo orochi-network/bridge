@@ -35,12 +35,12 @@ Do the **whole testnet pass first** (Sepolia ⇄ BSC Testnet) before touching ma
 ## 3. Handoff to multisig (minimize the window — §3)
 
 - [ ] Multisig signers staged and ready **before** starting
-- [ ] `make handoff-all ETH_RPC=eth BSC_RPC=bsc MULTISIG=0x<safe>` (§3.1)
+- [ ] `make handoff-all ETH_RPC=eth BSC_RPC=bsc MULTISIG=0x<safe> CONFIRM_HANDOFF=yes` (§3.1)
 - [ ] Multisig accepts, **simulate each before signing** (§3.2):
   - ETH: `pool.acceptOwnership()`, `registry.acceptAdminRole(wON)`, `wON.acceptCCIPAdmin()`
   - BSC: `pool.acceptOwnership()`, `registry.acceptAdminRole(ON_BSC)`
 - [ ] `MULTISIG=0x.. make verify-eth RPC=eth` / `verify-bsc RPC=bsc` — ownership flipped (§3.3)
-- [ ] `make renounce RPC=eth MULTISIG=0x<safe>` — deployer drops wON admin + liquidity-manager roles. **Do not skip.** (§3.4)
+- [ ] `make renounce RPC=eth MULTISIG=0x<safe> CONFIRM_RENOUNCE=yes` — deployer drops wON admin + liquidity-manager roles. **Do not skip.** (§3.4)
 
 ## 4. Before going live
 

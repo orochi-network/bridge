@@ -118,8 +118,10 @@ forge script script/05_ApplyChainUpdates.s.sol --rpc-url eth --broadcast --accou
 5. ✅ ~~verify wiring~~ — done, 16/16 cross-chain checks pass.
 6. ⏳ **NEXT: small live bridge test both directions** (RUNBOOK §2.5); record tx hashes.
 7. ⏳ Ownership handoff to ops multisig (RUNBOOK §3), then deployer renounce.
-   - **Handoff/renounce Makefile targets are intentionally DISABLED** (decision 2026-06-19);
-     re-enable by uncommenting in the Makefile when ready.
+   - **Handoff/renounce Makefile targets are gated behind an explicit confirmation**
+     (decision 2026-06-19): they will not run without `CONFIRM_HANDOFF=yes` /
+     `CONFIRM_RENOUNCE=yes`, so they cannot fire accidentally pre-operational but are
+     triggerable by hand when ready — no Makefile edit needed. See RUNBOOK §3.
 
 ## Note on verify-* and the handoff check
 

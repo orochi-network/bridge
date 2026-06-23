@@ -135,8 +135,10 @@ make verify-bsc RPC=bsc
 After confirming mainnet works end-to-end:
 
 ```bash
-make handoff-all ETH_RPC=eth BSC_RPC=bsc MULTISIG=0x<safe-address>
+make handoff-all ETH_RPC=eth BSC_RPC=bsc MULTISIG=0x<safe-address> CONFIRM_HANDOFF=yes
 ```
+
+> Handoff and renounce are gated behind an explicit confirmation env var (`CONFIRM_HANDOFF=yes` / `CONFIRM_RENOUNCE=yes`) so they cannot fire accidentally — a deliberate, custody-grade, one-way step. Without the flag the target prints how to confirm and exits non-zero. See RUNBOOK §3.
 
 This runs the handoff sequentially against ETH then BSC. There is no atomic rollback — if the first leg succeeds and the second fails, the bridge is half-handed-off and you must re-run the second leg. The handoff steps are idempotent (multisig grants are no-ops if already in place; `transferOwnership` and `transferAdminRole` overwrite the pending acceptor), so re-running is safe. Each invocation:
 
@@ -168,7 +170,7 @@ MULTISIG=0x<safe-address> make verify-bsc RPC=bsc
 Only after step 9's `acceptCCIPAdmin` has landed:
 
 ```bash
-make renounce RPC=eth MULTISIG=0x<safe-address>
+make renounce RPC=eth MULTISIG=0x<safe-address> CONFIRM_RENOUNCE=yes
 ```
 
 The `RenounceDeployerAdmin` script pre-asserts that the multisig already holds `DEFAULT_ADMIN_ROLE`, `PAUSER_ROLE`, the timelock proposer/executor/canceller roles, AND has accepted the CCIP-admin role. If any is missing, the script reverts before renouncing — preventing an admin-less, permanently-unmanageable contract. It then renounces the deployer's own `DEFAULT_ADMIN_ROLE` + `PAUSER_ROLE` on wON and proposer/executor/canceller on the `TimelockController` (the deployer never held `UPGRADER_ROLE` — that sits on the timelock from `initialize`).
@@ -211,8 +213,8 @@ The `RenounceDeployerAdmin` script pre-asserts that the multisig already holds `
 | Deploy ETH side | `make deploy-eth RPC=…` |
 | Deploy BSC side | `make deploy-bsc RPC=…` |
 | Verify wiring | `make verify-eth RPC=…` / `make verify-bsc RPC=…` |
-| Handoff both chains | `make handoff-all ETH_RPC=… BSC_RPC=… MULTISIG=…` |
-| Renounce deployer admin | `make renounce RPC=eth MULTISIG=…` |
+| Handoff both chains | `make handoff-all ETH_RPC=… BSC_RPC=… MULTISIG=… CONFIRM_HANDOFF=yes` |
+| Renounce deployer admin | `make renounce RPC=eth MULTISIG=… CONFIRM_RENOUNCE=yes` |
 | Adjust rate limits | `make update-limits RPC=… OUTBOUND_CAPACITY=… …` |
 
 ---

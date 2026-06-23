@@ -99,8 +99,8 @@ Everything goes through the `Makefile`. The full sequence is documented in `RUNB
 - `make deploy-eth RPC=...`    — scripts 01→05 on the Ethereum side.
 - `make deploy-bsc RPC=...`    — scripts 02 + 04 + 05 on the BSC side.
 - `make verify-eth/bsc RPC=...` — script 08 view-only verification. Post-handoff renounce check needs `DEPLOYER=0x..` (SECURITY: DEP-8); pre-handoff or `MULTISIG`-unset runs don't.
-- `make handoff-all ETH_RPC=... BSC_RPC=... MULTISIG=0x..` — sequential two-chain handoff (re-run safe on partial failure; the second leg has no rollback if the first succeeds).
-- `make renounce RPC=eth MULTISIG=0x..` — final deployer-renounce after multisig accepts everything.
+- `make handoff-all ETH_RPC=... BSC_RPC=... MULTISIG=0x.. CONFIRM_HANDOFF=yes` — sequential two-chain handoff (re-run safe on partial failure; the second leg has no rollback if the first succeeds). Gated behind `CONFIRM_HANDOFF=yes` so it can't fire accidentally (decision 2026-06-19) — triggerable by hand, no Makefile edit.
+- `make renounce RPC=eth MULTISIG=0x.. CONFIRM_RENOUNCE=yes` — final deployer-renounce after multisig accepts everything; its own confirm flag so a handoff confirm can't cascade into the irreversible renounce.
 - `make update-limits ...`      — script 07 rate-limit tuning.
 
 ## Build & test
