@@ -177,4 +177,59 @@ contract WrappedONUpgradeTest is Test {
         vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
         won.mint(makeAddr("x"), 1 ether);
     }
+
+    // ─── Raw storage-slot stability across upgrade ────────────────────────────
+    // ERC-7201 namespacing makes the custom storage layout collision-proof by construction;
+    // this test PROVES it by reading the raw slots with vm.load before and after a real
+    // upgrade and asserting they are byte-identical — while the ERC1967 implementation slot
+    // (which SHOULD move) confirms the upgrade actually happened.
+
+    // Must equal `_STORAGE_LOCATION` in src/WrappedON.sol (cast index-erc7201 orochi.storage.WrappedON).
+    bytes32 internal constant WON_STORAGE_BASE = 0xc9356e8aa19da270b9a132fda93e9af24668c8487450db15f9b9e8baeb751900;
+    // ERC-1967 implementation slot = keccak256("eip1967.proxy.implementation") - 1.
+    bytes32 internal constant ERC1967_IMPL_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+
+    /// @notice Every custom (ERC-7201) storage slot is unchanged after an upgrade; only the
+    ///         implementation pointer moves. Fields are laid out sequentially from the base:
+    ///         [0]=ON, [1]=ccipMintHeadroomUsed, [2]=ccipAdmin, [3]=pendingCcipAdmin.
+    function test_StorageSlotsUnchangedAfterUpgrade() public {
+        // Populate every custom field with a non-zero value so the slot reads are meaningful.
+        address alice = makeAddr("alice");
+        address pendingAdmin = makeAddr("pendingAdmin");
+        vm.prank(pool);
+        won.mint(alice, 1234 ether); // ccipMintHeadroomUsed = 1234e18, ERC20 balance/supply set
+        vm.prank(admin);
+        won.setCCIPAdmin(pendingAdmin); // pendingCcipAdmin = pendingAdmin (ccipAdmin already = admin)
+
+        bytes32 s0 = vm.load(address(won), WON_STORAGE_BASE);
+        bytes32 s1 = vm.load(address(won), bytes32(uint256(WON_STORAGE_BASE) + 1));
+        bytes32 s2 = vm.load(address(won), bytes32(uint256(WON_STORAGE_BASE) + 2));
+        bytes32 s3 = vm.load(address(won), bytes32(uint256(WON_STORAGE_BASE) + 3));
+        bytes32 implBefore = vm.load(address(won), ERC1967_IMPL_SLOT);
+
+        // Guard against reading the wrong/empty slots (would make the equality checks vacuous).
+        assertTrue(s0 != 0 && s1 != 0 && s2 != 0 && s3 != 0, "custom slots must be populated");
+        assertTrue(implBefore != 0, "impl slot populated");
+
+        WrappedONV2Mock v2 = new WrappedONV2Mock();
+        vm.prank(timelock);
+        won.upgradeToAndCall(address(v2), "");
+
+        // Every custom storage slot is byte-identical after the upgrade.
+        assertEq(vm.load(address(won), WON_STORAGE_BASE), s0, "ON slot moved");
+        assertEq(vm.load(address(won), bytes32(uint256(WON_STORAGE_BASE) + 1)), s1, "headroom slot moved");
+        assertEq(vm.load(address(won), bytes32(uint256(WON_STORAGE_BASE) + 2)), s2, "ccipAdmin slot moved");
+        assertEq(vm.load(address(won), bytes32(uint256(WON_STORAGE_BASE) + 3)), s3, "pendingCcipAdmin slot moved");
+
+        // Cross-check the namespaced getters still resolve to the same data.
+        assertEq(address(won.ON()), address(on), "ON value preserved");
+        assertEq(won.ccipMintHeadroomUsed(), 1234 ether, "headroom value preserved");
+        assertEq(won.getCCIPAdmin(), admin, "ccipAdmin value preserved");
+        assertEq(won.pendingCCIPAdmin(), pendingAdmin, "pendingCcipAdmin value preserved");
+
+        // The implementation slot DID change — proves a real upgrade, not a no-op.
+        bytes32 implAfter = vm.load(address(won), ERC1967_IMPL_SLOT);
+        assertTrue(implBefore != implAfter, "impl slot must change on upgrade");
+        assertEq(address(uint160(uint256(implAfter))), address(v2), "impl slot points to V2");
+    }
 }
