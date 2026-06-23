@@ -9,6 +9,7 @@ import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Ini
 import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import {WrappedON} from "../src/WrappedON.sol";
 import {WrappedONV2Mock} from "./mocks/WrappedONV2Mock.sol";
+import {WrappedONReinitV2Mock} from "./mocks/WrappedONReinitV2Mock.sol";
 import {DeployWON} from "./helpers/DeployWON.sol";
 
 /// @dev Minimal mock of the canonical ON token (non-mintable ERC20). Mirrors the inline
@@ -281,5 +282,79 @@ contract WrappedONUpgradeTest is Test {
         bytes32 implAfter = vm.load(address(won), ERC1967_IMPL_SLOT);
         assertTrue(implBefore != implAfter, "impl slot must change on upgrade");
         assertEq(address(uint160(uint256(implAfter))), address(v2), "impl slot points to V2");
+    }
+
+    // ─── #60 item 1: ERC-7201 base slot is self-checked against the namespace string ──
+
+    /// @dev ERC-7201 slot derivation: `keccak256(abi.encode(keccak256(ns) - 1)) & ~0xff`.
+    function _erc7201(string memory ns) internal pure returns (bytes32) {
+        return keccak256(abi.encode(uint256(keccak256(bytes(ns))) - 1)) & ~bytes32(uint256(0xff));
+    }
+
+    /// @notice The member-layout guard (`make check-storage-layout`) catches reorder/insert/
+    ///         remove/retype but NOT a relocation of the whole struct via a changed
+    ///         storage-location annotation / `_STORAGE_LOCATION` constant (member layout stays
+    ///         byte-identical). This test closes that gap WITHOUT a hand-copied constant: it
+    ///         derives the base slot from the namespace STRING and asserts (a) the constant the
+    ///         storage tests use matches it, and (b) the contract's V1 state actually lives there
+    ///         (field [0] == `on`). A `_STORAGE_LOCATION` that no longer matched the namespace
+    ///         would move real storage off the string-derived slot and fail (b). (#60)
+    function test_Erc7201BaseSlotMatchesNamespace() public view {
+        bytes32 derived = _erc7201("orochi.storage.WrappedON");
+        assertEq(derived, WON_STORAGE_BASE, "hard-coded base slot drifted from the namespace string");
+        // Field [0] of WrappedONStorage is `on`; prove storage actually lives at the derived slot.
+        assertEq(
+            address(uint160(uint256(vm.load(address(won), derived)))),
+            address(on),
+            "WrappedONStorage is not at the namespace-derived slot"
+        );
+    }
+
+    // ─── #60 item 2: reinitializer(2) scaffold for the first stateful upgrade ──
+
+    /// @notice The `reinitializer(2)` initializer runs EXACTLY once: executed atomically with the
+    ///         upgrade, it sets the new V2 field; a second call reverts `InvalidInitialization`.
+    function test_ReinitializerV2RunsExactlyOnce() public {
+        WrappedONReinitV2Mock v2 = new WrappedONReinitV2Mock();
+        vm.prank(timelock);
+        won.upgradeToAndCall(address(v2), abi.encodeCall(WrappedONReinitV2Mock.initializeV2, (42)));
+
+        assertEq(WrappedONReinitV2Mock(address(won)).version(), 2, "impl swapped");
+        assertEq(WrappedONReinitV2Mock(address(won)).newField(), 42, "V2 field initialised once");
+
+        // reinitializer(2) is consumed — a second initializeV2 reverts.
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        WrappedONReinitV2Mock(address(won)).initializeV2(99);
+    }
+
+    /// @notice V2 state lives in its OWN ERC-7201 namespace and does NOT collide with V1 storage:
+    ///         V1 fields survive the upgrade and the new field sits at the v2 namespace slot.
+    function test_ReinitializerV2DoesNotCollideWithV1() public {
+        vm.prank(pool);
+        won.mint(admin, 7 ether); // seed V1 state: ccipMintHeadroomUsed = 7e18
+
+        WrappedONReinitV2Mock v2 = new WrappedONReinitV2Mock();
+        vm.prank(timelock);
+        won.upgradeToAndCall(address(v2), abi.encodeCall(WrappedONReinitV2Mock.initializeV2, (123)));
+
+        // V1 state preserved.
+        assertEq(won.ccipMintHeadroomUsed(), 7 ether, "V1 headroom preserved");
+        assertEq(address(won.ON()), address(on), "V1 ON preserved");
+        // V2 field set, and it lives at the distinct v2 namespace slot.
+        assertEq(WrappedONReinitV2Mock(address(won)).newField(), 123, "V2 field set");
+        bytes32 v2slot = _erc7201("orochi.storage.WrappedON.v2");
+        assertTrue(v2slot != WON_STORAGE_BASE, "v2 namespace must be distinct from v1");
+        assertEq(uint256(vm.load(address(won), v2slot)), 123, "V2 field at its own namespace slot");
+    }
+
+    /// @notice Initializer versions are monotonic: once V2 (version 2) has run, the V1 `initialize`
+    ///         (version 1) can never be replayed — a reinitializer scaffold must not reopen V1.
+    function test_V1InitializeCannotBeReplayedAfterV2() public {
+        WrappedONReinitV2Mock v2 = new WrappedONReinitV2Mock();
+        vm.prank(timelock);
+        won.upgradeToAndCall(address(v2), abi.encodeCall(WrappedONReinitV2Mock.initializeV2, (1)));
+
+        vm.expectRevert(Initializable.InvalidInitialization.selector);
+        won.initialize(IERC20(address(on)), admin, timelock);
     }
 }
