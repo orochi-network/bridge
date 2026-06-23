@@ -96,30 +96,29 @@ contract Script06RenounceTest is Test {
         pool = new MockOwnedPool();
         registry = new MockRegistry();
 
-        // Timelock mirroring script 01: deployer is the initial proposer/executor.
-        // The fixture uses `address(this)` as the timelock admin (rather than the
-        // self-administered address(0) of the real deploy) only so the test can grant the
-        // multisig's roles directly below — the lockout guard under test only reads
-        // `hasRole(PROPOSER/EXECUTOR/CANCELLER, multisig)`, which is unaffected by the
-        // admin choice.
+        // Timelock mirroring fixed script 01 (DEP-24): the deployer is the SETUP admin
+        // (`admin = deployer`) AND the initial proposer/executor/canceller. It can hand the
+        // operational roles to the multisig below precisely because it holds the timelock's
+        // DEFAULT_ADMIN_ROLE — the bug this fix closes was script 01 passing `address(0)`,
+        // which left the deployer unable to grant anything.
         address[] memory props = new address[](1);
         props[0] = deployer;
-        timelock = new TimelockController(0, props, props, address(this));
+        timelock = new TimelockController(0, props, props, deployer);
 
         // Default state for the happy path: full handoff complete.
         // wON: multisig has DEFAULT_ADMIN_ROLE + PAUSER_ROLE; multisig is the ccipAdmin.
+        // Timelock: multisig holds all three handed-off roles. All granted by the deployer
+        // (the setup admin), exactly as script 06 `_handoff` does.
         vm.startPrank(deployer);
         won.grantRole(won.DEFAULT_ADMIN_ROLE(), multisig);
         won.grantRole(won.PAUSER_ROLE(), multisig);
         won.setCCIPAdmin(multisig); // proposes
-        vm.stopPrank();
-        vm.prank(multisig);
-        won.acceptCCIPAdmin();
-
-        // Timelock: multisig holds all three handed-off roles (complete handoff).
         timelock.grantRole(timelock.PROPOSER_ROLE(), multisig);
         timelock.grantRole(timelock.EXECUTOR_ROLE(), multisig);
         timelock.grantRole(timelock.CANCELLER_ROLE(), multisig);
+        vm.stopPrank();
+        vm.prank(multisig);
+        won.acceptCCIPAdmin();
 
         // Pool ownership: multisig.
         pool.setOwner(multisig);
@@ -188,15 +187,19 @@ contract Script06RenounceTest is Test {
 
     // ─── Timelock-role lockout guard ─────────────────────────────────────────────
 
-    /// @notice LOCKOUT GUARD: the self-administered timelock (admin=address(0)) can only
-    ///         gain proposer/executor via a timelocked proposal. If the deployer renounces
-    ///         its timelock roles while the multisig lacks them, the upgrade path is
-    ///         PERMANENTLY locked. `_assertReadyToRenounce` must block this. Revoking the
-    ///         multisig's PROPOSER_ROLE (set up in setUp) must surface the typed message
-    ///         rather than letting the renounce proceed.
+    /// @notice LOCKOUT GUARD: once the deployer renounces its setup-admin (DEP-24), the
+    ///         timelock is self-administered and can only gain proposer/executor via a
+    ///         timelocked proposal. If the deployer renounces its roles while the multisig
+    ///         lacks them, the upgrade path is PERMANENTLY locked. `_assertReadyToRenounce`
+    ///         must block this. Revoking the multisig's PROPOSER_ROLE (set up in setUp) must
+    ///         surface the typed message rather than letting the renounce proceed.
     function test_RevertsWhenMultisigLacksTimelockRoles() public {
-        // Revoke the PROPOSER_ROLE grant set up in setUp (test contract is timelock admin).
-        timelock.revokeRole(timelock.PROPOSER_ROLE(), multisig);
+        // Revoke the multisig's PROPOSER_ROLE. Granted/revoked by the deployer (setup admin).
+        // Cache the role constant first so the external `PROPOSER_ROLE()` view doesn't consume
+        // the `vm.prank`.
+        bytes32 proposerRole = timelock.PROPOSER_ROLE();
+        vm.prank(deployer);
+        timelock.revokeRole(proposerRole, multisig);
 
         vm.expectRevert(bytes("multisig does NOT hold timelock PROPOSER_ROLE yet (re-run TransferOwnership)"));
         _call();
@@ -206,9 +209,11 @@ contract Script06RenounceTest is Test {
     ///         the script's `timelock != address(0)` guard). Even with the multisig lacking
     ///         every timelock role, passing `address(0)` must let the wON-only checks pass.
     function test_PassesWhenTimelockAddressZero() public {
+        vm.startPrank(deployer);
         timelock.revokeRole(timelock.PROPOSER_ROLE(), multisig);
         timelock.revokeRole(timelock.EXECUTOR_ROLE(), multisig);
         timelock.revokeRole(timelock.CANCELLER_ROLE(), multisig);
+        vm.stopPrank();
 
         // Passing address(0) for the timelock skips the lockout guard entirely.
         harness.exposeAssertReadyToRenounce(won, multisig, deployer, address(pool), address(registry), address(0));
@@ -235,5 +240,64 @@ contract Script06RenounceTest is Test {
 
         vm.expectRevert(bytes("registry adminRole NOT accepted by multisig (call acceptAdminRole first)"));
         _call();
+    }
+}
+
+/// @notice DEP-24 regression: the timelock-role HANDOFF itself must work. Fixed script 01
+///         deploys the `TimelockController` with `admin = deployer`, so the deployer can grant
+///         PROPOSER/EXECUTOR/CANCELLER to the multisig (script 06 `_handoff`) and then renounce
+///         all its own roles incl. the setup-admin (RenounceDeployerAdmin). The previous code
+///         deployed it self-administered (`admin = address(0)`), under which the deployer holds
+///         PROPOSER but NOT DEFAULT_ADMIN, so the grant REVERTS `AccessControlUnauthorizedAccount`
+///         — a deployment-blocking bug that the `_assertReadyToRenounce` fixtures masked by using
+///         `admin = address(this)`. These tests exercise the exact OZ calls in script-01/06 order.
+contract Script06TimelockHandoffTest is Test {
+    address internal deployer = makeAddr("deployer");
+    address internal multisig = makeAddr("multisig");
+
+    /// @notice Fixed model: the deployer hands off the operational roles and fully retires.
+    function test_HandoffAndRenounceSucceeds() public {
+        address[] memory props = new address[](1);
+        props[0] = deployer;
+        vm.prank(deployer);
+        TimelockController tl = new TimelockController(172_800, props, props, deployer); // admin = deployer
+
+        bytes32 prop = tl.PROPOSER_ROLE();
+        bytes32 exec = tl.EXECUTOR_ROLE();
+        bytes32 canc = tl.CANCELLER_ROLE();
+        bytes32 admin = tl.DEFAULT_ADMIN_ROLE();
+
+        vm.startPrank(deployer);
+        // script 06 _handoff: deployer grants the operational roles to the multisig.
+        tl.grantRole(prop, multisig);
+        tl.grantRole(exec, multisig);
+        tl.grantRole(canc, multisig);
+        // RenounceDeployerAdmin: deployer renounces all its roles incl. the setup-admin.
+        tl.renounceRole(prop, deployer);
+        tl.renounceRole(exec, deployer);
+        tl.renounceRole(canc, deployer);
+        tl.renounceRole(admin, deployer);
+        vm.stopPrank();
+
+        // End state: multisig holds the operational roles; deployer holds nothing; the
+        // timelock self-administers (only it retains DEFAULT_ADMIN_ROLE).
+        assertTrue(tl.hasRole(prop, multisig) && tl.hasRole(exec, multisig) && tl.hasRole(canc, multisig));
+        assertFalse(tl.hasRole(prop, deployer) || tl.hasRole(exec, deployer) || tl.hasRole(canc, deployer));
+        assertFalse(tl.hasRole(admin, deployer), "deployer renounced setup-admin");
+        assertTrue(tl.hasRole(admin, address(tl)), "timelock self-administers");
+    }
+
+    /// @notice The bug, locked in: under the OLD self-administered deploy (`admin = address(0)`)
+    ///         the deployer cannot grant the timelock roles — the handoff reverts.
+    function test_OldSelfAdministeredDeploy_HandoffReverts() public {
+        address[] memory props = new address[](1);
+        props[0] = deployer;
+        TimelockController tl = new TimelockController(172_800, props, props, address(0)); // OLD model
+        // Cache the role so the external view doesn't consume the prank/expectRevert.
+        bytes32 proposerRole = tl.PROPOSER_ROLE();
+
+        vm.prank(deployer);
+        vm.expectRevert(); // AccessControlUnauthorizedAccount(deployer, DEFAULT_ADMIN_ROLE)
+        tl.grantRole(proposerRole, multisig);
     }
 }

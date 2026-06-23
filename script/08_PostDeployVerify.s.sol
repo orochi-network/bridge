@@ -6,6 +6,8 @@ import {Script, console} from "forge-std/Script.sol";
 import {TokenPool} from "@chainlink/contracts-ccip/pools/TokenPool.sol";
 import {RateLimiter} from "@chainlink/contracts-ccip/libraries/RateLimiter.sol";
 
+import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
+
 import {WrappedON} from "../src/WrappedON.sol";
 import {Helper} from "./Helper.sol";
 import {Deployments} from "./Deployments.sol";
@@ -28,6 +30,15 @@ contract PostDeployVerify is Script, Helper {
     error RateLimitMisconfigured(string direction, uint128 capacity, uint128 rate);
     error RoleMissing(string role, address account);
     error RoleNotRenounced(string role, address account);
+    /// @dev DEP-23: the upgrade-authority wiring (added with the UUPS/timelock model) was not
+    ///      independently verified post-deploy. A role whose admin is not what the model
+    ///      requires — e.g. `UPGRADER_ROLE` still admin'd by `DEFAULT_ADMIN_ROLE` instead of
+    ///      self-administered — would let the multisig bypass the 48h timelock. Surface it.
+    error RoleAdminMismatch(string role, bytes32 expected, bytes32 actual);
+    /// @dev DEP-23: the deployed timelock's `minDelay` did not match the deploy-time value
+    ///      (`TIMELOCK_DELAY` env, default 48h) — a shorter delay silently weakens the upgrade
+    ///      reaction window.
+    error TimelockDelayMismatch(uint256 expected, uint256 actual);
     error PoolOwnershipNotHandedOff(address pool, address owner, address expectedMultisig);
     error UnexpectedRebalancer(address pool, address rebalancer);
     /// @dev DEP-9: `TokenPool.setRemotePool` accepts raw `bytes` with no encoding constraint.
@@ -80,8 +91,15 @@ contract PostDeployVerify is Script, Helper {
         _checkRemoteLink(localPool, remote.chainSelector, remotePool, remoteToken);
         _checkRateLimits(localPool, remote.chainSelector);
 
+        // ETH side only: the upgradeable model (UUPS proxy + timelock) lives here. Read the
+        // timelock recorded by script 01 once and reuse it for the upgrade-authority checks
+        // (always-on) and the post-handoff timelock-role check (below).
+        address wonTimelock;
         if (block.chainid == 1 || block.chainid == 11_155_111) {
             _checkWonRoles(WrappedON(localToken), localPool);
+            wonTimelock = Deployments.tryReadAddress(block.chainid, "wrappedONTimelock");
+            _requireSet(wonTimelock, "wrappedONTimelock (run script 01 on this chain first)");
+            _checkUpgradeAuthority(WrappedON(localToken), wonTimelock);
         } else {
             // BSC side: assert the LockReleaseTokenPool's rebalancer slot is zero. Any
             // non-zero rebalancer is a custody-grade event under the Chainlink CCT trust
@@ -135,6 +153,7 @@ contract PostDeployVerify is Script, Helper {
                     revert DeployerAddressMismatch(deployer, recorded);
                 }
                 _checkDeployerRenounced(WrappedON(localToken), multisig, deployer);
+                _checkTimelockHandoff(wonTimelock, multisig, deployer);
             }
         }
 
@@ -336,9 +355,100 @@ contract PostDeployVerify is Script, Helper {
         if (won.getCCIPAdmin() != multisig) {
             revert RoleMissing("ccipAdmin", multisig);
         }
+        // DEP-23: PAUSER_ROLE must have moved to the multisig and been renounced by the
+        // deployer (script 06 grants it at handoff and renounces in RenounceDeployerAdmin) —
+        // otherwise the emergency pause is either unavailable to ops or still wielded by the
+        // retiring deployer EOA.
+        bytes32 pauserRole = won.PAUSER_ROLE();
+        if (!won.hasRole(pauserRole, multisig)) {
+            revert RoleMissing("PAUSER_ROLE", multisig);
+        }
+        if (won.hasRole(pauserRole, deployer)) {
+            revert RoleNotRenounced("PAUSER_ROLE", deployer);
+        }
+        // DEP-23: the deployer must NEVER hold UPGRADER_ROLE — it is granted only to the
+        // timelock at `initialize`. A deployer copy would be an out-of-band, no-delay upgrade
+        // path that defeats the timelock entirely.
+        if (won.hasRole(won.UPGRADER_ROLE(), deployer)) {
+            revert RoleNotRenounced("UPGRADER_ROLE", deployer);
+        }
         console.log("[ok] wON DEFAULT_ADMIN_ROLE held only by multisig %s", multisig);
         console.log("[ok] wON ccipAdmin == multisig %s", multisig);
         console.log("[ok] wON DEFAULT_ADMIN_ROLE renounced by deployer %s", deployer);
+        console.log("[ok] wON PAUSER_ROLE held by multisig, renounced by deployer");
+        console.log("[ok] wON UPGRADER_ROLE not held by deployer");
+    }
+
+    /// @dev ETH-only, always-on. Verifies the UUPS upgrade-authority wiring established by
+    ///      script 01's `initialize`, which the whole 48h-timelock guarantee rests on:
+    ///        1. `UPGRADER_ROLE` is held by the deployed `TimelockController`.
+    ///        2. `UPGRADER_ROLE` is SELF-ADMINISTERED (`getRoleAdmin == UPGRADER_ROLE`), so
+    ///           `DEFAULT_ADMIN_ROLE` (the multisig post-handoff) cannot grant it and upgrade
+    ///           with no delay (SECURITY UPG-1 mitigation #3).
+    ///        3. `PAUSER_ROLE` keeps the default `DEFAULT_ADMIN_ROLE` admin (pause is halt-only).
+    ///        4. The timelock's `minDelay` matches the deploy-time value (`TIMELOCK_DELAY` env,
+    ///           default 48h).
+    function _checkUpgradeAuthority(WrappedON won, address timelock) internal view {
+        bytes32 upgrader = won.UPGRADER_ROLE();
+        if (!won.hasRole(upgrader, timelock)) {
+            revert RoleMissing("UPGRADER_ROLE", timelock);
+        }
+        bytes32 upgraderAdmin = won.getRoleAdmin(upgrader);
+        if (upgraderAdmin != upgrader) {
+            revert RoleAdminMismatch("UPGRADER_ROLE", upgrader, upgraderAdmin);
+        }
+        bytes32 defaultAdmin = won.DEFAULT_ADMIN_ROLE();
+        bytes32 pauserAdmin = won.getRoleAdmin(won.PAUSER_ROLE());
+        if (pauserAdmin != defaultAdmin) {
+            revert RoleAdminMismatch("PAUSER_ROLE", defaultAdmin, pauserAdmin);
+        }
+        uint256 expectedDelay = vm.envOr("TIMELOCK_DELAY", uint256(172_800));
+        uint256 actualDelay = TimelockController(payable(timelock)).getMinDelay();
+        if (actualDelay != expectedDelay) {
+            revert TimelockDelayMismatch(expectedDelay, actualDelay);
+        }
+        console.log("[ok] wON UPGRADER_ROLE held by timelock %s", timelock);
+        console.log("[ok] wON UPGRADER_ROLE self-administered (admin == UPGRADER_ROLE)");
+        console.log("[ok] wON PAUSER_ROLE admin == DEFAULT_ADMIN_ROLE");
+        console.log("[ok] timelock minDelay == %d", actualDelay);
+    }
+
+    /// @dev ETH-only, post-handoff. The timelock's PROPOSER/EXECUTOR/CANCELLER roles must be
+    ///      held by the multisig and renounced by the deployer (script 06). If the multisig
+    ///      lacks any, the upgrade path is stranded (the timelock self-administers these roles,
+    ///      so they can only be re-added via a timelocked proposal); if the deployer kept any,
+    ///      it retains an out-of-band path to drive the timelock.
+    function _checkTimelockHandoff(address timelock, address multisig, address deployer) internal view {
+        TimelockController tl = TimelockController(payable(timelock));
+        bytes32 proposer = tl.PROPOSER_ROLE();
+        bytes32 executor = tl.EXECUTOR_ROLE();
+        bytes32 canceller = tl.CANCELLER_ROLE();
+        if (!tl.hasRole(proposer, multisig)) {
+            revert RoleMissing("timelock PROPOSER_ROLE", multisig);
+        }
+        if (!tl.hasRole(executor, multisig)) {
+            revert RoleMissing("timelock EXECUTOR_ROLE", multisig);
+        }
+        if (!tl.hasRole(canceller, multisig)) {
+            revert RoleMissing("timelock CANCELLER_ROLE", multisig);
+        }
+        if (tl.hasRole(proposer, deployer)) {
+            revert RoleNotRenounced("timelock PROPOSER_ROLE", deployer);
+        }
+        if (tl.hasRole(executor, deployer)) {
+            revert RoleNotRenounced("timelock EXECUTOR_ROLE", deployer);
+        }
+        if (tl.hasRole(canceller, deployer)) {
+            revert RoleNotRenounced("timelock CANCELLER_ROLE", deployer);
+        }
+        // DEP-24: the deployer's SETUP-ONLY timelock DEFAULT_ADMIN_ROLE (script 01) must be
+        // renounced (script 06) so the timelock is fully self-administered — otherwise the
+        // deployer retains the power to grant itself proposer/executor and drive an upgrade.
+        if (tl.hasRole(tl.DEFAULT_ADMIN_ROLE(), deployer)) {
+            revert RoleNotRenounced("timelock DEFAULT_ADMIN_ROLE", deployer);
+        }
+        console.log("[ok] timelock PROPOSER/EXECUTOR/CANCELLER held by multisig %s", multisig);
+        console.log("[ok] timelock roles + setup-admin renounced by deployer %s", deployer);
     }
 
     function _remoteTokenAddress(NetworkConfig memory remote) internal view returns (address) {

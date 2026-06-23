@@ -333,6 +333,20 @@ contract RenounceDeployerAdmin is Script, Helper {
         } else {
             console.log("Deployer does not hold timelock CANCELLER_ROLE - skipping (already renounced).");
         }
+
+        // DEP-24: renounce the deployer's SETUP-ONLY timelock DEFAULT_ADMIN_ROLE (granted in
+        // script 01 so the deployer could grant the operational roles above). After this the
+        // timelock is fully self-administered — only the timelock itself retains
+        // DEFAULT_ADMIN_ROLE, so its roles can only ever change via a timelocked proposal.
+        // MUST come AFTER the proposer/executor/canceller handoff: once the deployer drops this
+        // role it can no longer grant anything on the timelock. Guarded so re-runs are safe.
+        bytes32 tlAdminRole = tl.DEFAULT_ADMIN_ROLE();
+        if (tl.hasRole(tlAdminRole, deployer)) {
+            tl.renounceRole(tlAdminRole, deployer);
+            console.log("Deployer", deployer, "renounced DEFAULT_ADMIN_ROLE on timelock");
+        } else {
+            console.log("Deployer does not hold timelock DEFAULT_ADMIN_ROLE - skipping (already renounced).");
+        }
         vm.stopBroadcast();
 
         require(!won.hasRole(adminRole, deployer), "renounce failed: deployer still has DEFAULT_ADMIN_ROLE");
@@ -370,9 +384,10 @@ contract RenounceDeployerAdmin is Script, Helper {
         require(won.getCCIPAdmin() == multisig, "wON ccipAdmin not yet accepted by multisig");
         require(won.hasRole(won.PAUSER_ROLE(), multisig), "multisig does NOT hold PAUSER_ROLE yet");
 
-        // LOCKOUT GUARD: the timelock was deployed self-administered (admin=address(0) in
-        // script 01), so its PROPOSER/EXECUTOR/CANCELLER roles can only be added via a
-        // timelocked proposal. If the deployer renounces its copies (below in `run()`)
+        // LOCKOUT GUARD: the deployer holds the timelock's DEFAULT_ADMIN_ROLE only for setup
+        // (granted in script 01) and renounces it in `run()` below — after which the timelock
+        // is fully self-administered and its PROPOSER/EXECUTOR/CANCELLER roles can only be added
+        // via a timelocked proposal. So if the deployer renounces its copies (below in `run()`)
         // while the multisig does NOT yet hold them, the timelock is left with no
         // proposer/executor and the upgrade path is PERMANENTLY locked. Block the renounce
         // until the multisig holds all three. Guarded on `timelock != address(0)` for the

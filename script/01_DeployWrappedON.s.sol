@@ -53,11 +53,16 @@ contract DeployWrappedON is Script, Helper {
         props[0] = admin;
 
         vm.startBroadcast();
-        // admin arg = address(0): no external admin; the timelock is self-administered
-        // (DEFAULT_ADMIN_ROLE held only by the timelock itself). The deployer holds
-        // PROPOSER_ROLE + CANCELLER_ROLE + EXECUTOR_ROLE (via the proposers/executors
-        // arrays above) and hands them off to the multisig in script 06.
-        TimelockController timelock = new TimelockController(timelockDelay, props, props, address(0));
+        // admin arg = deployer (msg.sender): the deployer is granted the timelock's
+        // DEFAULT_ADMIN_ROLE for SETUP ONLY. It needs it to grant PROPOSER/EXECUTOR/CANCELLER
+        // to the multisig during the script 06 handoff — those roles are admin'd by
+        // DEFAULT_ADMIN_ROLE, so a deployer that only held PROPOSER/EXECUTOR could not hand
+        // them off at all (passing address(0) here would brick the handoff — DEP-24). The
+        // deployer also holds PROPOSER/CANCELLER/EXECUTOR (via the arrays). RenounceDeployerAdmin
+        // renounces ALL of these, INCLUDING the timelock DEFAULT_ADMIN_ROLE, leaving the
+        // timelock self-administered (only the timelock itself retains DEFAULT_ADMIN_ROLE) with
+        // the multisig as sole proposer/executor/canceller.
+        TimelockController timelock = new TimelockController(timelockDelay, props, props, admin);
         WrappedON impl = new WrappedON();
         ERC1967Proxy proxy = new ERC1967Proxy(
             address(impl), abi.encodeCall(WrappedON.initialize, (IERC20(cfg.onToken), admin, address(timelock)))
