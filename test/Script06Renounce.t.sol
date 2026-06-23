@@ -175,6 +175,30 @@ contract Script06RenounceTest is Test {
         _call();
     }
 
+    /// @notice #58: the renounce precondition asserts the ACCEPTED ccipAdmin (`getCCIPAdmin()`),
+    ///         NOT merely `pendingCCIPAdmin()`. Builds the botched-handoff state on a fresh wON:
+    ///         ccipAdmin proposed to the multisig but never accepted, so `getCCIPAdmin()` is still
+    ///         the deployer while `pendingCCIPAdmin()` == multisig. Renouncing here would strand
+    ///         ccipAdmin on the deployer with no on-chain reclaim path — the precondition must
+    ///         reject it. `getCCIPAdmin` is checked before the pool/registry/timelock handoffs,
+    ///         so those setUp fixtures are irrelevant to this branch.
+    function test_RevertsWhenCcipAdminOnlyProposedNotAccepted() public {
+        MockON freshOn = new MockON();
+        WrappedON fresh = DeployWON.deploy(IERC20(address(freshOn)), deployer, deployer);
+        vm.startPrank(deployer);
+        fresh.grantRole(fresh.DEFAULT_ADMIN_ROLE(), multisig); // DEFAULT_ADMIN_ROLE checks pass
+        fresh.setCCIPAdmin(multisig); // PROPOSE only — multisig never calls acceptCCIPAdmin()
+        vm.stopPrank();
+
+        assertEq(fresh.pendingCCIPAdmin(), multisig, "pending == multisig");
+        assertEq(fresh.getCCIPAdmin(), deployer, "accepted ccipAdmin still the deployer");
+
+        vm.expectRevert(bytes("wON ccipAdmin not yet accepted by multisig"));
+        harness.exposeAssertReadyToRenounce(
+            fresh, multisig, deployer, address(pool), address(registry), address(timelock)
+        );
+    }
+
     function test_RevertsWhenMultisigLacksPauserRole() public {
         // Revoke the PAUSER_ROLE grant set up in setUp.
         bytes32 pauserRole = won.PAUSER_ROLE();
