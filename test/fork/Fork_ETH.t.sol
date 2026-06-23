@@ -149,21 +149,24 @@ contract Fork_ETH is Test {
         assertEq(won.totalSupply(), amount);
     }
 
-    /// @notice Issue #1 (fork): when the wON wrap reserve covers a BSC→ETH arrival,
-    ///         `mint` auto-unwraps — the receiver gets native ON, 0 wON is minted, and
-    ///         totalSupply is unchanged.
+    /// @notice Issue #48 (fork): even when the wON wrap reserve covers a BSC→ETH arrival,
+    ///         `mint` delivers wON (the registered token) — never native ON. totalSupply grows
+    ///         by the bridged amount, the cap counter is incremented, and the reserve is left
+    ///         untouched.
     ///
     ///         The reserve is seeded via `deal` (no approve/deposit needed in a fork test).
     ///         The ReleaseOrMintInV1 struct is identical to `test_Fork_ETH_BscToEth_Mint`
-    ///         except `receiver` is a fresh address.
-    function test_Fork_ETH_BscToEth_AutoUnwrap() public {
+    ///         except `receiver` is a fresh address and a covering reserve is pre-seeded.
+    function test_Fork_ETH_BscToEth_MintsWonEvenWhenReserveCovers() public {
         uint256 amount = 1000 ether;
 
-        // Seed the wrap reserve with native ON so `mint` will auto-unwrap.
+        // Seed a covering wrap reserve; the mint must still deliver wON, not native ON.
         deal(ON_ETH, address(won), amount);
 
         uint256 supplyBefore = won.totalSupply();
-        address rcv = makeAddr("autoUnwrapReceiver");
+        uint256 reserveBefore = IERC20(ON_ETH).balanceOf(address(won));
+        address rcv = makeAddr("coveredReserveReceiver");
+        uint256 rcvOnBefore = IERC20(ON_ETH).balanceOf(rcv);
 
         address bscToEthOffRamp = _findOffRamp(ETH_ROUTER, BSC_SELECTOR);
 
@@ -182,10 +185,11 @@ contract Fork_ETH is Test {
         Pool.ReleaseOrMintOutV1 memory out = ethPool.releaseOrMint(in1);
 
         assertEq(out.destinationAmount, amount, "destinationAmount");
-        assertEq(IERC20(ON_ETH).balanceOf(rcv), amount, "receiver got native ON");
-        assertEq(won.balanceOf(rcv), 0, "no wON minted to receiver");
-        assertEq(won.totalSupply(), supplyBefore, "totalSupply unchanged (auto-unwrap)");
-        assertEq(won.ccipMintHeadroomUsed(), 0, "cap untouched");
+        assertEq(won.balanceOf(rcv), amount, "receiver got wON 1:1");
+        assertEq(IERC20(ON_ETH).balanceOf(rcv), rcvOnBefore, "receiver got no native ON");
+        assertEq(won.totalSupply(), supplyBefore + amount, "totalSupply grew by bridged amount");
+        assertEq(IERC20(ON_ETH).balanceOf(address(won)), reserveBefore, "reserve untouched");
+        assertEq(won.ccipMintHeadroomUsed(), amount, "cap incremented");
     }
 
     // ─── Bridge direction 2: ETH → BSC (OnRamp burns wON) ───────────────────────

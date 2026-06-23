@@ -38,7 +38,7 @@ contract WrappedONUpgradeTest is Test {
     /// @notice Upgrade replaces the implementation while all namespaced storage slots survive.
     function test_UpgradePreservesState() public {
         // Seed state: a CCIP mint increments ccipMintHeadroomUsed and mints wON to admin.
-        // mint() auto-unwraps when reserve >= amount; reserve is 0 here, so it mints wON.
+        // The CCIP `mint` path always mints wON (it never reads the reserve — #48).
         vm.prank(pool);
         won.mint(admin, 1000 ether);
         assertEq(won.ccipMintHeadroomUsed(), 1000 ether);
@@ -88,9 +88,9 @@ contract WrappedONUpgradeTest is Test {
     // FUNCTIONS through the proxy after the implementation is swapped — value paths and
     // accounting must keep working and stay consistent with pre-upgrade state.
 
-    /// @notice After a real upgrade, deposit/withdraw/auto-unwrap/CCIP-mint all still work
-    ///         and the reserve, cap counter, and totalSupply stay consistent — integrating
-    ///         pre-upgrade state (alice's CCIP-minted wON) with post-upgrade operations.
+    /// @notice After a real upgrade, deposit/withdraw/CCIP-mint all still work and the reserve,
+    ///         cap counter, and totalSupply stay consistent — integrating pre-upgrade state
+    ///         (alice's CCIP-minted wON) with post-upgrade operations.
     function test_ValuePathsWorkAfterUpgrade() public {
         address alice = makeAddr("alice");
         address bob = makeAddr("bob");
@@ -123,23 +123,24 @@ contract WrappedONUpgradeTest is Test {
         assertEq(on.balanceOf(alice), 150 ether, "alice received native ON");
         assertEq(on.balanceOf(address(won)), 50 ether, "reserve drained by withdraw");
 
-        // Post-upgrade auto-unwrap: reserve (50) fully covers a 30 arrival -> native ON,
-        // cap counter untouched.
+        // Post-upgrade CCIP mint with a covering reserve (50 >= 30): still mints wON (#48) —
+        // never native ON. Reserve untouched, cap counter grows.
         vm.prank(pool);
         won.mint(carol, 30 ether);
-        assertEq(won.balanceOf(carol), 0, "auto-unwrap mints 0 wON post-upgrade");
-        assertEq(on.balanceOf(carol), 30 ether, "carol got native ON post-upgrade");
-        assertEq(won.ccipMintHeadroomUsed(), 1000 ether, "cap untouched by auto-unwrap");
-        assertEq(on.balanceOf(address(won)), 20 ether, "reserve drained by auto-unwrap");
+        assertEq(won.balanceOf(carol), 30 ether, "carol got wON post-upgrade");
+        assertEq(on.balanceOf(carol), 0, "carol got no native ON post-upgrade");
+        assertEq(won.ccipMintHeadroomUsed(), 1030 ether, "cap consumed by mint");
+        assertEq(on.balanceOf(address(won)), 50 ether, "reserve untouched by mint");
 
-        // Post-upgrade CCIP mint (wON path): reserve (20) < 100 -> mints wON, cap grows.
+        // Post-upgrade CCIP mint again: reserve is irrelevant -> mints wON, cap grows.
         vm.prank(pool);
         won.mint(bob, 100 ether);
         assertEq(won.balanceOf(bob), 300 ether, "wON minted post-upgrade");
-        assertEq(won.ccipMintHeadroomUsed(), 1100 ether, "cap consumed post-upgrade");
+        assertEq(won.ccipMintHeadroomUsed(), 1130 ether, "cap consumed post-upgrade");
 
-        // Supply: 1000 (alice) - 150 (withdraw) + 200 (bob deposit) + 100 (bob mint) = 1150.
-        assertEq(won.totalSupply(), 1150 ether, "supply accounting consistent across upgrade");
+        // Supply: 1000 (alice) - 150 (withdraw) + 200 (bob deposit) + 30 (carol mint)
+        //         + 100 (bob mint) = 1180.
+        assertEq(won.totalSupply(), 1180 ether, "supply accounting consistent across upgrade");
     }
 
     /// @notice CCIP burn still decrements the cap counter and supply after an upgrade.

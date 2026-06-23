@@ -94,13 +94,14 @@ cast call $BSC_ON 'totalSupply()(uint256)' --rpc-url $BSC_RPC
 
 If any mint surface is present and gated to an address that could plausibly mint more, halt the deployment — the cap-vs-supply relationship is load-bearing for the entire CCIP-7 / cap-replenishment safety story.
 
-**Auto-unwrap on BSC→ETH arrivals.** When a BSC→ETH CCIP message arrives, `WrappedON.mint`
-first checks whether `ON.balanceOf(wON) >= amount` (the ETH-side reserve). If so, it
-transfers native ON directly to the receiver (all-or-nothing) and emits `CCIPAutoUnwrapped`
-without incrementing `ccipMintHeadroomUsed` — the receiver gets canonical ETH ON, not wON.
-If the reserve does not cover the full amount, it falls through to the standard wON mint
-path. Operators should expect `CCIPAutoUnwrapped` events during normal operation whenever
-the reserve holds sufficient ON; this is expected and benign.
+**BSC→ETH arrivals always deliver wON.** When a BSC→ETH CCIP message arrives, `WrappedON.mint`
+always mints `amount` wON (the registered token) to the receiver — EOA or contract — and emits
+`CCIPMinted`. It never reads the ETH-side reserve and never delivers native ON, so the asset a
+receiver gets is deterministic and not front-runnable via the permissionless `deposit`/`withdraw`
+reserve (issue #48). A holder who wants native ON calls `withdraw` against the reserve like any
+other holder. Consequence for monitoring: the reserve (`ON.balanceOf(wON)`) only ever decreases
+via `withdraw`, never via an inbound CCIP message — a reserve drop with no matching `Unwrapped`
+event is anomalous.
 
 **Incident response: an inbound CCIP message reverting with `CCIPMintCapExceeded`.** The mint
 cap makes `WrappedON.mint` — and therefore the offRamp's `releaseOrMint` — revert once
@@ -389,7 +390,7 @@ These contracts are non-upgradeable. To replace a pool:
 
 ### 4.4 Redeploy (new wON)
 
-Use this procedure when the wON contract must be replaced (e.g. the 2026-06-23 redeploy for auto-unwrap + permissionless deposit). The existing BSC `LockReleaseTokenPool` stays in place; only the ETH side is redeployed.
+Use this procedure when the wON contract must be replaced (e.g. the 2026-06-23 redeploy for permissionless deposit + UUPS upgradeability). The existing BSC `LockReleaseTokenPool` stays in place; only the ETH side is redeployed.
 
 **Context for the 2026-06-23 redeploy.** The current on-chain wON (`0x98d6…606`) and its ETH `BurnMintTokenPool` (`0xE0b7…8A72`) are clean — no circulating wON holders, no reserve. The deployer EOA still owns both pools and holds `DEFAULT_ADMIN_ROLE` on wON (handoff not yet run). No reserve migration is needed.
 

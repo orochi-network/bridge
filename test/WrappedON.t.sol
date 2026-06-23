@@ -25,6 +25,10 @@ contract MockON is ERC20 {
     }
 }
 
+/// @dev Bare contract used as a CCIP receiver in the #48 test — its only purpose is to have
+///      non-empty `code` so the mint target is unambiguously a contract, not an EOA.
+contract ContractReceiver {}
+
 /// @dev Reentrancy probe — overrides `transferFrom` to call back into `WrappedON.deposit`.
 ///      A real ON-like ERC20 wouldn't do this, but if a future deployment reuses WrappedON
 ///      against a hook-bearing token the `nonReentrant` guard must hold. SECURITY: TEST-8.
@@ -315,15 +319,17 @@ contract WrappedONTest is Test {
         won.deposit(100 ether);
         vm.stopPrank();
 
-        // CCIP-mint 50 — reserve (100) >= amount (50), so auto-unwrap fires:
-        // native ON is delivered to bob, no wON minted, reserve shrinks by 50.
+        // CCIP-mint 50 to bob — always mints wON (no auto-unwrap), even though the reserve
+        // (100) covers it. The reserve is untouched; the cap counter grows by 50.
         vm.prank(pool);
         won.mint(bob, 50 ether);
 
-        // totalSupply = only alice's deposit-backed wON (auto-unwrap mints 0 wON).
-        assertEq(won.totalSupply(), 100 ether, "totalSupply = only deposit-backed wON (auto-unwrap mints 0)");
-        assertEq(on.balanceOf(address(won)), 50 ether, "reserve drained by auto-unwrap");
-        assertEq(on.balanceOf(bob), 50 ether, "bob received native ON via auto-unwrap");
+        // totalSupply = alice's deposit-backed wON (100) + bob's CCIP-minted wON (50).
+        assertEq(won.totalSupply(), 150 ether, "totalSupply = deposit-backed + CCIP-minted wON");
+        assertEq(won.balanceOf(bob), 50 ether, "bob holds CCIP-minted wON");
+        assertEq(on.balanceOf(address(won)), 100 ether, "reserve untouched by mint");
+        assertEq(on.balanceOf(bob), 0, "bob received no native ON");
+        assertEq(won.ccipMintHeadroomUsed(), 50 ether, "cap counter incremented");
     }
 
     // ─── Role gating ──────────────────────────────────────────────────────────
@@ -1032,11 +1038,15 @@ contract WrappedONTest is Test {
         assertEq(won.totalSupply(), 0);
     }
 
-    // ─── Auto-unwrap (Issue 1) ────────────────────────────────────────────────
+    // ─── CCIP mint always delivers wON (Issue #48) ────────────────────────────
+    // The CCIP `releaseOrMint` path mints wON unconditionally — it never reads the reserve
+    // and never delivers native ON. This keeps the asset delivered to BSC→ETH receivers
+    // deterministic (the registered token, wON), closing the front-runnable contract-receiver
+    // footgun from #48. EOAs that want native ON call `withdraw` like any other holder.
 
-    /// @notice Issue 1: reserve fully covers the CCIP arrival → mint() delivers native ON,
-    ///         mints 0 wON, leaves the cap counter untouched.
-    function test_MintAutoUnwrapsWhenReserveCovers() public {
+    /// @notice #48: reserve fully covers the arrival, yet `mint` still mints wON — no native
+    ///         ON is delivered, the reserve is untouched, and the cap counter grows.
+    function test_MintMintsWonEvenWhenReserveCovers() public {
         vm.startPrank(alice);
         on.approve(address(won), 100 ether);
         won.deposit(100 ether); // reserve = 100 ON, alice holds 100 wON
@@ -1046,19 +1056,19 @@ contract WrappedONTest is Test {
         uint256 supplyBefore = won.totalSupply();
 
         vm.expectEmit(true, false, false, true);
-        emit WrappedON.CCIPAutoUnwrapped(bob, 40 ether);
+        emit WrappedON.CCIPMinted(bob, 40 ether, 40 ether);
         vm.prank(pool);
         won.mint(bob, 40 ether);
 
-        assertEq(on.balanceOf(bob), bobOnBefore + 40 ether, "bob got native ON");
-        assertEq(won.balanceOf(bob), 0, "no wON minted to bob");
-        assertEq(won.totalSupply(), supplyBefore, "totalSupply unchanged");
-        assertEq(won.ccipMintHeadroomUsed(), 0, "cap counter untouched");
-        assertEq(on.balanceOf(address(won)), 60 ether, "reserve drained by 40");
+        assertEq(won.balanceOf(bob), 40 ether, "bob got wON, not native ON");
+        assertEq(on.balanceOf(bob), bobOnBefore, "no native ON delivered");
+        assertEq(won.totalSupply(), supplyBefore + 40 ether, "totalSupply grew by mint");
+        assertEq(won.ccipMintHeadroomUsed(), 40 ether, "cap counter incremented");
+        assertEq(on.balanceOf(address(won)), 100 ether, "reserve untouched");
     }
 
-    /// @notice Issue 1: boundary — reserve == amount → full auto-unwrap.
-    function test_MintAutoUnwrapsAtExactReserve() public {
+    /// @notice #48 boundary: reserve == amount still mints wON (the reserve is never read).
+    function test_MintMintsWonAtExactReserve() public {
         vm.startPrank(alice);
         on.approve(address(won), 50 ether);
         won.deposit(50 ether);
@@ -1067,13 +1077,14 @@ contract WrappedONTest is Test {
         vm.prank(pool);
         won.mint(bob, 50 ether);
 
-        assertEq(on.balanceOf(bob), 50 ether, "exact reserve delivered as ON");
-        assertEq(won.balanceOf(bob), 0);
-        assertEq(won.totalSupply(), 50 ether, "only alice's deposit-wON exists");
-        assertEq(won.ccipMintHeadroomUsed(), 0);
+        assertEq(won.balanceOf(bob), 50 ether, "wON minted at exact-reserve boundary");
+        assertEq(on.balanceOf(bob), 0, "no native ON delivered");
+        assertEq(won.totalSupply(), 100 ether, "alice's deposit-wON + bob's CCIP-wON");
+        assertEq(won.ccipMintHeadroomUsed(), 50 ether, "cap incremented");
+        assertEq(on.balanceOf(address(won)), 50 ether, "reserve untouched");
     }
 
-    /// @notice Issue 1: reserve < amount → falls back to minting wON (all-or-nothing).
+    /// @notice Reserve below the arrival also mints wON — same path, no branch on reserve.
     function test_MintMintsWonWhenReserveInsufficient() public {
         vm.startPrank(alice);
         on.approve(address(won), 30 ether);
@@ -1085,27 +1096,61 @@ contract WrappedONTest is Test {
         vm.prank(pool);
         won.mint(bob, 100 ether);
 
-        assertEq(won.balanceOf(bob), 100 ether, "wON minted (no partial unwrap)");
+        assertEq(won.balanceOf(bob), 100 ether, "wON minted");
         assertEq(on.balanceOf(bob), 0, "no ON delivered");
         assertEq(on.balanceOf(address(won)), 30 ether, "reserve untouched");
         assertEq(won.ccipMintHeadroomUsed(), 100 ether, "cap counter incremented");
     }
 
-    /// @notice Reserve one wei below the amount → no auto-unwrap, wON minted.
-    function test_MintMintsWonWhenReserveOneWeiShort() public {
-        uint256 amount = 100 ether;
-        vm.startPrank(alice);
-        on.approve(address(won), amount - 1);
-        won.deposit(amount - 1);
-        vm.stopPrank();
+    /// @notice #48: the reserve level NEVER changes what `mint` delivers — it always mints
+    ///         wON and never moves native ON, across any reserve/amount combination. Fuzzed
+    ///         over both so a reintroduced reserve-read branch is caught at every boundary.
+    function testFuzz_MintAlwaysMintsWonRegardlessOfReserve(uint96 reserveRaw, uint96 amountRaw) public {
+        uint256 reserve = bound(uint256(reserveRaw), 0, 1_000_000 ether);
+        uint256 amount = bound(uint256(amountRaw), 1, 1_000_000 ether);
+
+        // Seed an arbitrary reserve via a permissionless deposit (alice holds the wON).
+        if (reserve > 0) {
+            vm.startPrank(alice);
+            on.approve(address(won), reserve);
+            won.deposit(reserve);
+            vm.stopPrank();
+        }
+
+        uint256 bobOnBefore = on.balanceOf(bob);
+        uint256 supplyBefore = won.totalSupply();
 
         vm.prank(pool);
         won.mint(bob, amount);
 
-        assertEq(won.balanceOf(bob), amount, "wON minted (reserve 1 wei short)");
-        assertEq(on.balanceOf(bob), 0, "no ON delivered");
-        assertEq(on.balanceOf(address(won)), amount - 1, "reserve untouched");
-        assertEq(won.ccipMintHeadroomUsed(), amount, "cap incremented");
+        assertEq(won.balanceOf(bob), amount, "bob always receives wON");
+        assertEq(on.balanceOf(bob), bobOnBefore, "bob never receives native ON");
+        assertEq(on.balanceOf(address(won)), reserve, "reserve never touched by mint");
+        assertEq(won.totalSupply(), supplyBefore + amount, "supply grew by the full amount");
+        assertEq(won.ccipMintHeadroomUsed(), amount, "cap counter incremented by the full amount");
+    }
+
+    /// @notice #48 core scenario: a CONTRACT receiver gets wON even when the reserve fully
+    ///         covers the arrival. This is the case the auto-unwrap removal protects — a
+    ///         programmatic CCIP receiver that expects wON must never observe native ON
+    ///         instead (a front-runnable swap under the old auto-unwrap branch).
+    function test_MintToContractReceiverMintsWon() public {
+        // Seed a covering reserve.
+        vm.startPrank(alice);
+        on.approve(address(won), 100 ether);
+        won.deposit(100 ether);
+        vm.stopPrank();
+
+        address contractReceiver = address(new ContractReceiver());
+        assertGt(contractReceiver.code.length, 0, "receiver is a contract");
+
+        vm.prank(pool);
+        won.mint(contractReceiver, 40 ether);
+
+        assertEq(won.balanceOf(contractReceiver), 40 ether, "contract receiver got wON");
+        assertEq(on.balanceOf(contractReceiver), 0, "contract receiver got no native ON");
+        assertEq(on.balanceOf(address(won)), 100 ether, "reserve untouched");
+        assertEq(won.ccipMintHeadroomUsed(), 40 ether, "cap counter incremented");
     }
 
     /// @notice CCIP mint up to the cap succeeds; one wei over reverts. Boundary fuzz around

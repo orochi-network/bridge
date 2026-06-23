@@ -183,7 +183,7 @@ pool's `staticcall`-based interface probes succeed.
 |---|---|---|
 | `deposit(amount)` | anyone | Pulls ON, mints wON 1:1. Received-amount accounting. `nonReentrant`. Permissionless and uncapped. |
 | `withdraw(amount)` | anyone | Burns wON, returns ON from reserve. Reverts on `InsufficientReserve`. `nonReentrant`. |
-| `mint(account, amount)` | `MINTER_ROLE` (pool) | CCIP-inbound mint. Auto-unwraps to native ON when reserve covers the amount (emits `CCIPAutoUnwrapped`, cap untouched); otherwise increments `ccipMintHeadroomUsed` and reverts if cap exceeded (emits `CCIPMinted`). |
+| `mint(account, amount)` | `MINTER_ROLE` (pool) | CCIP-inbound mint. Always mints wON to the receiver (EOA or contract); never reads the reserve or delivers native ON (#48). Increments `ccipMintHeadroomUsed` and reverts if cap exceeded (emits `CCIPMinted`). |
 | `burn(amount)` / `burn(account, amount)` / `burnFrom(account, amount)` | `BURNER_ROLE` (pool) | CCIP-outbound burn. Saturating-decrements `ccipMintHeadroomUsed`. Emits `CCIPBurned`. |
 | `setCCIPAdmin(addr)` / `acceptCCIPAdmin()` | current / pending admin | Two-step CCIP admin rotation. |
 | `getCCIPAdmin()` / `pendingCCIPAdmin()` | view | Registry probes + handoff verification. |
@@ -275,10 +275,11 @@ Both mint paths produce **fungible** wON. They are backed differently:
   held in the wON contract's own reserve. Permissionless, uncapped in amount,
   independent of CCIP.
 - **`mint(...)`** — the Ethereum `BurnMintTokenPool` calls this on inbound CCIP
-  messages. Backed by ON locked on the BSC `LockReleaseTokenPool`. **Auto-unwrap**:
-  when `ON.balanceOf(wON) >= amount` the call delivers native ON directly to the
-  receiver and mints 0 wON (emits `CCIPAutoUnwrapped`); the cap counter is untouched.
-  Otherwise, mints wON and increments `ccipMintHeadroomUsed` as normal.
+  messages. Backed by ON locked on the BSC `LockReleaseTokenPool`. Always mints wON to
+  the receiver (EOA or contract) and increments `ccipMintHeadroomUsed` (emits
+  `CCIPMinted`); it never reads the reserve or delivers native ON, so the delivered
+  asset is deterministic and not front-runnable (#48). A holder who wants native ON
+  calls `withdraw`.
 
 ### 4.3 Invariants
 
@@ -363,13 +364,10 @@ user                wON contract             ON token
 8. ETH_OffRamp → BurnMintTokenPool.releaseOrMint(receiver, amount, src, ...)
                 ─ checks inbound rate limiter
                 ─ calls wON.mint(receiver, amount)
-                ─ AUTO-UNWRAP (if ON.balanceOf(wON) >= amount):
-                    ─ transfers `amount` native ON to receiver
-                    ─ emits CCIPAutoUnwrapped; cap counter untouched; returns
-                ─ OTHERWISE:
                     ─ wON checks ccipMintHeadroomUsed + amount ≤ MAX_CCIP_MINTED
-                    ─ mints wON to receiver; emits CCIPMinted
-9. receiver holds `amount` native ON (auto-unwrap path) or `amount` wON (mint path)
+                    ─ mints `amount` wON to receiver; emits CCIPMinted
+                    ─ (reserve never read; native ON never delivered — #48)
+9. receiver holds `amount` wON (EOA or contract); calls withdraw() for native ON
 ```
 
 ### 5.3 Outbound: Ethereum → BSC

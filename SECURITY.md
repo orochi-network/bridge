@@ -92,15 +92,17 @@ on this repository.
 
 | Area  | CRITICAL | HIGH | MEDIUM | LOW | INFO | Total |
 |-------|---------:|-----:|-------:|----:|-----:|------:|
-| WON   |        0 |    0 |      2 |  10 |    7 |    19 |
+| WON   |        0 |    0 |      3 |  10 |    7 |    20 |
 | DEP   |        0 |    2 |      4 |  12 |    4 |    22 |
 | CCIP  |        0 |    1 |      6 |   4 |    3 |    14 |
 | TEST  |        0 |    2 |      9 |   9 |    0 |    20 |
 | OPS   |        0 |    2 |      4 |  18 |    6 |    30 |
-| **Total** | **0** | **7** | **25** | **53** | **20** | **105** |
+| **Total** | **0** | **7** | **26** | **53** | **20** | **106** |
 
 **Headline:** no CRITICAL findings. The custom contract surface (`WrappedON.sol`)
-is clean — the highest WON finding is LOW. The bulk of the actionable risk
+is clean — the three MEDIUM WON findings are all resolved (WON-19 reversed by
+product decision; WON-20 fixed by removing auto-unwrap), so the highest *open*
+WON finding is LOW. The bulk of the actionable risk
 sits in the operational surface (key handling, post-handoff workflows,
 documentation gaps) and in tightening test rigor (fork pinning, invariant
 config, typed revert expectations). The single most impactful invariant —
@@ -275,7 +277,15 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Impact (original):** A limited-liquidity launch would otherwise expose a public, uncapped conversion path; redemption demand toward BSC could exceed available BSC pool liquidity.
 - **Recommendation (original):** (Was implemented) restrict `deposit` to a protocol-managed `LIQUIDITY_MANAGER_ROLE`. Per-window ETH→BSC redemption is then bounded by what the role-holder wraps plus the BSC inbound rate limits (see RUNBOOK §4.5).
 - **Residual risk note A — permissionless deposit:** With `deposit` permissionless and uncapped, wON supply growth and ETH→BSC redemption demand are bounded only by the ETH-side ON circulating supply (600M) and the configured CCIP pool rate limits. The aggregate safety invariant (`lockedON_BSC + reserveON_ETH >= totalSupply(wON)`) continues to hold mechanically, but burst ETH→BSC redemption pressure is no longer capped by role access. Operators must size BSC pool liquidity and ETH→BSC rate limits conservatively (see RUNBOOK §4.5).
-- **Residual risk note B — auto-unwrap reserve drain:** `WrappedON.mint` now auto-unwraps: when the ETH-side reserve covers a BSC→ETH arrival, it transfers native ON out of the reserve to the receiver. A compromised `MINTER_ROLE` pool can therefore drain the reserve (in addition to minting wON up to `MAX_CCIP_MINTED`) by submitting fabricated inbound messages while the reserve is non-empty. This is accepted under the trusted-pool model (`MINTER_ROLE` is held exclusively by the audited Ethereum `BurnMintTokenPool`). Operators should monitor `CCIPAutoUnwrapped` events alongside `CCIPMinted` for anomalous volume.
+- **Residual risk note B — auto-unwrap reserve drain (RETIRED 2026-06-23, see WON-20):** An earlier draft had `WrappedON.mint` auto-unwrap — transferring native ON out of the reserve when it covered a BSC→ETH arrival — which let a compromised `MINTER_ROLE` pool drain the reserve via fabricated inbound messages. Auto-unwrap was removed (issue [#48](https://github.com/orochi-network/bridge/issues/48)) before redeploy: `mint` now only mints wON and never touches the reserve, so this vector no longer exists. The reserve can only ever leave via `withdraw` (caller burns their own wON). See WON-20.
+
+### WON-20: auto-unwrap could deliver native ON to contract receivers expecting wON (BSC→ETH)
+- **Severity:** MEDIUM
+- **Status:** FIXED (2026-06-23) — auto-unwrap removed from `WrappedON.mint`. The CCIP `releaseOrMint` path now always mints wON (the registered token) to every receiver, EOA or contract; it never reads the reserve or delivers native ON. The asset a BSC→ETH receiver gets is deterministic. Tests: `test_MintMintsWonEvenWhenReserveCovers`, `test_MintMintsWonAtExactReserve`, `test_MintToContractReceiverMintsWon`, `testFuzz_MintAlwaysMintsWonRegardlessOfReserve` (WrappedON.t.sol); `test_BscToEth_MintsWonEvenWhenReserveCovers` (PoolRoundtrip.t.sol); `test_Fork_ETH_BscToEth_MintsWonEvenWhenReserveCovers` (Fork_ETH.t.sol). Retires residual-risk note B above.
+- **Location:** `src/WrappedON.sol` (`mint`).
+- **Description:** Issue [#48](https://github.com/orochi-network/bridge/issues/48). The auto-unwrap branch added in [#45](https://github.com/orochi-network/bridge/pull/45) delivered native ON (and minted 0 wON) when `ON.balanceOf(wON) >= amount`. For CCIP *programmatic* token transfers (token + data), a contract receiver coded to expect `amount` wON would instead observe 0 new wON and an unexpected native-ON balance — breaking its wON-based accounting or stranding value. The trigger was **front-runnable**: `deposit`/`withdraw` are permissionless, so anyone could move `ON.balanceOf(wON)` across the `>= amount` boundary in the same block, flipping the delivered asset. A BSC→ETH sender could not predict which asset their receiver got.
+- **Impact:** Integration footgun for contract receivers on the BSC→ETH lane. No protocol-invariant violation — `lockedON_BSC + reserveON_ETH >= totalSupply(wON)` held throughout. EOA receivers were unaffected (native ON was the intended outcome for them).
+- **Recommendation:** (Implemented) remove auto-unwrap; always mint wON on the CCIP path. Holders who want native ON call `withdraw`. This eliminates the front-runnable asset switch at the source and shrinks the trust surface — the `mint` path can no longer move ON out of the reserve. Alternatives considered and rejected: EOA-gating the auto-unwrap (`account.code.length == 0`) and documentation-only; see `docs/superpowers/specs/2026-06-23-won-remove-autounwrap-design.md`.
 
 ---
 

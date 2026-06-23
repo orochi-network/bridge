@@ -2,10 +2,10 @@
 
 _Last updated: 2026-06-23_
 
-## 2026-06-23 — wON redeployed (auto-unwrap + permissionless deposit + UUPS proxy)
+## 2026-06-23 — wON redeployed (permissionless deposit + UUPS proxy)
 
 `WrappedON` was updated to add:
-- **Auto-unwrap on BSC→ETH arrivals**: `mint` now checks whether `ON.balanceOf(wON) >= amount` and, if so, transfers native ON directly to the receiver instead of minting wON (emits `CCIPAutoUnwrapped`; does not increment `ccipMintHeadroomUsed`).
+- **BSC→ETH arrivals always mint wON**: `mint` mints `amount` wON (the registered token) to the receiver — EOA or contract — and emits `CCIPMinted`. It never reads the reserve or delivers native ON, so the delivered asset is deterministic and not front-runnable via the permissionless `deposit`/`withdraw` reserve (issue #48). A holder who wants native ON calls `withdraw`. (An earlier draft auto-unwrapped to native ON when the reserve covered the arrival; that was removed before redeploy — see issue #48.)
 - **Permissionless `deposit`**: the `LIQUIDITY_MANAGER_ROLE` gate on `deposit` was removed; anyone holding ETH-side ON can wrap 1:1 into wON.
 - **UUPS upgradeability**: wON is now an `ERC1967Proxy` → `WrappedON` (impl). Upgrades are gated by `UPGRADER_ROLE` held by a `TimelockController` (48h delay). Emergency `pause`/`unpause` is gated by `PAUSER_ROLE` (ops multisig post-handoff).
 
@@ -46,7 +46,7 @@ Snapshot of where the mainnet deployment stands. Verified by direct on-chain rea
 
 | Contract | Artifact key | Address | Notes |
 |---|---|---|---|
-| wON (WrappedON) | `wrappedON` | `0x98d6d288AfaB1EdC7A6d49502790FA517765E606` | **OLD — superseded.** Non-upgradeable, pre-auto-unwrap build. No holders, no reserve. |
+| wON (WrappedON) | `wrappedON` | `0x98d6d288AfaB1EdC7A6d49502790FA517765E606` | **OLD — superseded.** Non-upgradeable build (pre-UUPS). No holders, no reserve. |
 | BurnMintTokenPool | `pool` | `0xE0b7Dcd123122aC50f47d4E97C8CaFD01BAc8A72` | **OLD — superseded.** Paired with old wON. |
 | wON proxy (ERC1967Proxy) — NEW | `wrappedON` | _(PENDING post-broadcast)_ | Stable CCIP-registered token address. Replaces row above. |
 | wON implementation — NEW | `wrappedONImpl` | _(PENDING post-broadcast)_ | Upgradeable impl; rotates on upgrade. |

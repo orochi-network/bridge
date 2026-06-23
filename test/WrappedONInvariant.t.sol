@@ -50,15 +50,10 @@ contract WrappedONHandler is Test {
 
     /// @notice Cumulative ON outflow from the wON reserve via `withdraw`. Paired with
     ///         `totalDeposited` so the reserve invariant can assert the TIGHT form
-    ///         `reserve == totalDeposited - totalWithdrawn - totalAutoUnwrapped`
-    ///         (CCIP burn never touches the reserve; CCIP mint may drain it via auto-unwrap).
+    ///         `reserve == totalDeposited - totalWithdrawn`. `withdraw` is the ONLY path that
+    ///         removes ON from the reserve — CCIP `mint` always mints wON and never reads or
+    ///         touches the reserve (#48), and CCIP burn only moves wON.
     uint256 public totalWithdrawn;
-
-    /// @notice Cumulative ON outflow from the wON reserve via the auto-unwrap path in `mint`.
-    ///         When `ON.balanceOf(wON) >= amount`, `mint` delivers native ON instead of
-    ///         minting wON. This drains the reserve and must be tracked for the tight
-    ///         reserve invariant.
-    uint256 public totalAutoUnwrapped;
 
     constructor(WrappedON won_, InvariantMockON on_, address pool_) {
         WON = won_;
@@ -108,36 +103,21 @@ contract WrappedONHandler is Test {
         totalWithdrawn += amount;
     }
 
-    /// @dev Simulates a CCIP `releaseOrMint` arriving on ETH: BSC pool locks `amount`,
-    ///      ETH pool either delivers native ON via auto-unwrap (if reserve >= amount) or
-    ///      mints `amount` wON. Auto-unwrap is bounded only by the reserve (not the cap),
-    ///      so we allow it even when cap headroom is zero.
+    /// @dev Simulates a CCIP `releaseOrMint` arriving on ETH: BSC pool locks `amount`, the ETH
+    ///      pool mints `amount` wON. `mint` always mints wON and never reads the reserve (#48),
+    ///      so the only bound is remaining cap headroom — nothing happens once it is exhausted.
     function ccipMint(uint256 actorSeed, uint256 amount) external {
         address user = _actor(actorSeed);
-        uint256 reserve = ON.balanceOf(address(WON));
         uint256 cap = WON.MAX_CCIP_MINTED();
         uint256 headroom = cap - WON.ccipMintHeadroomUsed();
-        // If reserve is zero and headroom is zero, nothing can happen.
-        if (reserve == 0 && headroom == 0) {
+        if (headroom == 0) {
             return;
         }
-        // Auto-unwrap path: any amount up to the reserve is valid (no cap constraint).
-        // wON-mint path: bounded by remaining cap headroom.
-        uint256 maxAmount = reserve > headroom ? reserve : headroom;
-        if (maxAmount == 0) {
-            return;
-        }
-        amount = _boundAmt(amount, maxAmount);
-        // Simulated BSC lock — caps at BSC supply (MAX_CCIP_MINTED).
+        amount = _boundAmt(amount, headroom);
+        // Simulated BSC lock — moves in lockstep with the cap counter (caps at BSC supply).
         bscLocked += amount;
-        // Snapshot reserve before to detect whether auto-unwrap fired.
-        uint256 reserveBefore = reserve;
         vm.prank(POOL);
         WON.mint(user, amount);
-        // If reserve covered the amount, auto-unwrap fired and drained the reserve.
-        if (reserveBefore >= amount) {
-            totalAutoUnwrapped += amount;
-        }
     }
 
     /// @dev Simulates ETH→BSC CCIP `lockOrBurn` for the single-arg `burn(amount)` path:
@@ -371,16 +351,16 @@ contract WrappedONInvariantTest is StdInvariant, Test {
     }
 
     /// @notice The reserve accounting is an EXACT 1:1 invariant: the ON balance of the wON
-    ///         contract equals the cumulative net deposit flow (deposits minus withdrawals
-    ///         minus auto-unwrapped outflows). `deposit` adds to the reserve; `withdraw` and
-    ///         the auto-unwrap path in `mint` subtract from it. The handler tracks all three
-    ///         flows. CCIP burn never touches the reserve.
+    ///         contract equals the cumulative net deposit flow (deposits minus withdrawals).
+    ///         `deposit` adds to the reserve and `withdraw` subtracts from it — those are the
+    ///         only two paths that move ON in or out of the reserve. CCIP `mint` always mints
+    ///         wON without reading the reserve (#48), and CCIP burn only moves wON.
     function invariant_ReserveMatchesNetDeposits() public view {
         uint256 reserve = onToken.balanceOf(address(won));
         assertEq(
             reserve,
-            handler.totalDeposited() - handler.totalWithdrawn() - handler.totalAutoUnwrapped(),
-            "invariant: reserve != cumulative deposits - withdrawals - autoUnwrapped"
+            handler.totalDeposited() - handler.totalWithdrawn(),
+            "invariant: reserve != cumulative deposits - withdrawals"
         );
     }
 }
