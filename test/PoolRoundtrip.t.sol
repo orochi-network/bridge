@@ -16,6 +16,7 @@ import {
 } from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
+import {DeployWON} from "./helpers/DeployWON.sol";
 import {MockRouter} from "./mocks/MockRouter.sol";
 import {MockRMN} from "./mocks/MockRMN.sol";
 
@@ -76,8 +77,7 @@ contract PoolRoundtripTest is Test {
         // Need an ERC20 to back wON; for this isolated test it's never deposited so a
         // placeholder ERC20 with no supply is fine (except in the auto-unwrap test).
         onEth = new MockON("ON", 0, address(0xdead));
-        vm.prank(admin);
-        won = new WrappedON(IERC20(address(onEth)), admin);
+        won = DeployWON.deploy(IERC20(address(onEth)), admin, admin);
         ethPool = new BurnMintTokenPool(
             IBurnMintERC20(address(won)), 18, new address[](0), address(ethRmn), address(ethRouter)
         );

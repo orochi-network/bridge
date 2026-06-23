@@ -15,6 +15,8 @@ import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/interfaces/IGetCCIPAdmin.
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
+import {DeployWON} from "./helpers/DeployWON.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 /// @dev Minimal mock of the canonical ON token (non-mintable ERC20).
 contract MockON is ERC20 {
@@ -143,7 +145,7 @@ contract WrappedONTest is Test {
 
     function setUp() public {
         on = new MockON();
-        won = new WrappedON(IERC20(address(on)), admin);
+        won = DeployWON.deploy(IERC20(address(on)), admin, admin);
 
         // Move all the mock supply to alice for clean accounting.
         on.transfer(alice, on.balanceOf(address(this)));
@@ -180,7 +182,7 @@ contract WrappedONTest is Test {
     ///         non-canonical ON variants.
     function test_DepositRevertsOnReceivedZero() public {
         NullTransferMockON mock = new NullTransferMockON();
-        WrappedON nullWon = new WrappedON(IERC20(address(mock)), admin);
+        WrappedON nullWon = DeployWON.deploy(IERC20(address(mock)), admin, admin);
         mock.mint(address(this), 100 ether);
         mock.approve(address(nullWon), 100 ether);
 
@@ -813,30 +815,53 @@ contract WrappedONTest is Test {
     // ─── Constructor guards ───────────────────────────────────────────────────
 
     function test_ConstructorEmitsCCIPAdminTransferred() public {
+        // The event now fires inside `initialize` during proxy construction. `expectEmit`
+        // with a 4-arg form does not check the emitter address (the proxy), only topics.
+        // Deploy the impl first so the only event-bearing CREATE is the proxy.
         address newAdmin = makeAddr("newAdmin");
+        WrappedON impl = new WrappedON();
+        bytes memory data = abi.encodeCall(WrappedON.initialize, (IERC20(address(on)), newAdmin, newAdmin));
         vm.expectEmit(true, true, false, false);
         emit WrappedON.CCIPAdminTransferred(address(0), newAdmin);
-        new WrappedON(IERC20(address(on)), newAdmin);
+        new ERC1967Proxy(address(impl), data);
     }
 
     function test_ConstructorRevertsOnZeroToken() public {
+        // `initialize` reverts during proxy construction; the selector is unchanged. The impl
+        // is deployed OUTSIDE `expectRevert` so the guard applies only to the proxy CREATE
+        // (the call that delegatecalls into the reverting `initialize`).
+        WrappedON impl = new WrappedON();
+        bytes memory data = abi.encodeCall(WrappedON.initialize, (IERC20(address(0)), admin, admin));
         vm.expectRevert(WrappedON.ZeroAddress.selector);
-        new WrappedON(IERC20(address(0)), admin);
+        new ERC1967Proxy(address(impl), data);
     }
 
     function test_ConstructorRevertsOnZeroAdmin() public {
+        WrappedON impl = new WrappedON();
+        bytes memory data = abi.encodeCall(WrappedON.initialize, (IERC20(address(on)), address(0), admin));
         vm.expectRevert(WrappedON.ZeroAddress.selector);
-        new WrappedON(IERC20(address(on)), address(0));
+        new ERC1967Proxy(address(impl), data);
     }
 
-    /// @dev Per PR #19 review (brng1151 #1, bao-ninh #5): constructor must reject the
+    function test_ConstructorRevertsOnZeroTimelock() public {
+        WrappedON impl = new WrappedON();
+        bytes memory data = abi.encodeCall(WrappedON.initialize, (IERC20(address(on)), admin, address(0)));
+        vm.expectRevert(WrappedON.ZeroAddress.selector);
+        new ERC1967Proxy(address(impl), data);
+    }
+
+    /// @dev Per PR #19 review (brng1151 #1, bao-ninh #5): init must reject the
     ///      `address(this)` self-reserve case (would make the reserve invariant circular).
+    ///      Through the proxy, `address(this)` inside `initialize` is the PROXY address, so we
+    ///      predict the proxy's CREATE address and pass it as the ON token.
     function test_ConstructorRevertsOnSelfReserve() public {
-        // Compute the next CREATE address — that's where the wON about to be deployed
-        // will live. Pass it as the ON token to trigger the SelfReserve guard.
-        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        // The impl is deployed first (nonce N), the proxy second (nonce N+1). Predict the
+        // proxy address and feed it as the ON token to trip the SelfReserve guard.
+        WrappedON impl = new WrappedON();
+        address predictedProxy = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        bytes memory data = abi.encodeCall(WrappedON.initialize, (IERC20(predictedProxy), admin, admin));
         vm.expectRevert(WrappedON.SelfReserve.selector);
-        new WrappedON(IERC20(predicted), admin);
+        new ERC1967Proxy(address(impl), data);
     }
 
     /// @dev Per PR #19 review (bao-ninh #5): constructor must reject ON tokens with
@@ -847,7 +872,7 @@ contract WrappedONTest is Test {
     ///         future redeployments against tokens that do hook.
     function test_DepositReentrancyGuardFires() public {
         ReentrantMockON rOn = new ReentrantMockON();
-        WrappedON rWon = new WrappedON(IERC20(address(rOn)), admin);
+        WrappedON rWon = DeployWON.deploy(IERC20(address(rOn)), admin, admin);
         rOn.setTarget(address(rWon));
 
         // Mock token mints supply to test contract; approve from here as the depositor.
@@ -872,7 +897,7 @@ contract WrappedONTest is Test {
     ///         withdraw must still complete normally.
     function test_WithdrawReentrancyGuardFires() public {
         ReentrantWithdrawMockON rOn = new ReentrantWithdrawMockON();
-        WrappedON rWon = new WrappedON(IERC20(address(rOn)), admin);
+        WrappedON rWon = DeployWON.deploy(IERC20(address(rOn)), admin, admin);
 
         // Fund alice with rON BEFORE arming the reentrancy so this transfer doesn't trip it.
         rOn.transfer(alice, 1000 ether);
@@ -895,8 +920,10 @@ contract WrappedONTest is Test {
 
     function test_ConstructorRevertsOnDecimalsMismatch() public {
         MockON6 on6 = new MockON6();
+        WrappedON impl = new WrappedON();
+        bytes memory data = abi.encodeCall(WrappedON.initialize, (IERC20(address(on6)), admin, admin));
         vm.expectRevert(abi.encodeWithSelector(WrappedON.DecimalsMismatch.selector, 18, 6));
-        new WrappedON(IERC20(address(on6)), admin);
+        new ERC1967Proxy(address(impl), data);
     }
 
     // ─── Metadata ─────────────────────────────────────────────────────────────

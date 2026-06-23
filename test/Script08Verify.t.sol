@@ -8,6 +8,7 @@ import {RateLimiter} from "@chainlink/contracts-ccip/libraries/RateLimiter.sol";
 
 import {PostDeployVerify} from "../script/08_PostDeployVerify.s.sol";
 import {WrappedON} from "../src/WrappedON.sol";
+import {DeployWON} from "./helpers/DeployWON.sol";
 
 /// @dev TEST-20: stand-in pool that lets each test set the rebalancer and the
 ///      `getRemotePool` / `getRemoteToken` payloads independently so the typed-revert
@@ -171,8 +172,8 @@ contract Script08VerifyTest is Test {
         address deployer = makeAddr("deployer");
         address multisig = makeAddr("multisig");
 
+        WrappedON won = DeployWON.deploy(IERC20(address(on)), deployer, deployer);
         vm.startPrank(deployer);
-        WrappedON won = new WrappedON(IERC20(address(on)), deployer);
         // Simulate partial handoff: multisig holds the admin role, but deployer hasn't
         // renounced yet. CCIP admin already transferred so the revert is on
         // RoleNotRenounced rather than the ccipAdmin RoleMissing branch.
@@ -247,8 +248,8 @@ contract Script08VerifyTest is Test {
         address deployer = makeAddr("deployer");
         address multisig = makeAddr("multisig");
 
+        WrappedON won = DeployWON.deploy(IERC20(address(on)), deployer, deployer);
         vm.startPrank(deployer);
-        WrappedON won = new WrappedON(IERC20(address(on)), deployer);
         bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
         won.grantRole(adminRole, multisig);
         won.setCCIPAdmin(multisig);

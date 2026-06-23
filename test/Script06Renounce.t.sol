@@ -7,6 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {RenounceDeployerAdmin} from "../script/06_TransferOwnership.s.sol";
 import {WrappedON} from "../src/WrappedON.sol";
+import {DeployWON} from "./helpers/DeployWON.sol";
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────────
 
@@ -86,9 +87,8 @@ contract Script06RenounceTest is Test {
         harness = new RenounceDeployerAdminHarness();
         onToken = new MockON();
 
-        // Deploy wON as the deployer so DEFAULT_ADMIN_ROLE + ccipAdmin start with deployer.
-        vm.prank(deployer);
-        won = new WrappedON(IERC20(address(onToken)), deployer);
+        // Deploy wON with the deployer as admin so DEFAULT_ADMIN_ROLE + ccipAdmin start with deployer.
+        won = DeployWON.deploy(IERC20(address(onToken)), deployer, deployer);
 
         pool = new MockOwnedPool();
         registry = new MockRegistry();

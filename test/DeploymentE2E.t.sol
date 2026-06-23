@@ -19,6 +19,7 @@ import {RegistryModuleOwnerCustom} from "@chainlink/contracts-ccip/tokenAdminReg
 import {TokenPool as ITokenPool} from "@chainlink/contracts-ccip/pools/TokenPool.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
+import {DeployWON} from "./helpers/DeployWON.sol";
 import {MockRouter} from "./mocks/MockRouter.sol";
 import {MockRMN} from "./mocks/MockRMN.sol";
 
@@ -103,8 +104,7 @@ contract DeploymentE2ETest is Test {
 
     /// @dev Mirrors `script/01_DeployWrappedON.s.sol` — ETH side only.
     function _run01_deployWrappedON() internal {
-        vm.prank(deployer);
-        won = new WrappedON(IERC20(address(onEth)), deployer);
+        won = DeployWON.deploy(IERC20(address(onEth)), deployer, deployer);
     }
 
     /// @dev Mirrors `script/02_DeployPools.s.sol` for both chains.

@@ -3,6 +3,7 @@ pragma solidity 0.8.34;
 
 import {Script, console} from "forge-std/Script.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
 import {Helper} from "./Helper.sol";
@@ -41,9 +42,16 @@ contract DeployWrappedON is Script, Helper {
         }
 
         address admin = msg.sender;
+        // NOTE: minimal UUPS-proxy deploy so the project compiles. Task 6 replaces the
+        // `timelock == admin` placeholder with the real `TimelockController` (the upgrader).
+        address timelock = admin;
 
         vm.startBroadcast();
-        won = new WrappedON(IERC20(cfg.onToken), admin);
+        WrappedON impl = new WrappedON();
+        ERC1967Proxy proxy = new ERC1967Proxy(
+            address(impl), abi.encodeCall(WrappedON.initialize, (IERC20(cfg.onToken), admin, timelock))
+        );
+        won = WrappedON(address(proxy));
         vm.stopBroadcast();
 
         console.log("WrappedON:", address(won));

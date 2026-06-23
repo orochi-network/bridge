@@ -7,6 +7,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
+import {DeployWON} from "./helpers/DeployWON.sol";
 
 /// @dev Minimal 18-decimal ON mock with a public mint for the handler's "BSC pool" simulation.
 contract InvariantMockON is ERC20 {
@@ -299,7 +300,7 @@ contract WrappedONInvariantTest is StdInvariant, Test {
 
     function setUp() public {
         onToken = new InvariantMockON();
-        won = new WrappedON(IERC20(address(onToken)), admin);
+        won = DeployWON.deploy(IERC20(address(onToken)), admin, admin);
 
         vm.startPrank(admin);
         won.grantRole(won.MINTER_ROLE(), pool);
