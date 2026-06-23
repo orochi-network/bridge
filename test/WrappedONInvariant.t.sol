@@ -158,7 +158,7 @@ contract WrappedONHandler is Test {
     ///      that's exactly the case the `MAX_CCIP_MINTED` cap exists to bound, and
     ///      modelling it would test the cap's role rather than the safety invariant's
     ///      preservation by mechanics. The cap is locked separately via
-    ///      `invariant_CcipMintedSupplyWithinCap`.
+    ///      `invariant_CcipMintHeadroomWithinCap`.
     function adversarialPoolBurn(uint256 actorSeed, uint256 amount) external {
         address user = _actor(actorSeed);
         uint256 userBal = WON.balanceOf(user);
@@ -344,7 +344,7 @@ contract WrappedONInvariantTest is StdInvariant, Test {
     }
 
     /// @notice The CCIP cap must hold regardless of mint/burn ordering.
-    function invariant_CcipMintedSupplyWithinCap() public view {
+    function invariant_CcipMintHeadroomWithinCap() public view {
         assertLe(
             won.ccipMintHeadroomUsed(), won.MAX_CCIP_MINTED(), "invariant: ccipMintHeadroomUsed exceeds MAX_CCIP_MINTED"
         );
@@ -361,6 +361,39 @@ contract WrappedONInvariantTest is StdInvariant, Test {
             reserve,
             handler.totalDeposited() - handler.totalWithdrawn(),
             "invariant: reserve != cumulative deposits - withdrawals"
+        );
+    }
+
+    /// @notice The lemma behind the supply bound: the CCIP counter is an UPPER BOUND on the
+    ///         net CCIP-minted supply, `totalSupply() - reserve`. Every mint moves the counter
+    ///         and supply together; deposit/withdraw move supply and reserve together (counter
+    ///         untouched); the saturating burn only ever WIDENS the gap (counter floors at 0
+    ///         while supply drops by the full amount). So `ccipMintHeadroomUsed >= S - R`
+    ///         always. (Only asserted when `S > R`; otherwise net CCIP-minted is <= 0 and the
+    ///         bound is trivial.)
+    function invariant_HeadroomCoversNetCcipSupply() public view {
+        uint256 reserve = onToken.balanceOf(address(won));
+        uint256 supply = won.totalSupply();
+        if (supply > reserve) {
+            assertGe(
+                won.ccipMintHeadroomUsed(), supply - reserve, "invariant: ccipMintHeadroomUsed < totalSupply - reserve"
+            );
+        }
+    }
+
+    /// @notice The conservation bound (Chiro 2026-06-23): `wON.totalSupply()` is NOT capped at
+    ///         `MAX_CCIP_MINTED` — it is capped at `MAX_CCIP_MINTED + reserve`. This is the
+    ///         executable form of `wON.totalSupply() <= ON_bsc.totalSupply() + ON_eth.balanceOf(wON)`
+    ///         (with `MAX_CCIP_MINTED == ON_bsc.totalSupply() == 100M`). It is enforced
+    ///         EMERGENTLY — the code checks only `ccipMintHeadroomUsed <= MAX_CCIP_MINTED`, and
+    ///         this bound follows because `ccipMintHeadroomUsed >= S - R`
+    ///         (`invariant_HeadroomCoversNetCcipSupply`). The deposit path is intentionally
+    ///         uncapped, so supply above `MAX_CCIP_MINTED` is legitimate and 1:1 reserve-backed.
+    function invariant_SupplyWithinCapPlusReserve() public view {
+        assertLe(
+            won.totalSupply(),
+            won.MAX_CCIP_MINTED() + onToken.balanceOf(address(won)),
+            "invariant: totalSupply exceeds MAX_CCIP_MINTED + reserve"
         );
     }
 }

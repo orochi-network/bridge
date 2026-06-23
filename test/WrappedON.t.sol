@@ -745,7 +745,7 @@ contract WrappedONTest is Test {
         assertEq(on.balanceOf(address(won)), 0, "reserve fully withdrawn");
     }
 
-    function test_BurnDecrementsCCIPMintedSupply() public {
+    function test_BurnDecrementsCcipMintHeadroom() public {
         vm.prank(pool);
         won.mint(pool, 80 ether);
         assertEq(won.ccipMintHeadroomUsed(), 80 ether);
@@ -1193,5 +1193,33 @@ contract WrappedONTest is Test {
         vm.prank(pool);
         won.mint(alice, cap);
         assertEq(won.ccipMintHeadroomUsed(), cap);
+    }
+
+    // ─── Wrap volume does NOT consume CCIP cap headroom ───────────────────────
+
+    /// @notice Regression guard: even a 100M deposit (= MAX_CCIP_MINTED) via the permissionless
+    ///         wrap leaves `ccipMintHeadroomUsed` at 0, so a subsequent BSC→ETH arrival (the
+    ///         pool calls `mint`) still succeeds. `deposit` only moves the reserve + supply; it
+    ///         never touches the CCIP counter, so heavy wrapping cannot starve inbound CCIP.
+    function test_DepositDoesNotConsumeCcipMintCap() public {
+        uint256 cap = won.MAX_CCIP_MINTED(); // 100M
+
+        // Adversary wraps 100M ON_eth -> 100M wON (permissionless, uncapped deposit).
+        address adversary = makeAddr("adversary");
+        deal(address(on), adversary, cap);
+        vm.startPrank(adversary);
+        on.approve(address(won), cap);
+        won.deposit(cap);
+        vm.stopPrank();
+
+        emit log_named_uint("ccipMintHeadroomUsed after 100M deposit", won.ccipMintHeadroomUsed());
+        emit log_named_uint("totalSupply after 100M deposit          ", won.totalSupply());
+
+        // Legitimate user bridges BSC->ETH: the pool mints wON to them.
+        address user = makeAddr("user");
+        vm.prank(pool);
+        won.mint(user, 1 ether);
+
+        assertEq(won.balanceOf(user), 1 ether, "user received bridged wON");
     }
 }

@@ -45,28 +45,17 @@ import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/interfaces/IGetCCIPAdmin.
 /// cannot independently verify that the matching BSC `lock` occurred. See SECURITY: CCIP-7
 /// and the §3 trust model.
 ///
-/// `MAX_CCIP_MINTED = 100M` caps `ccipMintHeadroomUsed` — a LOCAL ETH-side counter of how
-/// much CCIP mint-cap headroom is consumed (M1 / #23 renamed it from the misleading
-/// `ccipMintedSupply`). It exists only because the real CCIP-locked figure lives on BSC and
-/// is unreadable from here, and it is NOT a gauge of BSC-locked liquidity: the
-/// saturating-decrement (below) and operator-seeded BSC liquidity make it drift from the true
-/// BSC balance. The cap bounds damage from a compromised pool; it does NOT bound
-/// `totalSupply()` (the `deposit` path is uncapped). Not a per-token-provenance counter — wON
-/// is fungible. Saturating-subtract on burn handles deposit-backed wON being bridged out;
-/// pool lock/release accounting nets out regardless.
-///
-/// CAP REPLENISHMENT (SECURITY: M1 #23 / CCIP-7 / WON-3): the cap is NOT a lifetime
-/// CCIP-mint bound. Deposit-backed wON cycled OUT through the bridge burns and
-/// saturating-decrements `ccipMintHeadroomUsed` toward 0 even though the underlying mint was
-/// never CCIP-sourced — refilling cap headroom for subsequent CCIP inbound mints. Because of
-/// that saturation the counter can read BELOW the true BSC-locked balance, so it must NOT be
-/// treated as a BSC-liquidity proxy. The safety invariant
-/// (`lockedON_BSC + reserveON_ETH >= totalSupply(wON)`) holds regardless, because every CCIP
-/// mint still pairs a BSC lock at the cap-checked moment and burns reverse both sides in
-/// lockstep. For real cross-chain exposure read `IERC20(ON).balanceOf(BSC_pool)` as ground
-/// truth — NOT this counter.
-///
-/// Safety invariant (mechanical): `lockedON_BSC + reserveON_ETH >= totalSupply(wON)`.
+/// `MAX_CCIP_MINTED = 100M` (= canonical BSC ON supply) caps `ccipMintHeadroomUsed`, a LOCAL
+/// ETH-side counter of CCIP mint headroom consumed: incremented in `mint`, saturating-
+/// decremented in every burn. It bounds the CCIP-minted portion, NOT `totalSupply()` — the
+/// `deposit` path is uncapped, so supply can reach `MAX_CCIP_MINTED + ON.balanceOf(this)` (the
+/// counter satisfies `ccipMintHeadroomUsed >= totalSupply() - reserve`; see the invariant
+/// suite). It is NOT a lifetime CCIP-mint bound nor a BSC-liquidity gauge: the saturating
+/// decrement (deposit-backed wON bridged out refills headroom) and operator-seeded liquidity
+/// make it drift below the true BSC-locked balance — read `IERC20(ON).balanceOf(BSC_pool)` for
+/// that. The safety invariant `lockedON_BSC + reserveON_ETH >= totalSupply(wON)` holds
+/// regardless, because every CCIP mint pairs a BSC lock and burns reverse both sides in
+/// lockstep. SECURITY: CCIP-7 / WON-3 / M1.
 ///
 /// @dev `IBurnMintERC20` is NOT inherited — it brings the CCIP-vendored `IERC20`, which
 /// conflicts with OZ `IERC20` linearization. Selectors match the interface exactly so
@@ -185,9 +174,8 @@ contract WrappedON is
     /// @notice One-time init. `admin` gets `DEFAULT_ADMIN_ROLE` + `PAUSER_ROLE` and becomes the
     ///         initial CCIP admin; `timelock` gets `UPGRADER_ROLE` (gates `_authorizeUpgrade`).
     /// @dev Rejects zero-address (any of the three args), self-reserve, and decimals-mismatch
-    ///      tokens — same guards the old constructor enforced. The CCIP admin and the
-    ///      `DEFAULT_ADMIN_ROLE` both hand off to the multisig (two-step each) before the
-    ///      deployer renounces.
+    ///      tokens. The CCIP admin and the `DEFAULT_ADMIN_ROLE` both hand off to the multisig
+    ///      (two-step each) before the deployer renounces.
     /// @dev `UPGRADER_ROLE` is made SELF-ADMINISTERED (`_setRoleAdmin(UPGRADER_ROLE,
     ///      UPGRADER_ROLE)`): without this, OZ defaults its admin to `DEFAULT_ADMIN_ROLE`, so
     ///      the post-handoff multisig could `grantRole(UPGRADER_ROLE, itself)` and upgrade with
