@@ -412,18 +412,23 @@ The sequence runs scripts 01 → 02 → 03 → 04 → 05:
 - Script 04: registers the deployer as new wON's CCIP admin in `TokenAdminRegistry`, then `setPool(newWON, newETHPool)`.
 - Script 05: wires the BSC remote chain config onto the new ETH pool (`remotePoolAddresses` = BSC `LockReleaseTokenPool`, `remoteTokenAddress` = BSC ON, same rate limits).
 
-#### Step 2: BSC — re-wire the ETH lane of the existing LockReleaseTokenPool (script 05 only)
+#### Step 2: BSC — reconcile the ETH lane of the existing LockReleaseTokenPool (script 09 only)
 
-The existing BSC `LockReleaseTokenPool` still has the old ETH pool wired. Remove the old ETH-lane config and add the new ETH pool + new wON address by running **script 05 only** on BSC — invoke it directly rather than via `make deploy-bsc`, because that target also runs scripts 02 and 04:
+The existing BSC `LockReleaseTokenPool` still has its ETH lane wired to the **old** ETH pool and the **old** wON token. Re-point it at the new ETH pool + new wON by running **script 09 only** on BSC:
 
 ```bash
-forge script script/05_ApplyChainUpdates.s.sol \
-  --rpc-url bsc --broadcast --account deployer
+make reconcile-remote-pool RPC=bsc
+# equivalent:
+# forge script script/09_ReconcileRemotePool.s.sol --rpc-url bsc --broadcast --account deployer
 ```
 
-Script 05 re-applies `applyChainUpdates` on the existing BSC pool with the new `remotePoolAddresses` (new ETH pool) and new `remoteTokenAddress` (new wON). Same rate limits apply. `applyChainUpdates` is `onlyOwner` (the deployer) and does not touch CCIP admin registration.
+Script 09 (`ReconcileRemotePool`) performs an **atomic `applyChainUpdates` remove+add** on the existing BSC pool: it removes the stale ETH lane (old pool + old token) and re-adds the lane with the new `remotePoolAddresses` (new ETH pool) and new `remoteTokenAddress` (new wON), re-supplying the same rate limits. It is `onlyOwner` (the deployer), does not touch CCIP admin registration, post-asserts the new wiring, and is idempotent (a clean no-op if the lane already matches).
 
-> **Do NOT run script 04 on BSC mainnet in any form** (it reverts `CannotResolveCCIPAdmin` — the path-4 blocker: BSC ON `owner()` = `address(0)`, no `getCCIPAdmin`, not AccessControl). The BSC pool's CCIP-admin registration was already done out-of-band with Chainlink (2026-06-19) and does not need redoing. Re-wire the existing pool with script 05 only — **do not use `make deploy-bsc`**, which would also run scripts 02 and 04.
+> **Why not script 05?** Script 05 only **adds** new lanes. On a lane that already exists it reverts (`ChainAlreadyExists` from the protocol; and even before that, script 05's stale-wiring guard reverts and points you here). CCIP 1.6.1 has **no `setRemoteToken`**, so the lane's remote *token* can only be changed by removing and re-adding the chain — which is exactly what script 09 does in one call. `addRemotePool`/`removeRemotePool` would change only the remote *pool*, not the token, so they cannot reconcile a redeploy that changed both. (See #55.)
+
+> **Do NOT run script 04 on BSC mainnet in any form** (it reverts `CannotResolveCCIPAdmin` — the path-4 blocker: BSC ON `owner()` = `address(0)`, no `getCCIPAdmin`, not AccessControl). The BSC pool's CCIP-admin registration was already done out-of-band with Chainlink (2026-06-19) and does not need redoing. **Do not use `make deploy-bsc`**, which would also run scripts 02 and 04.
+
+> **SAFETY:** the atomic remove also drops inflight-message support from the old remote pool and resets the rate-limiter buckets. This is correct here (the old ETH pool is dead — no holders, no reserve, no inflight messages). Do not reconcile while messages from the old pool are still in flight.
 
 #### Step 3 (optional): deregister the old wON in TokenAdminRegistry
 

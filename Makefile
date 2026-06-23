@@ -183,6 +183,15 @@ deploy-bsc: precheck-helper
 	forge script script/04_RegisterAdminAndPool.s.sol --rpc-url $(RPC) $(DEPLOY_FLAGS)
 	forge script script/05_ApplyChainUpdates.s.sol    --rpc-url $(RPC) $(DEPLOY_FLAGS)
 
+# Reconcile a stale lane after a remote redeploy (RUNBOOK §4.4 Step 2, #55). Re-points the
+# local pool's lane at the NEW remote pool + NEW remote token via an atomic applyChainUpdates
+# remove+add. Use this — NOT `make deploy-bsc` (runs 02+04) and NOT re-running script 05 (only
+# ADDS lanes; a re-add reverts ChainAlreadyExists). Idempotent: a no-op if already reconciled.
+#   make reconcile-remote-pool RPC=bsc                 # broadcast the re-wire
+reconcile-remote-pool: precheck-helper
+	@test -n "$(RPC)" || (echo "RPC=bsc|eth|... required"; exit 1)
+	forge script script/09_ReconcileRemotePool.s.sol  --rpc-url $(RPC) $(DEPLOY_FLAGS)
+
 # SECURITY: DEP-8 — the post-handoff renounce check needs the deployer EOA's address. In
 # view-only mode `forge script` resolves `msg.sender` to Foundry's default sender, so
 # reading `msg.sender` inside the script wouldn't validate anything. The script reads
