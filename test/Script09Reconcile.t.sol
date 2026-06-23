@@ -35,8 +35,11 @@ contract _MockON is ERC20 {
 contract Script09ReconcileTest is Test {
     // ETH mainnet selector — the lane we reconcile on the BSC pool.
     uint64 internal constant ETH_SELECTOR = 5_009_297_550_715_157_269;
-    uint128 internal constant CAPACITY = 100_000 ether; // == ReconcileRemotePool.DEFAULT_CAPACITY
-    uint128 internal constant RATE = 10 ether; //          == ReconcileRemotePool.DEFAULT_RATE
+    // Asymmetric defaults mirroring ReconcileRemotePool / script 05 (#61): outbound < inbound.
+    uint128 internal constant INBOUND_CAPACITY = 100_000 ether;
+    uint128 internal constant INBOUND_RATE = 10 ether;
+    uint128 internal constant OUTBOUND_CAPACITY = 80_000 ether;
+    uint128 internal constant OUTBOUND_RATE = 8 ether;
 
     address internal owner = makeAddr("poolOwner");
 
@@ -162,10 +165,10 @@ contract Script09ReconcileTest is Test {
         RateLimiter.TokenBucket memory outb = bscPool.getCurrentOutboundRateLimiterState(ETH_SELECTOR);
         RateLimiter.TokenBucket memory inb = bscPool.getCurrentInboundRateLimiterState(ETH_SELECTOR);
         assertTrue(outb.isEnabled && inb.isEnabled, "rate limits re-enabled");
-        assertEq(outb.capacity, CAPACITY, "outbound capacity restored");
-        assertEq(outb.rate, RATE, "outbound rate restored");
-        assertEq(inb.capacity, CAPACITY, "inbound capacity restored");
-        assertEq(inb.rate, RATE, "inbound rate restored");
+        assertEq(outb.capacity, OUTBOUND_CAPACITY, "outbound capacity restored");
+        assertEq(outb.rate, OUTBOUND_RATE, "outbound rate restored");
+        assertEq(inb.capacity, INBOUND_CAPACITY, "inbound capacity restored");
+        assertEq(inb.rate, INBOUND_RATE, "inbound rate restored");
     }
 
     function test_Reconcile_OnlyOwner() public {
@@ -191,8 +194,12 @@ contract Script09ReconcileTest is Test {
             remoteChainSelector: ETH_SELECTOR,
             remotePoolAddresses: remotePoolAddresses,
             remoteTokenAddress: abi.encode(remoteToken),
-            outboundRateLimiterConfig: RateLimiter.Config({isEnabled: true, capacity: CAPACITY, rate: RATE}),
-            inboundRateLimiterConfig: RateLimiter.Config({isEnabled: true, capacity: CAPACITY, rate: RATE})
+            outboundRateLimiterConfig: RateLimiter.Config({
+                isEnabled: true, capacity: OUTBOUND_CAPACITY, rate: OUTBOUND_RATE
+            }),
+            inboundRateLimiterConfig: RateLimiter.Config({
+                isEnabled: true, capacity: INBOUND_CAPACITY, rate: INBOUND_RATE
+            })
         });
     }
 }

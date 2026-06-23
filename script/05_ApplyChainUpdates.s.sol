@@ -12,24 +12,36 @@ import {Deployments} from "./Deployments.sol";
 /// @notice Wires each pool to its remote counterpart with rate limits.
 ///
 /// Initial limits (calibrate from production traffic):
-///   capacity = 100_000 ON   (USD value tracks the ON price — calibrate before mainnet)
-///   rate     = 10 ON/sec    (~864,000 ON / day)
+///   inbound : capacity = 100_000 ON, rate = 10 ON/sec  (~864,000 ON / day)
+///   outbound: capacity =  80_000 ON, rate =  8 ON/sec
 ///
-/// Re-tune via `setChainRateLimiterConfig` on the pool after launch.
+/// Re-tune per direction via `setChainRateLimiterConfig` on the pool after launch (script 07).
 ///
-/// SECURITY: CCIP-2 + CCIP-3 — design notes:
-///   - Symmetric capacity/rate in both directions is intentional. The bridge is
-///     directionally asymmetric (ETH has the hard `MAX_CCIP_MINTED = 100M` cap; BSC has
-///     no equivalent wON-side cap), but ETH-inbound is the side the cap already protects,
-///     so symmetric rate limits keep the operator surface predictable. Confirm before
-///     mainnet broadcast — if you want ETH-inbound throttled tighter than BSC-outbound,
-///     adjust these constants before running script 05.
-///   - The 100k cap : 10/sec rate ratio = ~2.8h to refill from zero. A single user can
-///     saturate the bucket for that window. Reduce capacity (or raise rate) if a tighter
-///     refill window is desired.
+/// SECURITY: CCIP-2 + CCIP-3 — directional rate-limit design (#61):
+///   - Per Chainlink, Token Pool Rate Limits are STRONGLY RECOMMENDED on all lanes, and inbound
+///     and outbound are configured SEPARATELY so risk can be tuned asymmetrically by direction.
+///     Chainlink's concrete heuristic: "outbound limits are often configured to be slightly lower
+///     than inbound limits to provide buffer room and reduce the risk of in-flight congestion."
+///     We adopt that here — outbound (80k/8) is set below inbound (100k/10) on BOTH pools.
+///     Refs: https://docs.chain.link/ccip/concepts/rate-limit-management/how-rate-limits-work
+///           https://docs.chain.link/ccip/concepts/rate-limit-management/overview
+///   - Chainlink prescribes NO specific numbers — calibrate to liquidity/risk. The bridge is
+///     directionally asymmetric: ETH-inbound (BSC->ETH mint) is bounded by the hard
+///     `MAX_CCIP_MINTED = 100M` cap (stuck-mint mode — SECURITY CCIP-15); BSC-inbound
+///     (ETH->BSC release) is bounded by the BSC pool's reserve LIQUIDITY (stuck-release — M2).
+///     >>> BEFORE MAINNET BROADCAST: finalize BSC-inbound capacity/rate against the actual
+///     >>> seeded BSC liquidity (M2 / CCIP-2). These constants are a deliberate, documented
+///     >>> launch default, not a final calibration.
+///   - Refill window: 100k cap : 10/sec = ~2.8h from zero (inbound); 80k : 8/sec is the same
+///     ~2.8h ratio (outbound). A single user can saturate a bucket for that window. Reduce
+///     capacity (or raise rate) if a tighter refill window is desired.
 contract ApplyChainUpdates is Script, Helper {
-    uint128 internal constant DEFAULT_CAPACITY = 100_000 ether;
-    uint128 internal constant DEFAULT_RATE = 10 ether;
+    // Asymmetric defaults (#61): outbound slightly below inbound, per Chainlink's heuristic.
+    // Same direction split is mirrored in script 09 (ReconcileRemotePool) — keep in lockstep.
+    uint128 internal constant INBOUND_CAPACITY = 100_000 ether;
+    uint128 internal constant INBOUND_RATE = 10 ether;
+    uint128 internal constant OUTBOUND_CAPACITY = 80_000 ether;
+    uint128 internal constant OUTBOUND_RATE = 8 ether;
 
     function run() external {
         NetworkConfig memory remote = _remoteConfig(block.chainid);
@@ -93,10 +105,10 @@ contract ApplyChainUpdates is Script, Helper {
             remotePoolAddresses: remotePoolAddresses,
             remoteTokenAddress: abi.encode(remoteToken),
             outboundRateLimiterConfig: RateLimiter.Config({
-                isEnabled: true, capacity: DEFAULT_CAPACITY, rate: DEFAULT_RATE
+                isEnabled: true, capacity: OUTBOUND_CAPACITY, rate: OUTBOUND_RATE
             }),
             inboundRateLimiterConfig: RateLimiter.Config({
-                isEnabled: true, capacity: DEFAULT_CAPACITY, rate: DEFAULT_RATE
+                isEnabled: true, capacity: INBOUND_CAPACITY, rate: INBOUND_RATE
             })
         });
 

@@ -38,8 +38,11 @@ contract MockON is ERC20 {
 contract DeploymentE2ETest is Test {
     uint64 internal constant ETH_SELECTOR = 5_009_297_550_715_157_269;
     uint64 internal constant BSC_SELECTOR = 11_344_663_589_394_136_015;
-    uint128 internal constant CAPACITY = 100_000 ether;
-    uint128 internal constant RATE = 10 ether;
+    // Asymmetric defaults mirroring script 05 (#61): outbound slightly below inbound.
+    uint128 internal constant INBOUND_CAPACITY = 100_000 ether;
+    uint128 internal constant INBOUND_RATE = 10 ether;
+    uint128 internal constant OUTBOUND_CAPACITY = 80_000 ether;
+    uint128 internal constant OUTBOUND_RATE = 8 ether;
 
     // ── ETH side ────────────────────────────────────────────────────────────
     WrappedON internal won;
@@ -160,8 +163,8 @@ contract DeploymentE2ETest is Test {
             remoteChainSelector: BSC_SELECTOR,
             remotePoolAddresses: _remote(abi.encode(address(bscPool))),
             remoteTokenAddress: abi.encode(address(onBsc)),
-            outboundRateLimiterConfig: _limit(),
-            inboundRateLimiterConfig: _limit()
+            outboundRateLimiterConfig: _limitOut(),
+            inboundRateLimiterConfig: _limitIn()
         });
         vm.prank(deployer);
         ethPool.applyChainUpdates(new uint64[](0), ethToBsc);
@@ -171,15 +174,19 @@ contract DeploymentE2ETest is Test {
             remoteChainSelector: ETH_SELECTOR,
             remotePoolAddresses: _remote(abi.encode(address(ethPool))),
             remoteTokenAddress: abi.encode(address(won)),
-            outboundRateLimiterConfig: _limit(),
-            inboundRateLimiterConfig: _limit()
+            outboundRateLimiterConfig: _limitOut(),
+            inboundRateLimiterConfig: _limitIn()
         });
         vm.prank(bscTokenOwner);
         bscPool.applyChainUpdates(new uint64[](0), bscToEth);
     }
 
-    function _limit() internal pure returns (RateLimiter.Config memory) {
-        return RateLimiter.Config({isEnabled: true, capacity: CAPACITY, rate: RATE});
+    function _limitIn() internal pure returns (RateLimiter.Config memory) {
+        return RateLimiter.Config({isEnabled: true, capacity: INBOUND_CAPACITY, rate: INBOUND_RATE});
+    }
+
+    function _limitOut() internal pure returns (RateLimiter.Config memory) {
+        return RateLimiter.Config({isEnabled: true, capacity: OUTBOUND_CAPACITY, rate: OUTBOUND_RATE});
     }
 
     /// @dev CCIP 1.6.1 `ChainUpdate.remotePoolAddresses` is `bytes[]`; wrap a single encoded pool.
@@ -515,7 +522,7 @@ contract DeploymentE2ETest is Test {
     function test_E2E_DisableRateLimitIndependently() public {
         // Disable outbound only; inbound stays enabled.
         RateLimiter.Config memory off = RateLimiter.Config({isEnabled: false, capacity: 0, rate: 0});
-        RateLimiter.Config memory on = RateLimiter.Config({isEnabled: true, capacity: CAPACITY, rate: RATE});
+        RateLimiter.Config memory on = _limitIn(); // any enabled bucket; only isEnabled is asserted
 
         vm.prank(deployer);
         ethPool.setChainRateLimiterConfig(BSC_SELECTOR, off, on);
