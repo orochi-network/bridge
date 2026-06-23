@@ -541,6 +541,17 @@ wON is UUPS-upgradeable via `upgradeToAndCall` on the proxy, gated by `UPGRADER_
 1. Verify the new implementation compiles cleanly: `forge build`.
 2. Check storage-layout compatibility: `make check-storage-layout` (issue #50). The new impl MUST NOT reorder, insert, remove, or resize fields in the ERC-7201 `WrappedONStorage` struct — any of those corrupts live proxy state, and the guard fails the build on it. Adding a new field at the END of the struct is the ONLY safe change; for an intentional append, run `make update-storage-layout` to refresh the committed snapshot at `storage/WrappedON.storage-layout.json` and commit it alongside the `WrappedON.sol` change. This check is also wired into PR CI (`.github/workflows/ci.yml`), so a layout-breaking change cannot merge silently. (Mechanics: the guard inspects `test/storage/StorageLayoutProbe.sol` because `WrappedON`'s ERC-7201 storage is invisible to a plain `forge inspect` of the contract; see `script/storage-layout.sh`.)
 3. Run the full test suite against the new impl: `make test`.
+4. **`supportsInterface` (#60):** `supportsInterface` enumerates interface IDs MANUALLY (incl. the
+   hand-reproduced `IBurnMintERC20` id). If the new implementation adds an interface-advertising
+   feature/module (or changes which interfaces wON claims), extend `supportsInterface` to report
+   the new `interfaceId` — the compiler will not remind you.
+5. **Stateful upgrades — reinitializer + new namespace (#60):** if the upgrade adds/initialises
+   storage, do NOT resize the V1 `WrappedONStorage` struct. Put the new fields in a FRESH ERC-7201
+   namespace (e.g. `orochi.storage.WrappedON.v2`) and add a `reinitializer(N)` initializer that
+   runs exactly once. Execute it ATOMICALLY with the upgrade — the timelock calldata becomes
+   `abi.encodeCall(UUPSUpgradeable.upgradeToAndCall, (<newImpl>, abi.encodeCall(NewImpl.initializeV2, (...))))`
+   — so the proxy is never live half-initialised. Scaffold + tests:
+   `test/mocks/WrappedONReinitV2Mock.sol`, `test_ReinitializerV2*` in `test/WrappedONUpgrade.t.sol`.
 
 **Upgrade procedure (multisig + timelock):**
 

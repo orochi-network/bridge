@@ -1088,6 +1088,14 @@ redeploy + re-register"; that remains an option but is no longer the only path._
 - **Impact (compromised pool with `MINTER_ROLE`):** A paused bridge BLOCKS the compromised pool's mint path too — pause inadvertently provides partial mitigation against a compromised pool if the multisig can pause before the attacker mints.
 - **Residual risk:** A compromised multisig could unpause immediately after pausing; the 48h timelock does not cover `pause`/`unpause` (intentional — emergency response requires speed). Key management of the Safe signers and threshold is the load-bearing control.
 
+### UPG-5: upgrade-hygiene hardening — base-slot self-check, reinitializer scaffold, supportsInterface checklist
+- **Severity:** LOW
+- **Status:** FIXED (2026-06-23) — issue [#60](https://github.com/orochi-network/bridge/issues/60). Three pre-emptive hardening items; none was a defect (the contract is upgrade-safe and collision-proof), each removes a way a future upgrade PR could regress silently.
+  1. **Base-slot self-check.** The member-layout guard (`make check-storage-layout`, UPG-3) catches reorder/insert/remove/retype but NOT a relocation of the whole `WrappedONStorage` struct via a changed storage-location annotation / `_STORAGE_LOCATION` constant (member layout stays byte-identical). `test_StorageSlotsUnchangedAfterUpgrade` caught it only via a hand-copied base-slot constant that could drift. Added `test_Erc7201BaseSlotMatchesNamespace` (WrappedONUpgrade.t.sol): it DERIVES the base slot from the namespace string `orochi.storage.WrappedON` and asserts (a) the test constant matches it and (b) V1 state actually lives there — so a `_STORAGE_LOCATION` no longer matching the namespace fails the suite. No hand-copied constant in the load-bearing assertion.
+  2. **`reinitializer(2)` scaffold.** Added `test/mocks/WrappedONReinitV2Mock.sol` (new field in its own `orochi.storage.WrappedON.v2` namespace, `initializeV2` gated by `reinitializer(2)`) + tests `test_ReinitializerV2RunsExactlyOnce`, `test_ReinitializerV2DoesNotCollideWithV1`, `test_V1InitializeCannotBeReplayedAfterV2`. Proves the first stateful-upgrade pattern runs exactly once, keeps V1 state, and cannot reopen version 1. RUNBOOK §4.7 documents the atomic `upgradeToAndCall(newImpl, abi.encodeCall(initializeV2, …))` pattern.
+  3. **`supportsInterface` checklist.** `supportsInterface` enumerates interface IDs manually; added an explicit "extend `supportsInterface`" item to the RUNBOOK §4.7 upgrade-PR checklist so a future interface-advertising module is not silently un-advertised.
+- **Location:** `test/WrappedONUpgrade.t.sol`, `test/mocks/WrappedONReinitV2Mock.sol`, `RUNBOOK.md §4.7`.
+
 ---
 
 # Closing note
