@@ -49,6 +49,9 @@ jobs:
       - name: Forge test
         run: forge test -vvv
 
+      - name: redeploy-eth dry-run JSON guard (#59)
+        run: make test-redeploy-eth
+
       - name: Forge coverage summary
         run: forge coverage --report summary
         continue-on-error: true

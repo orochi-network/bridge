@@ -1,6 +1,6 @@
-.PHONY: help install patch-pragmas build test test-unit test-e2e test-fork fmt fmt-check coverage clean check-links \
+.PHONY: help install patch-pragmas build test test-unit test-e2e test-fork test-redeploy-eth fmt fmt-check coverage clean check-links \
         check-storage-layout update-storage-layout \
-        precheck-helper validate-config validate-bsc-admin deploy-eth redeploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce update-limits
+        precheck-helper validate-config validate-bsc-admin deploy-eth redeploy-eth reconcile-remote-pool deploy-bsc verify-eth verify-bsc handoff handoff-all renounce update-limits
 
 # ─── Defaults ──────────────────────────────────────────────────────────────────
 SHELL := /bin/bash
@@ -100,6 +100,11 @@ test-fork:
 	@test -n "$(ETH_RPC)" || (echo "ETH_RPC env var required"; exit 1)
 	@test -n "$(BSC_RPC)" || (echo "BSC_RPC env var required"; exit 1)
 	ETH_RPC=$(ETH_RPC) BSC_RPC=$(BSC_RPC) forge test --match-path 'test/fork/**' -vvv
+
+# Shell-level regression test for script/redeploy-eth.sh dry-run JSON handling (#59).
+# Pure bash + jq (no Foundry); stubs `forge`. Wired into CI.
+test-redeploy-eth:
+	bash test/redeploy_eth_dryrun_test.sh
 
 fmt:
 	forge fmt
