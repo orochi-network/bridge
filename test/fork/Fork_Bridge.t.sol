@@ -15,6 +15,7 @@ import {
 } from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
 
 import {WrappedON} from "../../src/WrappedON.sol";
+import {DeployWON} from "../helpers/DeployWON.sol";
 
 /// @dev Extends IRouter with getOffRamps(), not in the minimal IRouter interface.
 interface IRouterFull {
@@ -80,8 +81,8 @@ contract Fork_Bridge is Test {
 
         // ── Deploy on ETH ────────────────────────────────────────────────────────
         vm.selectFork(ethFork);
+        won = DeployWON.deploy(IERC20(ON_ETH), deployer, deployer);
         vm.startPrank(deployer);
-        won = new WrappedON(IERC20(ON_ETH), deployer);
         ethPool = new BurnMintTokenPool(IBurnMintERC20(address(won)), 18, new address[](0), ETH_RMN, ETH_ROUTER);
         won.grantRole(won.MINTER_ROLE(), address(ethPool));
         won.grantRole(won.BURNER_ROLE(), address(ethPool));

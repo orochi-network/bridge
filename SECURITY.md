@@ -92,15 +92,17 @@ on this repository.
 
 | Area  | CRITICAL | HIGH | MEDIUM | LOW | INFO | Total |
 |-------|---------:|-----:|-------:|----:|-----:|------:|
-| WON   |        0 |    0 |      2 |  10 |    7 |    19 |
+| WON   |        0 |    0 |      3 |  10 |    7 |    20 |
 | DEP   |        0 |    2 |      4 |  12 |    4 |    22 |
 | CCIP  |        0 |    1 |      6 |   4 |    3 |    14 |
 | TEST  |        0 |    2 |      9 |   9 |    0 |    20 |
 | OPS   |        0 |    2 |      4 |  18 |    6 |    30 |
-| **Total** | **0** | **7** | **25** | **53** | **20** | **105** |
+| **Total** | **0** | **7** | **26** | **53** | **20** | **106** |
 
 **Headline:** no CRITICAL findings. The custom contract surface (`WrappedON.sol`)
-is clean — the highest WON finding is LOW. The bulk of the actionable risk
+is clean — the three MEDIUM WON findings are all resolved (WON-19 reversed by
+product decision; WON-20 fixed by removing auto-unwrap), so the highest *open*
+WON finding is LOW. The bulk of the actionable risk
 sits in the operational surface (key handling, post-handoff workflows,
 documentation gaps) and in tightening test rigor (fork pinning, invariant
 config, typed revert expectations). The single most impactful invariant —
@@ -275,7 +277,15 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Impact (original):** A limited-liquidity launch would otherwise expose a public, uncapped conversion path; redemption demand toward BSC could exceed available BSC pool liquidity.
 - **Recommendation (original):** (Was implemented) restrict `deposit` to a protocol-managed `LIQUIDITY_MANAGER_ROLE`. Per-window ETH→BSC redemption is then bounded by what the role-holder wraps plus the BSC inbound rate limits (see RUNBOOK §4.5).
 - **Residual risk note A — permissionless deposit:** With `deposit` permissionless and uncapped, wON supply growth and ETH→BSC redemption demand are bounded only by the ETH-side ON circulating supply (600M) and the configured CCIP pool rate limits. The aggregate safety invariant (`lockedON_BSC + reserveON_ETH >= totalSupply(wON)`) continues to hold mechanically, but burst ETH→BSC redemption pressure is no longer capped by role access. Operators must size BSC pool liquidity and ETH→BSC rate limits conservatively (see RUNBOOK §4.5).
-- **Residual risk note B — auto-unwrap reserve drain:** `WrappedON.mint` now auto-unwraps: when the ETH-side reserve covers a BSC→ETH arrival, it transfers native ON out of the reserve to the receiver. A compromised `MINTER_ROLE` pool can therefore drain the reserve (in addition to minting wON up to `MAX_CCIP_MINTED`) by submitting fabricated inbound messages while the reserve is non-empty. This is accepted under the trusted-pool model (`MINTER_ROLE` is held exclusively by the audited Ethereum `BurnMintTokenPool`). Operators should monitor `CCIPAutoUnwrapped` events alongside `CCIPMinted` for anomalous volume.
+- **Residual risk note B — auto-unwrap reserve drain (RETIRED 2026-06-23, see WON-20):** An earlier draft had `WrappedON.mint` auto-unwrap — transferring native ON out of the reserve when it covered a BSC→ETH arrival — which let a compromised `MINTER_ROLE` pool drain the reserve via fabricated inbound messages. Auto-unwrap was removed (issue [#48](https://github.com/orochi-network/bridge/issues/48)) before redeploy: `mint` now only mints wON and never touches the reserve, so this vector no longer exists. The reserve can only ever leave via `withdraw` (caller burns their own wON). See WON-20.
+
+### WON-20: auto-unwrap could deliver native ON to contract receivers expecting wON (BSC→ETH)
+- **Severity:** MEDIUM
+- **Status:** FIXED (2026-06-23) — auto-unwrap removed from `WrappedON.mint`. The CCIP `releaseOrMint` path now always mints wON (the registered token) to every receiver, EOA or contract; it never reads the reserve or delivers native ON. The asset a BSC→ETH receiver gets is deterministic. Tests: `test_MintMintsWonEvenWhenReserveCovers`, `test_MintMintsWonAtExactReserve`, `test_MintToContractReceiverMintsWon`, `testFuzz_MintAlwaysMintsWonRegardlessOfReserve` (WrappedON.t.sol); `test_BscToEth_MintsWonEvenWhenReserveCovers` (PoolRoundtrip.t.sol); `test_Fork_ETH_BscToEth_MintsWonEvenWhenReserveCovers` (Fork_ETH.t.sol). Retires residual-risk note B above.
+- **Location:** `src/WrappedON.sol` (`mint`).
+- **Description:** Issue [#48](https://github.com/orochi-network/bridge/issues/48). The auto-unwrap branch added in [#45](https://github.com/orochi-network/bridge/pull/45) delivered native ON (and minted 0 wON) when `ON.balanceOf(wON) >= amount`. For CCIP *programmatic* token transfers (token + data), a contract receiver coded to expect `amount` wON would instead observe 0 new wON and an unexpected native-ON balance — breaking its wON-based accounting or stranding value. The trigger was **front-runnable**: `deposit`/`withdraw` are permissionless, so anyone could move `ON.balanceOf(wON)` across the `>= amount` boundary in the same block, flipping the delivered asset. A BSC→ETH sender could not predict which asset their receiver got.
+- **Impact:** Integration footgun for contract receivers on the BSC→ETH lane. No protocol-invariant violation — `lockedON_BSC + reserveON_ETH >= totalSupply(wON)` held throughout. EOA receivers were unaffected (native ON was the intended outcome for them).
+- **Recommendation:** (Implemented) remove auto-unwrap; always mint wON on the CCIP path. Holders who want native ON call `withdraw`. This eliminates the front-runnable asset switch at the source and shrinks the trust surface — the `mint` path can no longer move ON out of the reserve. Alternatives considered and rejected: EOA-gating the auto-unwrap (`account.code.length == 0`) and documentation-only; see `docs/superpowers/specs/2026-06-23-won-remove-autounwrap-design.md`.
 
 ---
 
@@ -984,11 +994,59 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 
 ### OPS-30: `RoleAdminChanged` not in handoff-window monitoring
 - **Severity:** LOW (forward-compat / defence-in-depth)
-- **Status:** FIXED — added `RoleAdminChanged(role, prev, new)` on `MINTER_ROLE`/`BURNER_ROLE` (wON) to the monitoring table at **High**. Annotated as forward-compat because OZ AccessControl 5.x's `_setRoleAdmin` is internal and wON does not expose it externally — but if a future redeploy ever does, the monitor catches the rotation.
+- **Status:** FIXED — added `RoleAdminChanged(role, prev, new)` on `MINTER_ROLE`/`BURNER_ROLE` (wON) to the monitoring table at **High**. Annotated as forward-compat because OZ AccessControl 5.x's `_setRoleAdmin` is internal; wON calls it exactly once at `initialize` (the one-time `UPGRADER_ROLE` self-admin — UPG-1, mitigation #3) and does not expose it externally, so no post-deploy admin rotation of `MINTER_ROLE`/`BURNER_ROLE` is reachable — but the monitor catches one if a future impl ever adds an external path.
 - **Location:** `RUNBOOK.md` §3 (monitoring table)
 - **Description:** §3.1 alerts on `RoleGranted` but not on a `RoleAdminChanged` swap that would silently re-parent who can grant.
 - **Impact:** Forward-compat only.
 - **Recommendation:** Add row.
+
+---
+
+## Upgrade model (`UPG-*`)
+
+_Added 2026-06-23: wON became UUPS-upgradeable behind an ERC1967Proxy in branch
+`feat/won-upgradeable`. The "non-upgradeable by design" stance documented in an earlier
+version of this file is superseded. History: the original rationale was "migration path =
+redeploy + re-register"; that remains an option but is no longer the only path._
+
+### UPG-1: Upgrade authority is custody-grade
+
+- **Severity:** HIGH (by design — mitigated to DESIGN ACK)
+- **Status:** DESIGN ACK (mitigations documented below). The `UPGRADER_ROLE`-admin timelock-bypass flagged in PR #47 review was CLOSED 2026-06-23 — see mitigation #3.
+- **Description:** `_authorizeUpgrade` is gated by `UPGRADER_ROLE`, held by the `TimelockController`. A TimelockController whose proposer/executor roles are held by a compromised multisig can schedule and execute an upgrade to a malicious implementation, which could drain the wON reserve, mint unbacked wON past `MAX_CCIP_MINTED`, or destroy any other state. This is a custody-grade risk analogous to the BSC pool's `setRebalancer` path.
+- **Mitigations:**
+  1. **48h mandatory delay** (the `TimelockController` default; `minDelay = 172800 seconds`). Any upgrade attempt is visible on-chain for 48 hours before it can execute. Monitoring on `CallScheduled` from the timelock gives the community and security team time to respond (revoke, cancel, or redeploy). This window is genuinely enforced because of mitigation #3.
+  2. **Emergency pause** — the multisig's `PAUSER_ROLE` lets it halt value paths immediately if a malicious upgrade is in flight, limiting damage before the timelock executes.
+  3. **Self-administered `UPGRADER_ROLE` (on-chain enforced)** — `initialize` calls `_setRoleAdmin(UPGRADER_ROLE, UPGRADER_ROLE)`, so the role's admin is `UPGRADER_ROLE` itself (held only by the `TimelockController`), NOT `DEFAULT_ADMIN_ROLE`. Without this, OZ's default makes `DEFAULT_ADMIN_ROLE` (the ops multisig post-handoff) the admin of `UPGRADER_ROLE`, letting it `grantRole(UPGRADER_ROLE, itself)` and `upgradeToAndCall` in one transaction with **no delay** — making mitigation #1's 48h window advisory, not enforced. With self-administration, only the timelock can grant/revoke upgrade authority and every such grant is itself a 48h-timelocked tx; the role is set to the timelock at `initialize` and never granted to an EOA. Tests: `test_UpgraderRoleIsSelfAdministered`, `test_DefaultAdminCannotGrantUpgraderRole`, `test_TimelockCanGrantUpgraderRole` (WrappedONUpgrade.t.sol).
+  4. **Implementation address monitoring** — `Upgraded(implementation)` on the proxy (ERC1967 standard event) must be a Critical alert in the monitoring table (RUNBOOK §Trust model).
+  5. **Storage hygiene** — state is in ERC-7201 namespaced storage; accidental collision from a future impl adding fields is prevented by the namespace isolation. Field ordering in `WrappedONStorage` must not change across upgrades.
+- **`PAUSER_ROLE` admin:** intentionally left as the OZ default `DEFAULT_ADMIN_ROLE` (the ops multisig manages pausers). Acceptable because pause is halt-only (UPG-4) — a liveness authority, not an upgrade/custody one; a malicious pauser can at worst freeze the value paths, which `unpause` (also multisig) reverses. Pinned by `test_PauserRoleAdminIsDefaultAdmin`.
+- **Residual risk:** A compromised multisig that also holds `PAUSER_ROLE` (post-handoff) could pause AND schedule an upgrade — but it must still route the upgrade through the 48h timelock (mitigation #3 removes the no-delay bypass), so the window stands. Key management of the multisig signers is the load-bearing control.
+
+### UPG-2: `_disableInitializers` in constructor prevents impl takeover
+
+- **Severity:** HIGH (if absent) — mitigated by code
+- **Status:** FIXED (code; present in shipped `WrappedON.sol`)
+- **Description:** An implementation contract with an open `initialize` function can be taken over by a third party (anyone can call `initialize` on the bare implementation and set themselves as admin). OZ's standard mitigation is `_disableInitializers()` in the implementation constructor.
+- **Fix:** `WrappedON` constructor calls `_disableInitializers()` with the `@custom:oz-upgrades-unsafe-allow constructor` NatSpec. Test: `test_ImplCannotBeInitialized` (or equivalent).
+- **Impact if removed:** A third party could claim `DEFAULT_ADMIN_ROLE`, `PAUSER_ROLE`, and `s_ccipAdmin` on the bare implementation (not the proxy). The implementation holds no value, but registering it in `TokenAdminRegistry` or misleading integrators about the proxy's state would be an attack surface.
+
+### UPG-3: ERC-7201 storage namespace prevents slot collision
+
+- **Severity:** MEDIUM (if unaddressed) — mitigated by code
+- **Status:** DESIGN ACK (mitigated by ERC-7201 namespacing + documented invariant)
+- **Description:** UUPS upgrades that extend storage by inserting new fields in the middle of a struct break existing storage slot mappings for all fields that follow, causing silent data corruption.
+- **Mitigation:** All persistent state lives in a single `WrappedONStorage` struct at slot `0xc9356e8aa19da270b9a132fda93e9af24668c8487450db15f9b9e8baeb751900` (the ERC-7201 namespace for `orochi.storage.WrappedON`, verified against `cast index-erc7201`). New fields may only be **appended** to the end of `WrappedONStorage`. This constraint is enforced by convention (documented in RUNBOOK §4.7), not by on-chain checks. The foundry-upgrades FFI plugin was evaluated and intentionally NOT adopted to keep CI forge-only; the storage-preservation invariant is verified instead via the upgrade state-preservation test suite.
+- **Operator note:** Any upgrade PR must include a diff showing no existing field was moved or resized. Code review is the gate.
+
+### UPG-4: Pause is liveness-only — does not prevent theft by a compromised pool
+
+- **Severity:** MEDIUM (awareness / threat-model clarity)
+- **Status:** DESIGN ACK (documented)
+- **Description:** `pause()` halts `mint`, `burn*`, `deposit`, and `withdraw` — all four value paths carry `whenNotPaused` — but ERC20 `transfer`/`transferFrom` stay live. So a paused bridge DOES block even a compromised `MINTER_ROLE` pool from minting. Pause is nonetheless an emergency stop, not theft-prevention: the underlying exploit (compromised pool, bad upgrade, etc.) still exists and needs separate remediation while paused. A compromised `PAUSER_ROLE` can only grief — indefinitely halt the value paths — and cannot move funds, since transfers stay live and pause grants no spending authority.
+- **Impact (compromised pauser):** Griefing — `mint`/`burn` halted while CCIP messages queue; `deposit`/`withdraw` halted for ETH-side users. Resumable by any multisig signer calling `unpause`.
+- **Impact (compromised pool with `MINTER_ROLE`):** A paused bridge BLOCKS the compromised pool's mint path too — pause inadvertently provides partial mitigation against a compromised pool if the multisig can pause before the attacker mints.
+- **Residual risk:** A compromised multisig could unpause immediately after pausing; the 48h timelock does not cover `pause`/`unpause` (intentional — emergency response requires speed). Key management of the Safe signers and threshold is the load-bearing control.
 
 ---
 

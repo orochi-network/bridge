@@ -15,6 +15,8 @@ import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/interfaces/IGetCCIPAdmin.
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
+import {DeployWON} from "./helpers/DeployWON.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 /// @dev Minimal mock of the canonical ON token (non-mintable ERC20).
 contract MockON is ERC20 {
@@ -22,6 +24,10 @@ contract MockON is ERC20 {
         _mint(msg.sender, 1_000_000 ether);
     }
 }
+
+/// @dev Bare contract used as a CCIP receiver in the #48 test — its only purpose is to have
+///      non-empty `code` so the mint target is unambiguously a contract, not an EOA.
+contract ContractReceiver {}
 
 /// @dev Reentrancy probe — overrides `transferFrom` to call back into `WrappedON.deposit`.
 ///      A real ON-like ERC20 wouldn't do this, but if a future deployment reuses WrappedON
@@ -143,7 +149,7 @@ contract WrappedONTest is Test {
 
     function setUp() public {
         on = new MockON();
-        won = new WrappedON(IERC20(address(on)), admin);
+        won = DeployWON.deploy(IERC20(address(on)), admin, admin);
 
         // Move all the mock supply to alice for clean accounting.
         on.transfer(alice, on.balanceOf(address(this)));
@@ -180,7 +186,7 @@ contract WrappedONTest is Test {
     ///         non-canonical ON variants.
     function test_DepositRevertsOnReceivedZero() public {
         NullTransferMockON mock = new NullTransferMockON();
-        WrappedON nullWon = new WrappedON(IERC20(address(mock)), admin);
+        WrappedON nullWon = DeployWON.deploy(IERC20(address(mock)), admin, admin);
         mock.mint(address(this), 100 ether);
         mock.approve(address(nullWon), 100 ether);
 
@@ -313,15 +319,17 @@ contract WrappedONTest is Test {
         won.deposit(100 ether);
         vm.stopPrank();
 
-        // CCIP-mint 50 — reserve (100) >= amount (50), so auto-unwrap fires:
-        // native ON is delivered to bob, no wON minted, reserve shrinks by 50.
+        // CCIP-mint 50 to bob — always mints wON (no auto-unwrap), even though the reserve
+        // (100) covers it. The reserve is untouched; the cap counter grows by 50.
         vm.prank(pool);
         won.mint(bob, 50 ether);
 
-        // totalSupply = only alice's deposit-backed wON (auto-unwrap mints 0 wON).
-        assertEq(won.totalSupply(), 100 ether, "totalSupply = only deposit-backed wON (auto-unwrap mints 0)");
-        assertEq(on.balanceOf(address(won)), 50 ether, "reserve drained by auto-unwrap");
-        assertEq(on.balanceOf(bob), 50 ether, "bob received native ON via auto-unwrap");
+        // totalSupply = alice's deposit-backed wON (100) + bob's CCIP-minted wON (50).
+        assertEq(won.totalSupply(), 150 ether, "totalSupply = deposit-backed + CCIP-minted wON");
+        assertEq(won.balanceOf(bob), 50 ether, "bob holds CCIP-minted wON");
+        assertEq(on.balanceOf(address(won)), 100 ether, "reserve untouched by mint");
+        assertEq(on.balanceOf(bob), 0, "bob received no native ON");
+        assertEq(won.ccipMintHeadroomUsed(), 50 ether, "cap counter incremented");
     }
 
     // ─── Role gating ──────────────────────────────────────────────────────────
@@ -737,7 +745,7 @@ contract WrappedONTest is Test {
         assertEq(on.balanceOf(address(won)), 0, "reserve fully withdrawn");
     }
 
-    function test_BurnDecrementsCCIPMintedSupply() public {
+    function test_BurnDecrementsCcipMintHeadroom() public {
         vm.prank(pool);
         won.mint(pool, 80 ether);
         assertEq(won.ccipMintHeadroomUsed(), 80 ether);
@@ -813,30 +821,53 @@ contract WrappedONTest is Test {
     // ─── Constructor guards ───────────────────────────────────────────────────
 
     function test_ConstructorEmitsCCIPAdminTransferred() public {
+        // The event now fires inside `initialize` during proxy construction. `expectEmit`
+        // with a 4-arg form does not check the emitter address (the proxy), only topics.
+        // Deploy the impl first so the only event-bearing CREATE is the proxy.
         address newAdmin = makeAddr("newAdmin");
+        WrappedON impl = new WrappedON();
+        bytes memory data = abi.encodeCall(WrappedON.initialize, (IERC20(address(on)), newAdmin, newAdmin));
         vm.expectEmit(true, true, false, false);
         emit WrappedON.CCIPAdminTransferred(address(0), newAdmin);
-        new WrappedON(IERC20(address(on)), newAdmin);
+        new ERC1967Proxy(address(impl), data);
     }
 
     function test_ConstructorRevertsOnZeroToken() public {
+        // `initialize` reverts during proxy construction; the selector is unchanged. The impl
+        // is deployed OUTSIDE `expectRevert` so the guard applies only to the proxy CREATE
+        // (the call that delegatecalls into the reverting `initialize`).
+        WrappedON impl = new WrappedON();
+        bytes memory data = abi.encodeCall(WrappedON.initialize, (IERC20(address(0)), admin, admin));
         vm.expectRevert(WrappedON.ZeroAddress.selector);
-        new WrappedON(IERC20(address(0)), admin);
+        new ERC1967Proxy(address(impl), data);
     }
 
     function test_ConstructorRevertsOnZeroAdmin() public {
+        WrappedON impl = new WrappedON();
+        bytes memory data = abi.encodeCall(WrappedON.initialize, (IERC20(address(on)), address(0), admin));
         vm.expectRevert(WrappedON.ZeroAddress.selector);
-        new WrappedON(IERC20(address(on)), address(0));
+        new ERC1967Proxy(address(impl), data);
     }
 
-    /// @dev Per PR #19 review (brng1151 #1, bao-ninh #5): constructor must reject the
+    function test_ConstructorRevertsOnZeroTimelock() public {
+        WrappedON impl = new WrappedON();
+        bytes memory data = abi.encodeCall(WrappedON.initialize, (IERC20(address(on)), admin, address(0)));
+        vm.expectRevert(WrappedON.ZeroAddress.selector);
+        new ERC1967Proxy(address(impl), data);
+    }
+
+    /// @dev Per PR #19 review (brng1151 #1, bao-ninh #5): init must reject the
     ///      `address(this)` self-reserve case (would make the reserve invariant circular).
+    ///      Through the proxy, `address(this)` inside `initialize` is the PROXY address, so we
+    ///      predict the proxy's CREATE address and pass it as the ON token.
     function test_ConstructorRevertsOnSelfReserve() public {
-        // Compute the next CREATE address — that's where the wON about to be deployed
-        // will live. Pass it as the ON token to trigger the SelfReserve guard.
-        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        // The impl is deployed first (nonce N), the proxy second (nonce N+1). Predict the
+        // proxy address and feed it as the ON token to trip the SelfReserve guard.
+        WrappedON impl = new WrappedON();
+        address predictedProxy = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        bytes memory data = abi.encodeCall(WrappedON.initialize, (IERC20(predictedProxy), admin, admin));
         vm.expectRevert(WrappedON.SelfReserve.selector);
-        new WrappedON(IERC20(predicted), admin);
+        new ERC1967Proxy(address(impl), data);
     }
 
     /// @dev Per PR #19 review (bao-ninh #5): constructor must reject ON tokens with
@@ -847,7 +878,7 @@ contract WrappedONTest is Test {
     ///         future redeployments against tokens that do hook.
     function test_DepositReentrancyGuardFires() public {
         ReentrantMockON rOn = new ReentrantMockON();
-        WrappedON rWon = new WrappedON(IERC20(address(rOn)), admin);
+        WrappedON rWon = DeployWON.deploy(IERC20(address(rOn)), admin, admin);
         rOn.setTarget(address(rWon));
 
         // Mock token mints supply to test contract; approve from here as the depositor.
@@ -872,7 +903,7 @@ contract WrappedONTest is Test {
     ///         withdraw must still complete normally.
     function test_WithdrawReentrancyGuardFires() public {
         ReentrantWithdrawMockON rOn = new ReentrantWithdrawMockON();
-        WrappedON rWon = new WrappedON(IERC20(address(rOn)), admin);
+        WrappedON rWon = DeployWON.deploy(IERC20(address(rOn)), admin, admin);
 
         // Fund alice with rON BEFORE arming the reentrancy so this transfer doesn't trip it.
         rOn.transfer(alice, 1000 ether);
@@ -895,8 +926,10 @@ contract WrappedONTest is Test {
 
     function test_ConstructorRevertsOnDecimalsMismatch() public {
         MockON6 on6 = new MockON6();
+        WrappedON impl = new WrappedON();
+        bytes memory data = abi.encodeCall(WrappedON.initialize, (IERC20(address(on6)), admin, admin));
         vm.expectRevert(abi.encodeWithSelector(WrappedON.DecimalsMismatch.selector, 18, 6));
-        new WrappedON(IERC20(address(on6)), admin);
+        new ERC1967Proxy(address(impl), data);
     }
 
     // ─── Metadata ─────────────────────────────────────────────────────────────
@@ -1005,11 +1038,15 @@ contract WrappedONTest is Test {
         assertEq(won.totalSupply(), 0);
     }
 
-    // ─── Auto-unwrap (Issue 1) ────────────────────────────────────────────────
+    // ─── CCIP mint always delivers wON (Issue #48) ────────────────────────────
+    // The CCIP `releaseOrMint` path mints wON unconditionally — it never reads the reserve
+    // and never delivers native ON. This keeps the asset delivered to BSC→ETH receivers
+    // deterministic (the registered token, wON), closing the front-runnable contract-receiver
+    // footgun from #48. EOAs that want native ON call `withdraw` like any other holder.
 
-    /// @notice Issue 1: reserve fully covers the CCIP arrival → mint() delivers native ON,
-    ///         mints 0 wON, leaves the cap counter untouched.
-    function test_MintAutoUnwrapsWhenReserveCovers() public {
+    /// @notice #48: reserve fully covers the arrival, yet `mint` still mints wON — no native
+    ///         ON is delivered, the reserve is untouched, and the cap counter grows.
+    function test_MintMintsWonEvenWhenReserveCovers() public {
         vm.startPrank(alice);
         on.approve(address(won), 100 ether);
         won.deposit(100 ether); // reserve = 100 ON, alice holds 100 wON
@@ -1019,19 +1056,19 @@ contract WrappedONTest is Test {
         uint256 supplyBefore = won.totalSupply();
 
         vm.expectEmit(true, false, false, true);
-        emit WrappedON.CCIPAutoUnwrapped(bob, 40 ether);
+        emit WrappedON.CCIPMinted(bob, 40 ether, 40 ether);
         vm.prank(pool);
         won.mint(bob, 40 ether);
 
-        assertEq(on.balanceOf(bob), bobOnBefore + 40 ether, "bob got native ON");
-        assertEq(won.balanceOf(bob), 0, "no wON minted to bob");
-        assertEq(won.totalSupply(), supplyBefore, "totalSupply unchanged");
-        assertEq(won.ccipMintHeadroomUsed(), 0, "cap counter untouched");
-        assertEq(on.balanceOf(address(won)), 60 ether, "reserve drained by 40");
+        assertEq(won.balanceOf(bob), 40 ether, "bob got wON, not native ON");
+        assertEq(on.balanceOf(bob), bobOnBefore, "no native ON delivered");
+        assertEq(won.totalSupply(), supplyBefore + 40 ether, "totalSupply grew by mint");
+        assertEq(won.ccipMintHeadroomUsed(), 40 ether, "cap counter incremented");
+        assertEq(on.balanceOf(address(won)), 100 ether, "reserve untouched");
     }
 
-    /// @notice Issue 1: boundary — reserve == amount → full auto-unwrap.
-    function test_MintAutoUnwrapsAtExactReserve() public {
+    /// @notice #48 boundary: reserve == amount still mints wON (the reserve is never read).
+    function test_MintMintsWonAtExactReserve() public {
         vm.startPrank(alice);
         on.approve(address(won), 50 ether);
         won.deposit(50 ether);
@@ -1040,13 +1077,14 @@ contract WrappedONTest is Test {
         vm.prank(pool);
         won.mint(bob, 50 ether);
 
-        assertEq(on.balanceOf(bob), 50 ether, "exact reserve delivered as ON");
-        assertEq(won.balanceOf(bob), 0);
-        assertEq(won.totalSupply(), 50 ether, "only alice's deposit-wON exists");
-        assertEq(won.ccipMintHeadroomUsed(), 0);
+        assertEq(won.balanceOf(bob), 50 ether, "wON minted at exact-reserve boundary");
+        assertEq(on.balanceOf(bob), 0, "no native ON delivered");
+        assertEq(won.totalSupply(), 100 ether, "alice's deposit-wON + bob's CCIP-wON");
+        assertEq(won.ccipMintHeadroomUsed(), 50 ether, "cap incremented");
+        assertEq(on.balanceOf(address(won)), 50 ether, "reserve untouched");
     }
 
-    /// @notice Issue 1: reserve < amount → falls back to minting wON (all-or-nothing).
+    /// @notice Reserve below the arrival also mints wON — same path, no branch on reserve.
     function test_MintMintsWonWhenReserveInsufficient() public {
         vm.startPrank(alice);
         on.approve(address(won), 30 ether);
@@ -1058,27 +1096,61 @@ contract WrappedONTest is Test {
         vm.prank(pool);
         won.mint(bob, 100 ether);
 
-        assertEq(won.balanceOf(bob), 100 ether, "wON minted (no partial unwrap)");
+        assertEq(won.balanceOf(bob), 100 ether, "wON minted");
         assertEq(on.balanceOf(bob), 0, "no ON delivered");
         assertEq(on.balanceOf(address(won)), 30 ether, "reserve untouched");
         assertEq(won.ccipMintHeadroomUsed(), 100 ether, "cap counter incremented");
     }
 
-    /// @notice Reserve one wei below the amount → no auto-unwrap, wON minted.
-    function test_MintMintsWonWhenReserveOneWeiShort() public {
-        uint256 amount = 100 ether;
-        vm.startPrank(alice);
-        on.approve(address(won), amount - 1);
-        won.deposit(amount - 1);
-        vm.stopPrank();
+    /// @notice #48: the reserve level NEVER changes what `mint` delivers — it always mints
+    ///         wON and never moves native ON, across any reserve/amount combination. Fuzzed
+    ///         over both so a reintroduced reserve-read branch is caught at every boundary.
+    function testFuzz_MintAlwaysMintsWonRegardlessOfReserve(uint96 reserveRaw, uint96 amountRaw) public {
+        uint256 reserve = bound(uint256(reserveRaw), 0, 1_000_000 ether);
+        uint256 amount = bound(uint256(amountRaw), 1, 1_000_000 ether);
+
+        // Seed an arbitrary reserve via a permissionless deposit (alice holds the wON).
+        if (reserve > 0) {
+            vm.startPrank(alice);
+            on.approve(address(won), reserve);
+            won.deposit(reserve);
+            vm.stopPrank();
+        }
+
+        uint256 bobOnBefore = on.balanceOf(bob);
+        uint256 supplyBefore = won.totalSupply();
 
         vm.prank(pool);
         won.mint(bob, amount);
 
-        assertEq(won.balanceOf(bob), amount, "wON minted (reserve 1 wei short)");
-        assertEq(on.balanceOf(bob), 0, "no ON delivered");
-        assertEq(on.balanceOf(address(won)), amount - 1, "reserve untouched");
-        assertEq(won.ccipMintHeadroomUsed(), amount, "cap incremented");
+        assertEq(won.balanceOf(bob), amount, "bob always receives wON");
+        assertEq(on.balanceOf(bob), bobOnBefore, "bob never receives native ON");
+        assertEq(on.balanceOf(address(won)), reserve, "reserve never touched by mint");
+        assertEq(won.totalSupply(), supplyBefore + amount, "supply grew by the full amount");
+        assertEq(won.ccipMintHeadroomUsed(), amount, "cap counter incremented by the full amount");
+    }
+
+    /// @notice #48 core scenario: a CONTRACT receiver gets wON even when the reserve fully
+    ///         covers the arrival. This is the case the auto-unwrap removal protects — a
+    ///         programmatic CCIP receiver that expects wON must never observe native ON
+    ///         instead (a front-runnable swap under the old auto-unwrap branch).
+    function test_MintToContractReceiverMintsWon() public {
+        // Seed a covering reserve.
+        vm.startPrank(alice);
+        on.approve(address(won), 100 ether);
+        won.deposit(100 ether);
+        vm.stopPrank();
+
+        address contractReceiver = address(new ContractReceiver());
+        assertGt(contractReceiver.code.length, 0, "receiver is a contract");
+
+        vm.prank(pool);
+        won.mint(contractReceiver, 40 ether);
+
+        assertEq(won.balanceOf(contractReceiver), 40 ether, "contract receiver got wON");
+        assertEq(on.balanceOf(contractReceiver), 0, "contract receiver got no native ON");
+        assertEq(on.balanceOf(address(won)), 100 ether, "reserve untouched");
+        assertEq(won.ccipMintHeadroomUsed(), 40 ether, "cap counter incremented");
     }
 
     /// @notice CCIP mint up to the cap succeeds; one wei over reverts. Boundary fuzz around
@@ -1121,5 +1193,33 @@ contract WrappedONTest is Test {
         vm.prank(pool);
         won.mint(alice, cap);
         assertEq(won.ccipMintHeadroomUsed(), cap);
+    }
+
+    // ─── Wrap volume does NOT consume CCIP cap headroom ───────────────────────
+
+    /// @notice Regression guard: even a 100M deposit (= MAX_CCIP_MINTED) via the permissionless
+    ///         wrap leaves `ccipMintHeadroomUsed` at 0, so a subsequent BSC→ETH arrival (the
+    ///         pool calls `mint`) still succeeds. `deposit` only moves the reserve + supply; it
+    ///         never touches the CCIP counter, so heavy wrapping cannot starve inbound CCIP.
+    function test_DepositDoesNotConsumeCcipMintCap() public {
+        uint256 cap = won.MAX_CCIP_MINTED(); // 100M
+
+        // Adversary wraps 100M ON_eth -> 100M wON (permissionless, uncapped deposit).
+        address adversary = makeAddr("adversary");
+        deal(address(on), adversary, cap);
+        vm.startPrank(adversary);
+        on.approve(address(won), cap);
+        won.deposit(cap);
+        vm.stopPrank();
+
+        emit log_named_uint("ccipMintHeadroomUsed after 100M deposit", won.ccipMintHeadroomUsed());
+        emit log_named_uint("totalSupply after 100M deposit          ", won.totalSupply());
+
+        // Legitimate user bridges BSC->ETH: the pool mints wON to them.
+        address user = makeAddr("user");
+        vm.prank(pool);
+        won.mint(user, 1 ether);
+
+        assertEq(won.balanceOf(user), 1 ether, "user received bridged wON");
     }
 }

@@ -7,6 +7,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
+import {DeployWON} from "./helpers/DeployWON.sol";
 
 /// @dev Minimal 18-decimal ON mock with a public mint for the handler's "BSC pool" simulation.
 contract InvariantMockON is ERC20 {
@@ -49,15 +50,10 @@ contract WrappedONHandler is Test {
 
     /// @notice Cumulative ON outflow from the wON reserve via `withdraw`. Paired with
     ///         `totalDeposited` so the reserve invariant can assert the TIGHT form
-    ///         `reserve == totalDeposited - totalWithdrawn - totalAutoUnwrapped`
-    ///         (CCIP burn never touches the reserve; CCIP mint may drain it via auto-unwrap).
+    ///         `reserve == totalDeposited - totalWithdrawn`. `withdraw` is the ONLY path that
+    ///         removes ON from the reserve — CCIP `mint` always mints wON and never reads or
+    ///         touches the reserve (#48), and CCIP burn only moves wON.
     uint256 public totalWithdrawn;
-
-    /// @notice Cumulative ON outflow from the wON reserve via the auto-unwrap path in `mint`.
-    ///         When `ON.balanceOf(wON) >= amount`, `mint` delivers native ON instead of
-    ///         minting wON. This drains the reserve and must be tracked for the tight
-    ///         reserve invariant.
-    uint256 public totalAutoUnwrapped;
 
     constructor(WrappedON won_, InvariantMockON on_, address pool_) {
         WON = won_;
@@ -107,36 +103,21 @@ contract WrappedONHandler is Test {
         totalWithdrawn += amount;
     }
 
-    /// @dev Simulates a CCIP `releaseOrMint` arriving on ETH: BSC pool locks `amount`,
-    ///      ETH pool either delivers native ON via auto-unwrap (if reserve >= amount) or
-    ///      mints `amount` wON. Auto-unwrap is bounded only by the reserve (not the cap),
-    ///      so we allow it even when cap headroom is zero.
+    /// @dev Simulates a CCIP `releaseOrMint` arriving on ETH: BSC pool locks `amount`, the ETH
+    ///      pool mints `amount` wON. `mint` always mints wON and never reads the reserve (#48),
+    ///      so the only bound is remaining cap headroom — nothing happens once it is exhausted.
     function ccipMint(uint256 actorSeed, uint256 amount) external {
         address user = _actor(actorSeed);
-        uint256 reserve = ON.balanceOf(address(WON));
         uint256 cap = WON.MAX_CCIP_MINTED();
         uint256 headroom = cap - WON.ccipMintHeadroomUsed();
-        // If reserve is zero and headroom is zero, nothing can happen.
-        if (reserve == 0 && headroom == 0) {
+        if (headroom == 0) {
             return;
         }
-        // Auto-unwrap path: any amount up to the reserve is valid (no cap constraint).
-        // wON-mint path: bounded by remaining cap headroom.
-        uint256 maxAmount = reserve > headroom ? reserve : headroom;
-        if (maxAmount == 0) {
-            return;
-        }
-        amount = _boundAmt(amount, maxAmount);
-        // Simulated BSC lock — caps at BSC supply (MAX_CCIP_MINTED).
+        amount = _boundAmt(amount, headroom);
+        // Simulated BSC lock — moves in lockstep with the cap counter (caps at BSC supply).
         bscLocked += amount;
-        // Snapshot reserve before to detect whether auto-unwrap fired.
-        uint256 reserveBefore = reserve;
         vm.prank(POOL);
         WON.mint(user, amount);
-        // If reserve covered the amount, auto-unwrap fired and drained the reserve.
-        if (reserveBefore >= amount) {
-            totalAutoUnwrapped += amount;
-        }
     }
 
     /// @dev Simulates ETH→BSC CCIP `lockOrBurn` for the single-arg `burn(amount)` path:
@@ -177,7 +158,7 @@ contract WrappedONHandler is Test {
     ///      that's exactly the case the `MAX_CCIP_MINTED` cap exists to bound, and
     ///      modelling it would test the cap's role rather than the safety invariant's
     ///      preservation by mechanics. The cap is locked separately via
-    ///      `invariant_CcipMintedSupplyWithinCap`.
+    ///      `invariant_CcipMintHeadroomWithinCap`.
     function adversarialPoolBurn(uint256 actorSeed, uint256 amount) external {
         address user = _actor(actorSeed);
         uint256 userBal = WON.balanceOf(user);
@@ -299,7 +280,7 @@ contract WrappedONInvariantTest is StdInvariant, Test {
 
     function setUp() public {
         onToken = new InvariantMockON();
-        won = new WrappedON(IERC20(address(onToken)), admin);
+        won = DeployWON.deploy(IERC20(address(onToken)), admin, admin);
 
         vm.startPrank(admin);
         won.grantRole(won.MINTER_ROLE(), pool);
@@ -363,23 +344,56 @@ contract WrappedONInvariantTest is StdInvariant, Test {
     }
 
     /// @notice The CCIP cap must hold regardless of mint/burn ordering.
-    function invariant_CcipMintedSupplyWithinCap() public view {
+    function invariant_CcipMintHeadroomWithinCap() public view {
         assertLe(
             won.ccipMintHeadroomUsed(), won.MAX_CCIP_MINTED(), "invariant: ccipMintHeadroomUsed exceeds MAX_CCIP_MINTED"
         );
     }
 
     /// @notice The reserve accounting is an EXACT 1:1 invariant: the ON balance of the wON
-    ///         contract equals the cumulative net deposit flow (deposits minus withdrawals
-    ///         minus auto-unwrapped outflows). `deposit` adds to the reserve; `withdraw` and
-    ///         the auto-unwrap path in `mint` subtract from it. The handler tracks all three
-    ///         flows. CCIP burn never touches the reserve.
+    ///         contract equals the cumulative net deposit flow (deposits minus withdrawals).
+    ///         `deposit` adds to the reserve and `withdraw` subtracts from it — those are the
+    ///         only two paths that move ON in or out of the reserve. CCIP `mint` always mints
+    ///         wON without reading the reserve (#48), and CCIP burn only moves wON.
     function invariant_ReserveMatchesNetDeposits() public view {
         uint256 reserve = onToken.balanceOf(address(won));
         assertEq(
             reserve,
-            handler.totalDeposited() - handler.totalWithdrawn() - handler.totalAutoUnwrapped(),
-            "invariant: reserve != cumulative deposits - withdrawals - autoUnwrapped"
+            handler.totalDeposited() - handler.totalWithdrawn(),
+            "invariant: reserve != cumulative deposits - withdrawals"
+        );
+    }
+
+    /// @notice The lemma behind the supply bound: the CCIP counter is an UPPER BOUND on the
+    ///         net CCIP-minted supply, `totalSupply() - reserve`. Every mint moves the counter
+    ///         and supply together; deposit/withdraw move supply and reserve together (counter
+    ///         untouched); the saturating burn only ever WIDENS the gap (counter floors at 0
+    ///         while supply drops by the full amount). So `ccipMintHeadroomUsed >= S - R`
+    ///         always. (Only asserted when `S > R`; otherwise net CCIP-minted is <= 0 and the
+    ///         bound is trivial.)
+    function invariant_HeadroomCoversNetCcipSupply() public view {
+        uint256 reserve = onToken.balanceOf(address(won));
+        uint256 supply = won.totalSupply();
+        if (supply > reserve) {
+            assertGe(
+                won.ccipMintHeadroomUsed(), supply - reserve, "invariant: ccipMintHeadroomUsed < totalSupply - reserve"
+            );
+        }
+    }
+
+    /// @notice The conservation bound (Chiro 2026-06-23): `wON.totalSupply()` is NOT capped at
+    ///         `MAX_CCIP_MINTED` — it is capped at `MAX_CCIP_MINTED + reserve`. This is the
+    ///         executable form of `wON.totalSupply() <= ON_bsc.totalSupply() + ON_eth.balanceOf(wON)`
+    ///         (with `MAX_CCIP_MINTED == ON_bsc.totalSupply() == 100M`). It is enforced
+    ///         EMERGENTLY — the code checks only `ccipMintHeadroomUsed <= MAX_CCIP_MINTED`, and
+    ///         this bound follows because `ccipMintHeadroomUsed >= S - R`
+    ///         (`invariant_HeadroomCoversNetCcipSupply`). The deposit path is intentionally
+    ///         uncapped, so supply above `MAX_CCIP_MINTED` is legitimate and 1:1 reserve-backed.
+    function invariant_SupplyWithinCapPlusReserve() public view {
+        assertLe(
+            won.totalSupply(),
+            won.MAX_CCIP_MINTED() + onToken.balanceOf(address(won)),
+            "invariant: totalSupply exceeds MAX_CCIP_MINTED + reserve"
         );
     }
 }

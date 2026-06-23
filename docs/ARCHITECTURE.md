@@ -132,29 +132,49 @@ The single custom contract. It is **both**:
 - The CCIP burn/mint token on Ethereum (target of `BurnMintTokenPool`).
 - A 1:1 wrapper around native ETH-side ON.
 
-Inheritance: `ERC20`, `AccessControl`, `ReentrancyGuard`, `IGetCCIPAdmin`.
+**Proxy topology.** `WrappedON` is **UUPS-upgradeable** and sits behind an
+`ERC1967Proxy`. The proxy address is the stable, registered token address.
+The implementation address lives in `deployments/1.json` under `wrappedONImpl`.
+A `TimelockController` holds `UPGRADER_ROLE` and enforces a 48-hour mandatory
+delay on all upgrades.
+
+```
+ERC1967Proxy  ──delegatecall──▶  WrappedON (impl)
+     │                                │
+  stable addr                   _disableInitializers()
+  (registered                   in constructor; all
+   token address)                state in ERC-7201
+                                 namespaced slot
+```
+
+Inheritance (upgradeable variants): `Initializable`, `ERC20Upgradeable`,
+`AccessControlUpgradeable`, `PausableUpgradeable`, `UUPSUpgradeable`,
+`IGetCCIPAdmin`. Also `ReentrancyGuardTransient` (non-upgradeable — its guard
+uses a constant transient slot; no persistent state, no initializer needed).
 Does **not** inherit `IBurnMintERC20` — that interface bundles a vendored OZ
 `IERC20` that conflicts with the project's OZ linearization. Selectors
 (`mint`, `burn`, `burn(address,uint256)`, `burnFrom`) match exactly, and
 `supportsInterface` advertises `type(IBurnMintERC20).interfaceId`, so the
 pool's `staticcall`-based interface probes succeed.
 
-**Storage:**
+**Storage (ERC-7201 namespaced at `orochi.storage.WrappedON`):**
 
-| Slot | Field | Purpose |
-|---|---|---|
-| immutable | `ON` | Canonical ETH-side ON ERC20 used for `deposit`/`withdraw`. |
-| state | `ccipMintHeadroomUsed` | Approximates BSC pool's locked-ON balance. Capped at `MAX_CCIP_MINTED = 100M`. |
-| state | `s_ccipAdmin` | Current CCIP admin (read by `RegistryModuleOwnerCustom`). |
-| state | `s_pendingCcipAdmin` | Two-step handoff target. Reverts on `address(0)`, self, or `address(this)` proposals. |
+| Field | Purpose |
+|---|---|
+| `on` | Canonical ETH-side ON ERC20 used for `deposit`/`withdraw`. Set once at `initialize`. |
+| `ccipMintHeadroomUsed` | Approximates BSC pool's locked-ON balance. Capped at `MAX_CCIP_MINTED = 100M`. |
+| `ccipAdmin` | Current CCIP admin (read by `RegistryModuleOwnerCustom`). |
+| `pendingCcipAdmin` | Two-step handoff target. Reverts on `address(0)`, self, or `address(this)` proposals. |
 
 **Roles:**
 
 | Role | Held by | Purpose |
 |---|---|---|
-| `DEFAULT_ADMIN_ROLE` | deployer → multisig (handoff) | OZ AccessControl admin. Can grant/revoke `MINTER_ROLE` / `BURNER_ROLE`. |
+| `DEFAULT_ADMIN_ROLE` | deployer → multisig (handoff) | OZ AccessControl admin. Can grant/revoke `MINTER_ROLE` / `BURNER_ROLE` / `PAUSER_ROLE` — but NOT `UPGRADER_ROLE` (self-administered, see below). |
 | `MINTER_ROLE` | Ethereum `BurnMintTokenPool` only | CCIP inbound — calls `mint(account, amount)`. |
 | `BURNER_ROLE` | Ethereum `BurnMintTokenPool` only | CCIP outbound — calls one of three `burn` overloads. |
+| `UPGRADER_ROLE` | `TimelockController` (48h delay) | Gates `_authorizeUpgrade` / `upgradeToAndCall`. **Self-administered** (`_setRoleAdmin(UPGRADER_ROLE, UPGRADER_ROLE)` in `initialize`) so `DEFAULT_ADMIN_ROLE` cannot re-grant it and bypass the timelock (SECURITY UPG-1). Never granted to an EOA in production. |
+| `PAUSER_ROLE` | deployer's `admin` arg → multisig (handoff) | Emergency `pause()`/`unpause()`. Halts value paths (mint/burn/deposit/withdraw); ERC20 transfers stay live. |
 | (logical) `s_ccipAdmin` | deployer → multisig (separate two-step) | Independent of `DEFAULT_ADMIN_ROLE`. Read by registry. |
 
 **Entry points:**
@@ -163,7 +183,7 @@ pool's `staticcall`-based interface probes succeed.
 |---|---|---|
 | `deposit(amount)` | anyone | Pulls ON, mints wON 1:1. Received-amount accounting. `nonReentrant`. Permissionless and uncapped. |
 | `withdraw(amount)` | anyone | Burns wON, returns ON from reserve. Reverts on `InsufficientReserve`. `nonReentrant`. |
-| `mint(account, amount)` | `MINTER_ROLE` (pool) | CCIP-inbound mint. Auto-unwraps to native ON when reserve covers the amount (emits `CCIPAutoUnwrapped`, cap untouched); otherwise increments `ccipMintHeadroomUsed` and reverts if cap exceeded (emits `CCIPMinted`). |
+| `mint(account, amount)` | `MINTER_ROLE` (pool) | CCIP-inbound mint. Always mints wON to the receiver (EOA or contract); never reads the reserve or delivers native ON (#48). Increments `ccipMintHeadroomUsed` and reverts if cap exceeded (emits `CCIPMinted`). |
 | `burn(amount)` / `burn(account, amount)` / `burnFrom(account, amount)` | `BURNER_ROLE` (pool) | CCIP-outbound burn. Saturating-decrements `ccipMintHeadroomUsed`. Emits `CCIPBurned`. |
 | `setCCIPAdmin(addr)` / `acceptCCIPAdmin()` | current / pending admin | Two-step CCIP admin rotation. |
 | `getCCIPAdmin()` / `pendingCCIPAdmin()` | view | Registry probes + handoff verification. |
@@ -255,10 +275,11 @@ Both mint paths produce **fungible** wON. They are backed differently:
   held in the wON contract's own reserve. Permissionless, uncapped in amount,
   independent of CCIP.
 - **`mint(...)`** — the Ethereum `BurnMintTokenPool` calls this on inbound CCIP
-  messages. Backed by ON locked on the BSC `LockReleaseTokenPool`. **Auto-unwrap**:
-  when `ON.balanceOf(wON) >= amount` the call delivers native ON directly to the
-  receiver and mints 0 wON (emits `CCIPAutoUnwrapped`); the cap counter is untouched.
-  Otherwise, mints wON and increments `ccipMintHeadroomUsed` as normal.
+  messages. Backed by ON locked on the BSC `LockReleaseTokenPool`. Always mints wON to
+  the receiver (EOA or contract) and increments `ccipMintHeadroomUsed` (emits
+  `CCIPMinted`); it never reads the reserve or delivers native ON, so the delivered
+  asset is deterministic and not front-runnable (#48). A holder who wants native ON
+  calls `withdraw`.
 
 ### 4.3 Invariants
 
@@ -343,13 +364,10 @@ user                wON contract             ON token
 8. ETH_OffRamp → BurnMintTokenPool.releaseOrMint(receiver, amount, src, ...)
                 ─ checks inbound rate limiter
                 ─ calls wON.mint(receiver, amount)
-                ─ AUTO-UNWRAP (if ON.balanceOf(wON) >= amount):
-                    ─ transfers `amount` native ON to receiver
-                    ─ emits CCIPAutoUnwrapped; cap counter untouched; returns
-                ─ OTHERWISE:
                     ─ wON checks ccipMintHeadroomUsed + amount ≤ MAX_CCIP_MINTED
-                    ─ mints wON to receiver; emits CCIPMinted
-9. receiver holds `amount` native ON (auto-unwrap path) or `amount` wON (mint path)
+                    ─ mints `amount` wON to receiver; emits CCIPMinted
+                    ─ (reserve never read; native ON never delivered — #48)
+9. receiver holds `amount` wON (EOA or contract); calls withdraw() for native ON
 ```
 
 ### 5.3 Outbound: Ethereum → BSC
@@ -440,18 +458,22 @@ the underlying incident, and execution resumes once RMN un-curses.
                                      │
                               (one-time deploy)
                                      │
-        ┌────────────────────────────┼────────────────────────────┐
-        ▼                            ▼                            ▼
-ETH BurnMintTokenPool         wON contract             BSC LockReleaseTokenPool
-   Ownable.owner             DEFAULT_ADMIN_ROLE             Ownable.owner
-                              (+ s_ccipAdmin)
-                                                          (+ setRebalancer)
+        ┌──────────────┬─────────────┼────────────────────────────┐
+        ▼              ▼             ▼                            ▼
+ETH BurnMint    TimelockController  wON (proxy)          BSC LockReleaseTokenPool
+TokenPool        (48h delay)       DEFAULT_ADMIN_ROLE        Ownable.owner
+Ownable.owner   UPGRADER_ROLE       PAUSER_ROLE
+                 └─ can call         (+ s_ccipAdmin)        (+ setRebalancer)
+                  upgradeToAndCall
+                  (via schedule+execute)
 
-   TokenAdminRegistry         TokenAdminRegistry
-   .administrator(wON)        .administrator(ON_BSC)
+   TokenAdminRegistry               TokenAdminRegistry
+   .administrator(wON proxy)        .administrator(ON_BSC)
 
                                 ↓ handoff (script 06)
                                 ↓ two-step on every role
+                                ↓ multisig gets PAUSER_ROLE +
+                                ↓ timelock proposer/executor/canceller roles
 
                               Ops Multisig
                               (Gnosis Safe)
@@ -467,7 +489,10 @@ ETH BurnMintTokenPool         wON contract             BSC LockReleaseTokenPool
 | BSC `LockReleaseTokenPool.owner` | deployer | multisig | Two-step `transferOwnership` / `acceptOwnership` |
 | `wON.DEFAULT_ADMIN_ROLE` | deployer | multisig + deployer renounces | Grant to multisig, then `renounceRole` (preconditioned on multisig having accepted). No `LIQUIDITY_MANAGER_ROLE` exists — `deposit` is permissionless. |
 | `wON.MINTER_ROLE` / `BURNER_ROLE` | none → ETH pool (script 03) | ETH pool | Granted once at deploy; never moves |
-| `wON.s_ccipAdmin` | deployer (set in ctor) | multisig | Two-step `setCCIPAdmin` / `acceptCCIPAdmin` |
+| `wON.UPGRADER_ROLE` | `TimelockController` (set at `initialize`) | `TimelockController` | Never transferred; timelock holds it permanently |
+| `wON.PAUSER_ROLE` | deployer's admin arg (set at `initialize`) | multisig (script 06 handoff) | Direct `grantRole` + deployer `renounceRole` |
+| `TimelockController` proposer/executor/canceller | deployer → multisig at handoff | multisig | Timelock's own `grantRole` / `renounceRole` |
+| `wON.s_ccipAdmin` | deployer (set in `initialize`) | multisig | Two-step `setCCIPAdmin` / `acceptCCIPAdmin` |
 | `TokenAdminRegistry.administrator(token)` (per chain) | deployer | multisig | Two-step `transferAdminRole` / `acceptAdminRole` |
 | BSC pool `setRebalancer` / `withdrawLiquidity` | (unset) | multisig-controlled | Implicit — pool owner can `setRebalancer` at any time post-handoff |
 
@@ -518,21 +543,26 @@ The deploy sequence is encoded in numbered Forge scripts dispatched per
 be recovered by re-running the same `make` target.
 
 ```
-script/01_DeployWrappedON.s.sol         ETH only        ─ deploys wON
+script/01_DeployWrappedON.s.sol         ETH only        ─ deploys TimelockController → impl → ERC1967Proxy(initialize)
 script/02_DeployPools.s.sol             both chains     ─ deploys pool (chain-dispatched)
-script/03_GrantRoles.s.sol              ETH only        ─ grants MINTER/BURNER on wON to pool
+script/03_GrantRoles.s.sol              ETH only        ─ grants MINTER/BURNER on wON proxy to pool
 script/04_RegisterAdminAndPool.s.sol    both chains     ─ probes admin path, accepts, setPool
 script/05_ApplyChainUpdates.s.sol       both chains     ─ wires remote pool + rate limits
-script/06_TransferOwnership.s.sol       both chains     ─ handoff to multisig (+ Renounce on ETH)
+script/06_TransferOwnership.s.sol       both chains     ─ handoff to multisig (+ PAUSER + timelock roles on ETH; Renounce on ETH)
 script/07_UpdateRateLimits.s.sol        ops             ─ adjust rate limits
 script/08_PostDeployVerify.s.sol        both chains     ─ view-only wiring assertion
 ```
 
 Deployment artifacts live in `deployments/<chainId>.json` with keys
-`.wrappedON` (ETH only) and `.pool` (every chain). Subsequent scripts read
-these via `Deployments.tryReadAddress`, which returns `address(0)` on missing
-file / missing key / malformed JSON so the calling script's `_requireSet`
-diagnostic fires with a clear message instead of a low-level Foundry panic.
+`.wrappedON` (proxy address, ETH only), `.wrappedONImpl` (implementation),
+`.wrappedONTimelock` (TimelockController), and `.pool` (every chain).
+Subsequent scripts read these via `Deployments.tryReadAddress`, which returns
+`address(0)` on missing file / missing key / malformed JSON so the calling
+script's `_requireSet` diagnostic fires with a clear message instead of a
+low-level Foundry panic.
+
+The registered token in `TokenAdminRegistry` is the **proxy address** (`wrappedON`),
+not the implementation.
 
 ```
 deploy-eth:                 deploy-bsc:
@@ -543,7 +573,7 @@ After both chains are deployed and `make verify-*` is clean:
 
 ```
 make handoff-all ETH_RPC=… BSC_RPC=… MULTISIG=0x…
-  → script 06 on ETH (TransferOwnership)
+  → script 06 on ETH (TransferOwnership + PAUSER handoff + timelock role handoff)
   → script 06 on BSC (TransferOwnership)
   → (multisig actions, off-chain)
   → MULTISIG=… make verify-eth / verify-bsc

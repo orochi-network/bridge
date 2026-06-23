@@ -8,7 +8,7 @@ A Foundry project implementing a **Chainlink CCIP Cross-Chain Token (CCT) bridge
 
 - **BSC side**: stock `LockReleaseTokenPool` against the existing ON token. CCIP 1.6.1 removed the `acceptLiquidity` ctor flag; `provideLiquidity`/`withdrawLiquidity` are gated on `msg.sender == s_rebalancer`, so deploying with **no rebalancer set** keeps them disabled (same launch posture as the old `acceptLiquidity = false`). The operator multisig takes custody of the reserve via `setRebalancer` → `withdrawLiquidity` (Chainlink CCT trust model — see [Trust model](#trust-model-bsc-reserve-custody)).
 - **Ethereum side**: stock `BurnMintTokenPool` against a new **wON** token (this repo's only custom contract). The CCIP `mint` path is bounded by `MAX_CCIP_MINTED = 100M` (tracked via `ccipMintHeadroomUsed`); `deposit` is uncapped and bounded naturally by ETH-side ON supply.
-- **wON** is also a 1:1 wrapper holding a reserve of native ETH-side ON. `deposit` mints wON 1:1 against deposited ON (received-amount accounting, `nonReentrant`); `withdraw` burns wON and returns ON when the reserve allows. On BSC→ETH arrivals, `mint` auto-unwraps — delivers native ON when the reserve covers the amount (all-or-nothing), else mints wON.
+- **wON** is also a 1:1 wrapper holding a reserve of native ETH-side ON. `deposit` mints wON 1:1 against deposited ON (received-amount accounting, `nonReentrant`); `withdraw` burns wON and returns ON when the reserve allows. On BSC→ETH arrivals, `mint` always delivers **wON** (the registered token) to every receiver, EOA or contract — it never reads the reserve or delivers native ON, so the delivered asset is deterministic and not front-runnable (issue #48). Holders who want native ON call `withdraw`.
 
 ## Token addresses (canonical)
 
@@ -32,20 +32,20 @@ A Foundry project implementing a **Chainlink CCIP Cross-Chain Token (CCT) bridge
 - **Use stock Chainlink contracts** for `BurnMintTokenPool` and `LockReleaseTokenPool`. Do NOT subclass — extra inheritance increases audit surface for zero functional gain. Subclassing was considered and rejected; the Chainlink trust model is documented instead.
 - **Only one custom contract**: `src/WrappedON.sol`. Keep it small. New custom contracts require justification.
 - **Decimals**: ON and wON are both 18. CCIP 1.6.1 pool constructors take `uint8 localTokenDecimals` (validated against `token.decimals()`); both pools are deployed with `18`. Off-chain registration in the CCIP directory records 18/18 for both.
-- **Roles on wON**: `MINTER_ROLE` and `BURNER_ROLE` go ONLY to the `BurnMintTokenPool` on Ethereum. `DEFAULT_ADMIN_ROLE` starts on deployer, then transfers to the ops multisig after wiring. There is no `LIQUIDITY_MANAGER_ROLE` — `deposit` is permissionless (SECURITY M3 / #25 REVERSED 2026-06-23 by product decision).
+- **Roles on wON**: `MINTER_ROLE` and `BURNER_ROLE` go ONLY to the `BurnMintTokenPool` on Ethereum. `UPGRADER_ROLE` goes to the `TimelockController` (48h default delay) — gates `upgradeToAndCall` — and is **self-administered** (`_setRoleAdmin(UPGRADER_ROLE, UPGRADER_ROLE)` in `initialize`) so `DEFAULT_ADMIN_ROLE` can't re-grant it and bypass the timelock (SECURITY UPG-1). `PAUSER_ROLE` starts on the deployer-supplied admin and passes to the ops multisig at handoff — gates emergency `pause`/`unpause`; it deliberately keeps the default `DEFAULT_ADMIN_ROLE` admin (pause is halt-only). `DEFAULT_ADMIN_ROLE` starts on deployer, then transfers to the ops multisig after wiring. There is no `LIQUIDITY_MANAGER_ROLE` — `deposit` is permissionless (SECURITY M3 / #25 REVERSED 2026-06-23 by product decision).
 - **CCIP admin handoff is two-step**: `setCCIPAdmin(addr)` proposes; the proposed address must call `acceptCCIPAdmin()` to take effect. The proposal target is validated on-chain — rejects `address(0)` (`ZeroAddress`), self-proposal `newAdmin == s_ccipAdmin`, and `newAdmin == address(this)` (both via `InvalidCCIPAdmin`) — so scripts can't accidentally clobber an in-flight pending or write an unreachable address. Same handoff shape for `Ownable` ownership on pools and `TokenAdminRegistry` admin roles.
-- **No upgrades**: contracts are non-upgradeable by design. Migration path = redeploy + re-register in `TokenAdminRegistry` + `applyChainUpdates`.
+- **wON is UUPS-upgradeable** (deliberate exception to "keep surface small"). It sits behind an `ERC1967Proxy` at a stable address. The implementation is deployed separately; script 01 deploys `TimelockController` → `WrappedON` (impl) → `ERC1967Proxy(initialize)`. Artifacts: `wrappedON` = proxy (the registered token), `wrappedONImpl`, `wrappedONTimelock`. State lives in ERC-7201 namespaced storage (`orochi.storage.WrappedON`); the impl `constructor` calls `_disableInitializers()`. Upgrade authority is custody-grade — see SECURITY.md `UPG-*` entries.
 
 ## Reserve invariant (wON)
 
 There are TWO mint paths for wON; both produce identical fungible tokens but back differently:
 
 1. `deposit(amount)` — anyone pulls native ETH ON and receives wON 1:1; wON minted is backed by ON held in this contract's reserve. **Permissionless and uncapped** — wON supply growth (and ETH→BSC redemption demand) is bounded only by ETH-side ON supply and the CCIP pool rate limits.
-2. `mint(...)` — CCIP pool mints when value arrives from BSC; backing is ON locked on the BSC `LockReleaseTokenPool`. **Auto-unwrap**: when `ON.balanceOf(wON) >= amount` it delivers native ON to the receiver (all-or-nothing) and mints 0 wON, leaving `ccipMintHeadroomUsed` untouched; otherwise mints wON as normal. Emits `CCIPAutoUnwrapped(account, amount)` on the unwrap path.
+2. `mint(...)` — CCIP pool mints when value arrives from BSC; backing is ON locked on the BSC `LockReleaseTokenPool`. Always mints **wON** to the receiver (EOA or contract) and increments `ccipMintHeadroomUsed`; it never reads the reserve or delivers native ON (issue #48 — keeps the delivered asset deterministic and not front-runnable via the permissionless `deposit`/`withdraw` reserve). Emits `CCIPMinted(account, amount, ccipMintHeadroomUsed)`.
 
 Conceptual invariant (NOT tracked as on-chain state — `wrapBackedSupply` is a term, not a storage variable): `{wON minted via deposit and still circulating} <= ON.balanceOf(WrappedON)`. Enforcement is via `withdraw` reverting when `ON.balanceOf(this) < amount`, plus the received-amount accounting in `deposit` that adds to the reserve and `totalSupply` in lockstep. CCIP-bridged users who want native ETH ON depend on someone else having wrapped — this is an arbitrage layer, not a guaranteed redemption.
 
-**CCIP mint cap**: `WrappedON.MAX_CCIP_MINTED = 100_000_000 ether` bounds `ccipMintHeadroomUsed` — the counter incremented in `mint(...)` and saturating-decremented in every burn entrypoint. `mint` reverts `CCIPMintCapExceeded(cap, wouldBe)` when `ccipMintHeadroomUsed + amount` would exceed the cap; `deposit` is permissionless, uncapped, and independent of `MAX_CCIP_MINTED`, so heavy wrap usage cannot starve inbound CCIP messages. The cap matches the canonical ON supply on BSC, which is the absolute upper bound on what the bridge can ever reflect onto Ethereum. The counter is a BSC-pool-balance approximation, not a circulating-CCIP-minted accounting. Note: when the reserve covers a BSC→ETH arrival, `mint` auto-unwraps by transferring ON directly — the cap counter is not incremented on that path.
+**CCIP mint cap**: `WrappedON.MAX_CCIP_MINTED = 100_000_000 ether` bounds `ccipMintHeadroomUsed` — the counter incremented in `mint(...)` and saturating-decremented in every burn entrypoint. `mint` reverts `CCIPMintCapExceeded(cap, wouldBe)` when `ccipMintHeadroomUsed + amount` would exceed the cap; `deposit` is permissionless, uncapped, and independent of `MAX_CCIP_MINTED`, so heavy wrap usage cannot starve inbound CCIP messages. The cap matches the canonical ON supply on BSC, which is the absolute upper bound on what the bridge can ever reflect onto Ethereum. The counter is a BSC-pool-balance approximation, not a circulating-CCIP-minted accounting. Every `mint` increments the counter — there is no reserve-covered fast path (issue #48 removed auto-unwrap), so the reserve can only ever leave via `withdraw`.
 
 ## Trust model: BSC reserve custody
 
@@ -54,10 +54,10 @@ In CCIP 1.6.1 `LockReleaseTokenPool` no longer has an `acceptLiquidity` flag. `p
 ## Layout
 
 ```
-src/WrappedON.sol                 the only custom contract
+src/WrappedON.sol                 the only custom contract (UUPS-upgradeable, ERC-7201 storage)
 script/Helper.sol                 per-chain CCIP config (router, RMN, registry, selectors)
 script/Deployments.sol            JSON artifact read/write helper
-script/01_DeployWrappedON.s.sol   ETH only — deploys wON
+script/01_DeployWrappedON.s.sol   ETH only — deploys TimelockController → impl → ERC1967Proxy
 script/02_DeployPools.s.sol       both chains — chain-dispatched on block.chainid
 script/03_GrantRoles.s.sol        ETH only — grants MINTER/BURNER on wON to the pool
 script/04_RegisterAdminAndPool.s.sol  both chains — probes getCCIPAdmin / Ownable / AccessControl, then setPool + post-asserts the wiring
@@ -86,7 +86,7 @@ deployments/<chainId>.json        written by scripts via vm.writeJson
 Everything goes through the `Makefile`. The full sequence is documented in `RUNBOOK.md`. Key targets:
 
 - `make install`               — submodule init + patch-pragmas (one-time after clone).
-- `make test`                  — full test suite, no fork: 139 tests total (135 unit/integration + 4 stateful invariants).
+- `make test`                  — full suite: 174 tests total (incl. 4 stateful invariants); fork tests self-skip when ETH_RPC/BSC_RPC unset.
 - `make test-unit`             — WrappedON.t.sol unit tests only.
 - `make test-e2e`              — PoolRoundtrip + DeploymentE2E integration tests.
 - `make test-fork ETH_RPC=... BSC_RPC=...` — fork tests against live mainnet (10 tests).

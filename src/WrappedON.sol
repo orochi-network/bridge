@@ -3,18 +3,28 @@ pragma solidity 0.8.34;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+
+import {ERC20Upgradeable} from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 
 import {IBurnMintERC20} from "@chainlink/contracts/src/v0.8/shared/token/ERC20/IBurnMintERC20.sol";
 import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/interfaces/IGetCCIPAdmin.sol";
 
 /// @title Wrapped Orochi Network Token (wON)
 /// @notice CCIP `BurnMintTokenPool` token on Ethereum + 1:1 wrapper for canonical ON.
+///
+/// UUPS-upgradeable (ERC-1967 proxy). The implementation's constructor only
+/// `_disableInitializers()`; all wiring happens in `initialize`. Upgrades are gated by
+/// `UPGRADER_ROLE` (held by a `TimelockController` so changes carry a mandatory delay) and
+/// the value paths carry an emergency `PAUSER_ROLE` pause. State lives in ERC-7201 namespaced
+/// storage so future implementations can extend it without collision.
 ///
 /// Two mint paths, both fungible, backed differently:
 ///   1. `deposit` — pulls ON, mints wON; backed by `ON.balanceOf(this)`.
@@ -35,57 +45,88 @@ import {IGetCCIPAdmin} from "@chainlink/contracts-ccip/interfaces/IGetCCIPAdmin.
 /// cannot independently verify that the matching BSC `lock` occurred. See SECURITY: CCIP-7
 /// and the §3 trust model.
 ///
-/// `MAX_CCIP_MINTED = 100M` caps `ccipMintHeadroomUsed` — a LOCAL ETH-side counter of how
-/// much CCIP mint-cap headroom is consumed (M1 / #23 renamed it from the misleading
-/// `ccipMintedSupply`). It exists only because the real CCIP-locked figure lives on BSC and
-/// is unreadable from here, and it is NOT a gauge of BSC-locked liquidity: the
-/// saturating-decrement (below) and operator-seeded BSC liquidity make it drift from the true
-/// BSC balance. The cap bounds damage from a compromised pool; it does NOT bound
-/// `totalSupply()` (the `deposit` path is uncapped). Not a per-token-provenance counter — wON
-/// is fungible. Saturating-subtract on burn handles deposit-backed wON being bridged out;
-/// pool lock/release accounting nets out regardless.
-///
-/// CAP REPLENISHMENT (SECURITY: M1 #23 / CCIP-7 / WON-3): the cap is NOT a lifetime
-/// CCIP-mint bound. Deposit-backed wON cycled OUT through the bridge burns and
-/// saturating-decrements `ccipMintHeadroomUsed` toward 0 even though the underlying mint was
-/// never CCIP-sourced — refilling cap headroom for subsequent CCIP inbound mints. Because of
-/// that saturation the counter can read BELOW the true BSC-locked balance, so it must NOT be
-/// treated as a BSC-liquidity proxy. The safety invariant
-/// (`lockedON_BSC + reserveON_ETH >= totalSupply(wON)`) holds regardless, because every CCIP
-/// mint still pairs a BSC lock at the cap-checked moment and burns reverse both sides in
-/// lockstep. For real cross-chain exposure read `IERC20(ON).balanceOf(BSC_pool)` as ground
-/// truth — NOT this counter.
-///
-/// Safety invariant (mechanical): `lockedON_BSC + reserveON_ETH >= totalSupply(wON)`.
+/// `MAX_CCIP_MINTED = 100M` (= canonical BSC ON supply) caps `ccipMintHeadroomUsed`, a LOCAL
+/// ETH-side counter of CCIP mint headroom consumed: incremented in `mint`, saturating-
+/// decremented in every burn. It bounds the CCIP-minted portion, NOT `totalSupply()` — the
+/// `deposit` path is uncapped, so supply can reach `MAX_CCIP_MINTED + ON.balanceOf(this)` (the
+/// counter satisfies `ccipMintHeadroomUsed >= totalSupply() - reserve`; see the invariant
+/// suite). It is NOT a lifetime CCIP-mint bound nor a BSC-liquidity gauge: the saturating
+/// decrement (deposit-backed wON bridged out refills headroom) and operator-seeded liquidity
+/// make it drift below the true BSC-locked balance — read `IERC20(ON).balanceOf(BSC_pool)` for
+/// that. The safety invariant `lockedON_BSC + reserveON_ETH >= totalSupply(wON)` holds
+/// regardless, because every CCIP mint pairs a BSC lock and burns reverse both sides in
+/// lockstep. SECURITY: CCIP-7 / WON-3 / M1.
 ///
 /// @dev `IBurnMintERC20` is NOT inherited — it brings the CCIP-vendored `IERC20`, which
 /// conflicts with OZ `IERC20` linearization. Selectors match the interface exactly so
 /// pool calls succeed; `type(IBurnMintERC20).interfaceId` is still reported by
 /// `supportsInterface`.
-contract WrappedON is ERC20, AccessControl, ReentrancyGuardTransient, IGetCCIPAdmin {
+///
+/// @dev `ReentrancyGuardTransient` is the NON-upgradeable variant on purpose: its guard uses
+/// a constant transient (EIP-1153) storage slot, so it holds no persistent state and needs no
+/// initializer. OZ v5.6.1 ships no `ReentrancyGuardTransientUpgradeable`; this is OZ's own
+/// documented pattern for upgradeable contracts.
+contract WrappedON is
+    Initializable,
+    ERC20Upgradeable,
+    AccessControlUpgradeable,
+    PausableUpgradeable,
+    ReentrancyGuardTransient,
+    UUPSUpgradeable,
+    IGetCCIPAdmin
+{
     using SafeERC20 for IERC20;
 
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
+    /// @notice Gates `_authorizeUpgrade`. Held by a `TimelockController` so upgrades carry a
+    ///         mandatory (48h) delay; never granted to an EOA in production.
+    bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
+    /// @notice Gates the emergency `pause`/`unpause`. Halts the value paths
+    ///         (mint/burn/deposit/withdraw); plain ERC20 transfers stay live.
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
     /// @notice Cap on `ccipMintHeadroomUsed`. Matches canonical BSC ON supply — the upper bound
     ///         on ON that can ever be locked on the BSC pool.
     uint256 public constant MAX_CCIP_MINTED = 100_000_000 ether;
 
-    /// @notice Canonical ON on this chain (non-mintable ERC20).
-    IERC20 public immutable ON;
+    /// @custom:storage-location erc7201:orochi.storage.WrappedON
+    struct WrappedONStorage {
+        /// @dev Canonical ON on this chain (non-mintable ERC20); set once at `initialize`.
+        IERC20 on;
+        /// @dev CCIP mint-cap headroom currently consumed, bounded by `MAX_CCIP_MINTED`.
+        uint256 ccipMintHeadroomUsed;
+        /// @dev CCIP admin read by `RegistryModuleOwnerCustom.registerAdminViaGetCCIPAdmin`.
+        address ccipAdmin;
+        /// @dev Proposed-but-not-accepted CCIP admin (two-step rotation).
+        address pendingCcipAdmin;
+    }
 
-    /// @notice CCIP mint-cap headroom currently consumed, bounded by `MAX_CCIP_MINTED`.
-    ///         Incremented by CCIP `mint`, saturating-decremented by CCIP burns (M1 / #23;
-    ///         renamed from `ccipMintedSupply`). NOT a BSC-liquidity gauge — use
-    ///         `IERC20(ON).balanceOf(BSC_pool)` for true cross-chain exposure. See NatSpec.
-    uint256 public ccipMintHeadroomUsed;
+    // = keccak256(abi.encode(uint256(keccak256("orochi.storage.WrappedON")) - 1)) & ~bytes32(uint256(0xff))
+    // Verified with `cast index-erc7201 orochi.storage.WrappedON` and an independent
+    // keccak/abi-encode recomputation.
+    bytes32 private constant _STORAGE_LOCATION = 0xc9356e8aa19da270b9a132fda93e9af24668c8487450db15f9b9e8baeb751900;
 
-    /// @notice CCIP admin read by `RegistryModuleOwnerCustom.registerAdminViaGetCCIPAdmin`.
-    /// @dev Independent of `DEFAULT_ADMIN_ROLE`. Two-step rotation (propose + accept) so a
-    /// typo can't lock the role.
-    address private s_ccipAdmin;
-    address private s_pendingCcipAdmin;
+    function _s() private pure returns (WrappedONStorage storage $) {
+        // ERC-7201 storage accessor — deliberate, OZ-documented assembly binding a struct ref
+        // to a fixed slot. Silence Slither's informational `assembly` detector (its only finding
+        // in `src/`) so the Slither CI check is green, mirroring the workflow's documented
+        // `naming-convention` exclusion. OPS-12.
+        // slither-disable-next-line assembly
+        assembly {
+            $.slot := _STORAGE_LOCATION
+        }
+    }
+
+    /// @notice Canonical ON on this chain (set once at initialize).
+    function ON() public view returns (IERC20) {
+        return _s().on;
+    }
+
+    /// @notice CCIP mint-cap headroom consumed, bounded by MAX_CCIP_MINTED.
+    function ccipMintHeadroomUsed() external view returns (uint256) {
+        return _s().ccipMintHeadroomUsed;
+    }
 
     /// @notice Emitted by `deposit`. `received` is the POST-fee credited amount (matches the
     ///         wON minted), not the user-supplied `amount` argument — fee-on-transfer ON
@@ -107,9 +148,6 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuardTransient, IGetCCIPAd
     ///         a named event in addition to the inherited ERC20 `Transfer(account, 0, amount)`.
     ///         SECURITY: WON-4.
     event CCIPBurned(address indexed account, uint256 amount, uint256 ccipMintHeadroomUsed);
-    /// @notice Emitted by `mint` when the wrap reserve fully covers a CCIP arrival and native
-    ///         ON is delivered instead of minting wON (issue #1). Mints 0 wON; cap untouched.
-    event CCIPAutoUnwrapped(address indexed account, uint256 amount);
     event CCIPAdminTransferProposed(address indexed currentAdmin, address indexed proposed);
     event CCIPAdminTransferred(address indexed previousAdmin, address indexed newAdmin);
     /// @notice Emitted when an in-flight `setCCIPAdmin` proposal is overwritten by a new
@@ -128,28 +166,67 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuardTransient, IGetCCIPAd
     error CCIPMintCapExceeded(uint256 cap, uint256 wouldBe);
     error InvalidCCIPAdmin();
 
-    /// @notice Deploys wON wired to canonical ON and a bootstrap `admin`.
-    /// @dev `admin` gets `DEFAULT_ADMIN_ROLE` AND becomes initial `s_ccipAdmin`; both
-    ///      hand off to the multisig (two-step each) before the deployer renounces. Rejects
-    ///      zero-address, self-reserve, and decimals-mismatch tokens.
-    constructor(IERC20 onToken, address admin) ERC20("Wrapped Orochi Network", "wON") {
-        if (address(onToken) == address(0) || admin == address(0)) {
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    /// @notice One-time init. `admin` gets `DEFAULT_ADMIN_ROLE` + `PAUSER_ROLE` and becomes the
+    ///         initial CCIP admin; `timelock` gets `UPGRADER_ROLE` (gates `_authorizeUpgrade`).
+    /// @dev Rejects zero-address (any of the three args), self-reserve, and decimals-mismatch
+    ///      tokens. The CCIP admin and the `DEFAULT_ADMIN_ROLE` both hand off to the multisig
+    ///      (two-step each) before the deployer renounces.
+    /// @dev `UPGRADER_ROLE` is made SELF-ADMINISTERED (`_setRoleAdmin(UPGRADER_ROLE,
+    ///      UPGRADER_ROLE)`): without this, OZ defaults its admin to `DEFAULT_ADMIN_ROLE`, so
+    ///      the post-handoff multisig could `grantRole(UPGRADER_ROLE, itself)` and upgrade with
+    ///      NO timelock delay. Self-administering it means only the timelock (the role holder)
+    ///      can grant/revoke upgrade authority, and every such grant is itself a timelocked tx —
+    ///      so the 48h reaction window is enforced, not advisory (SECURITY: UPG-1). `PAUSER_ROLE`
+    ///      intentionally keeps the default `DEFAULT_ADMIN_ROLE` admin: pause is halt-only
+    ///      (UPG-4), a liveness-only authority, so the multisig managing pausers is acceptable.
+    function initialize(IERC20 onToken, address admin, address timelock) external initializer {
+        if (address(onToken) == address(0) || admin == address(0) || timelock == address(0)) {
             revert ZeroAddress();
         }
         // Self-reserve would make the wrap invariant circular (own ERC20 balance double-counts).
         if (address(onToken) == address(this)) {
             revert SelfReserve();
         }
-        // 1:1 wrap accounting requires matching decimals. Canonical ON is a standard ERC20Metadata
-        // on both chains; rejects mis-wired testnet tokens.
+        __ERC20_init("Wrapped Orochi Network", "wON");
+        __AccessControl_init();
+        __Pausable_init();
+        // ReentrancyGuardTransient (non-upgradeable) has no initializer — its guard lives in a
+        // constant transient slot. UUPSUpgradeable likewise has no initializer in OZ v5.6.1.
+
+        // 1:1 wrap accounting requires matching decimals. Canonical ON is a standard
+        // ERC20Metadata on both chains; rejects mis-wired testnet tokens.
         uint8 onDecimals = IERC20Metadata(address(onToken)).decimals();
         if (onDecimals != decimals()) {
             revert DecimalsMismatch(decimals(), onDecimals);
         }
-        ON = onToken;
+        WrappedONStorage storage $ = _s();
+        $.on = onToken;
+        // UPGRADER_ROLE self-administers so DEFAULT_ADMIN_ROLE (the multisig post-handoff)
+        // cannot re-grant it and bypass the timelock — see the function NatSpec / UPG-1.
+        _setRoleAdmin(UPGRADER_ROLE, UPGRADER_ROLE);
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
-        s_ccipAdmin = admin;
+        _grantRole(PAUSER_ROLE, admin);
+        _grantRole(UPGRADER_ROLE, timelock);
+        $.ccipAdmin = admin;
         emit CCIPAdminTransferred(address(0), admin);
+    }
+
+    /// @dev UUPS upgrade authorization — gated by `UPGRADER_ROLE` (the timelock). The
+    ///      mandatory delay lives in the `TimelockController`, not here.
+    function _authorizeUpgrade(address newImplementation) internal override onlyRole(UPGRADER_ROLE) {}
+
+    /// @notice Emergency stop on the value paths (mint/burn/deposit/withdraw). Transfers stay live.
+    function pause() external onlyRole(PAUSER_ROLE) {
+        _pause();
+    }
+
+    function unpause() external onlyRole(PAUSER_ROLE) {
+        _unpause();
     }
 
     // ─── Wrap / Unwrap (1:1 against native ON) ────────────────────────────────
@@ -160,13 +237,14 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuardTransient, IGetCCIPAd
     ///      hook-bearing tokens. Uncapped — bounded by ETH-side ON supply; independent of
     ///      `MAX_CCIP_MINTED` so heavy wrap usage can't starve inbound CCIP.
     /// @dev WON-14: also rejects `received == 0` after the transfer (see existing rationale).
-    function deposit(uint256 amount) external nonReentrant {
+    function deposit(uint256 amount) external nonReentrant whenNotPaused {
         if (amount == 0) {
             revert ZeroAmount();
         }
-        uint256 before = ON.balanceOf(address(this));
-        ON.safeTransferFrom(msg.sender, address(this), amount);
-        uint256 received = ON.balanceOf(address(this)) - before;
+        IERC20 on = _s().on;
+        uint256 before = on.balanceOf(address(this));
+        on.safeTransferFrom(msg.sender, address(this), amount);
+        uint256 received = on.balanceOf(address(this)) - before;
         // `received` is a balance delta; `== 0` is the intended zero-received guard (WON-14),
         // not an exact-balance comparison. Safe strict equality — Slither false positive.
         // slither-disable-next-line incorrect-equality
@@ -182,56 +260,43 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuardTransient, IGetCCIPAd
     ///      and never triggers a BSC release, so decrementing would desync from BSC balance.
     ///      Cost: a CCIP-minted holder can drain the deposit reserve (intended arbitrage
     ///      layer).
-    function withdraw(uint256 amount) external nonReentrant {
+    function withdraw(uint256 amount) external nonReentrant whenNotPaused {
         if (amount == 0) {
             revert ZeroAmount();
         }
-        uint256 reserve = ON.balanceOf(address(this));
+        IERC20 on = _s().on;
+        uint256 reserve = on.balanceOf(address(this));
         if (reserve < amount) {
             revert InsufficientReserve(amount, reserve);
         }
         _burn(msg.sender, amount);
-        ON.safeTransfer(msg.sender, amount);
+        on.safeTransfer(msg.sender, amount);
         emit Unwrapped(msg.sender, amount);
     }
 
     // ─── IBurnMintERC20 (pool-only) ───────────────────────────────────────────
 
     /// @notice CCIP `BurnMintTokenPool.releaseOrMint` entrypoint.
-    /// @dev Auto-unwrap (issue #1, all-or-nothing): when the wrap reserve fully covers this
-    ///      CCIP arrival, native ON is delivered to `account` and 0 wON is minted — the cap
-    ///      counter stays untouched because nothing is minted. The safety invariant holds
-    ///      because BSC lock += amount and reserve -= amount net out. A compromised pool can
-    ///      thus also drain the reserve — see SECURITY.
-    ///      Otherwise, falls through to cap-checked wON mint as before.
-    ///      Capped at `MAX_CCIP_MINTED` via `ccipMintHeadroomUsed`. See the contract-level
-    ///      CAP REPLENISHMENT block (CCIP-7) for the cycling-refill semantics — the cap
-    ///      is a live BSC-balance approximation, not a lifetime CCIP-mint ceiling.
-    ///      WON-17: `nonReentrant` is defensive — OZ 5.x ERC20 has no hooks, so re-entry
-    ///      via `_mint` cannot happen today. The guard locks the cap-counter / mint
-    ///      ordering against a future subclass that overrides `_update`.
-    function mint(address account, uint256 amount) external onlyRole(MINTER_ROLE) nonReentrant {
+    /// @dev Always mints wON to `account` (EOA or contract); never reads the reserve or
+    ///      delivers native ON, so the delivered asset is deterministic, not front-runnable
+    ///      via the permissionless reserve (issue #48). Native ON is obtained via `withdraw`.
+    ///      Capped at `MAX_CCIP_MINTED` via `ccipMintHeadroomUsed` (CAP REPLENISHMENT / CCIP-7
+    ///      — a live BSC-balance approximation, not a lifetime ceiling). WON-17: `nonReentrant`
+    ///      is defensive (OZ 5.x ERC20 has no hooks) — it pins the cap-counter / mint ordering
+    ///      against a future `_update`-overriding subclass.
+    function mint(address account, uint256 amount) external onlyRole(MINTER_ROLE) nonReentrant whenNotPaused {
         // Zero-amount mints emit a Transfer(pool, account, 0) log and otherwise no-op,
         // matching the asymmetry the `deposit`/`withdraw` guards exist to prevent.
         // SECURITY: WON-1.
         if (amount == 0) {
             revert ZeroAmount();
         }
-        // Auto-unwrap (issue #1, all-or-nothing): if the wrap reserve fully covers this CCIP
-        // arrival, deliver native ON and mint 0 wON. The cap counter is untouched (nothing
-        // minted); the safety invariant holds because BSC lock += amount and reserve -= amount
-        // net out. A compromised pool can thus also drain the reserve — see SECURITY.
-        uint256 reserve = ON.balanceOf(address(this));
-        if (reserve >= amount) {
-            ON.safeTransfer(account, amount);
-            emit CCIPAutoUnwrapped(account, amount);
-            return;
-        }
-        uint256 wouldBe = ccipMintHeadroomUsed + amount;
+        WrappedONStorage storage $ = _s();
+        uint256 wouldBe = $.ccipMintHeadroomUsed + amount;
         if (wouldBe > MAX_CCIP_MINTED) {
             revert CCIPMintCapExceeded(MAX_CCIP_MINTED, wouldBe);
         }
-        ccipMintHeadroomUsed = wouldBe;
+        $.ccipMintHeadroomUsed = wouldBe;
         _mint(account, amount);
         emit CCIPMinted(account, amount, wouldBe);
     }
@@ -241,7 +306,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuardTransient, IGetCCIPAd
     /// @dev WON-11: `ZeroAmount` guard mirrors the `mint`/`deposit`/`withdraw` pattern so a
     ///      misbehaving pool can't spam `CCIPBurned(_, 0, supply)` events. WON-17:
     ///      `nonReentrant` mirrors `mint` — defensive against future hookable subclasses.
-    function burn(uint256 amount) external onlyRole(BURNER_ROLE) nonReentrant {
+    function burn(uint256 amount) external onlyRole(BURNER_ROLE) nonReentrant whenNotPaused {
         if (amount == 0) {
             revert ZeroAmount();
         }
@@ -253,7 +318,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuardTransient, IGetCCIPAd
     ///      WON-17 rationale as the single-arg overload. CCIP-12: `account` is the burning
     ///      pool's caller-supplied target, NOT the pool itself; for the single-arg
     ///      `burn(uint256)` overload, `account` in the event is `msg.sender` (the pool).
-    function burn(address account, uint256 amount) external onlyRole(BURNER_ROLE) nonReentrant {
+    function burn(address account, uint256 amount) external onlyRole(BURNER_ROLE) nonReentrant whenNotPaused {
         if (amount == 0) {
             revert ZeroAmount();
         }
@@ -261,7 +326,7 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuardTransient, IGetCCIPAd
     }
 
     /// @notice Allowance-respecting burn. For pool variants that go through `approve`.
-    function burnFrom(address account, uint256 amount) external onlyRole(BURNER_ROLE) nonReentrant {
+    function burnFrom(address account, uint256 amount) external onlyRole(BURNER_ROLE) nonReentrant whenNotPaused {
         if (amount == 0) {
             revert ZeroAmount();
         }
@@ -273,13 +338,13 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuardTransient, IGetCCIPAd
 
     /// @notice Current CCIP admin. Read by `RegistryModuleOwnerCustom`.
     function getCCIPAdmin() external view returns (address) {
-        return s_ccipAdmin;
+        return _s().ccipAdmin;
     }
 
     /// @notice Proposed-but-not-accepted CCIP admin (zero if none). Handoff scripts assert
     ///         this equals the multisig before the deployer renounces.
     function pendingCCIPAdmin() external view returns (address) {
-        return s_pendingCcipAdmin;
+        return _s().pendingCcipAdmin;
     }
 
     /// @notice Proposes a new CCIP admin; proposed address must call `acceptCCIPAdmin`.
@@ -287,13 +352,14 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuardTransient, IGetCCIPAd
     ///      `address(this)` (would write an unreachable pending, soft-locking the role).
     ///      Both via `InvalidCCIPAdmin` — R-56.
     function setCCIPAdmin(address newAdmin) external {
-        if (msg.sender != s_ccipAdmin) {
+        WrappedONStorage storage $ = _s();
+        if (msg.sender != $.ccipAdmin) {
             revert OnlyCCIPAdmin();
         }
         if (newAdmin == address(0)) {
             revert ZeroAddress();
         }
-        if (newAdmin == s_ccipAdmin || newAdmin == address(this)) {
+        if (newAdmin == $.ccipAdmin || newAdmin == address(this)) {
             revert InvalidCCIPAdmin();
         }
         // Emit a named cancellation event when overwriting an in-flight proposal to a
@@ -307,31 +373,32 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuardTransient, IGetCCIPAd
         // indexer that subscribes to `CCIPAdminProposalCancelled` and immediately reads
         // `pendingCCIPAdmin()` from seeing the stale value. (`acceptCCIPAdmin` below is the
         // deliberate exception — it MUST emit before the write so `CCIPAdminTransferred`
-        // captures the OLD `s_ccipAdmin` in its `previousAdmin` field.)
-        address prev = s_pendingCcipAdmin;
-        s_pendingCcipAdmin = newAdmin;
+        // captures the OLD `ccipAdmin` in its `previousAdmin` field.)
+        address prev = $.pendingCcipAdmin;
+        $.pendingCcipAdmin = newAdmin;
         if (prev != address(0) && prev != newAdmin) {
             emit CCIPAdminProposalCancelled(prev);
         }
-        emit CCIPAdminTransferProposed(s_ccipAdmin, newAdmin);
+        emit CCIPAdminTransferProposed($.ccipAdmin, newAdmin);
     }
 
     /// @notice Completes the two-step CCIP admin transfer. Caller must equal the pending
     ///         address; pending slot is cleared on success.
     function acceptCCIPAdmin() external {
-        if (msg.sender != s_pendingCcipAdmin) {
+        WrappedONStorage storage $ = _s();
+        if (msg.sender != $.pendingCcipAdmin) {
             revert OnlyPendingCCIPAdmin();
         }
-        emit CCIPAdminTransferred(s_ccipAdmin, msg.sender);
-        s_ccipAdmin = msg.sender;
-        s_pendingCcipAdmin = address(0);
+        emit CCIPAdminTransferred($.ccipAdmin, msg.sender);
+        $.ccipAdmin = msg.sender;
+        $.pendingCcipAdmin = address(0);
     }
 
     // ─── IERC165 ──────────────────────────────────────────────────────────────
 
     /// @notice ERC-165 advertisement. Reports `IBurnMintERC20` despite no formal inheritance
     ///         (selectors are reproduced manually — see contract NatSpec).
-    function supportsInterface(bytes4 interfaceId) public view override(AccessControl) returns (bool) {
+    function supportsInterface(bytes4 interfaceId) public view override(AccessControlUpgradeable) returns (bool) {
         return interfaceId == type(IERC20).interfaceId || interfaceId == type(IERC20Metadata).interfaceId
             || interfaceId == type(IBurnMintERC20).interfaceId || interfaceId == type(IGetCCIPAdmin).interfaceId
             || interfaceId == type(IAccessControl).interfaceId || interfaceId == type(IERC165).interfaceId;
@@ -347,9 +414,10 @@ contract WrappedON is ERC20, AccessControl, ReentrancyGuardTransient, IGetCCIPAd
     ///      with the local variable instead of re-reading storage (saves one SLOAD per burn
     ///      and matches the `mint` path's local-variable pattern).
     function _decrementCcipMintHeadroom(uint256 amount) internal returns (uint256 newSupply) {
-        uint256 current = ccipMintHeadroomUsed;
+        WrappedONStorage storage $ = _s();
+        uint256 current = $.ccipMintHeadroomUsed;
         newSupply = amount >= current ? 0 : current - amount;
-        ccipMintHeadroomUsed = newSupply;
+        $.ccipMintHeadroomUsed = newSupply;
     }
 
     /// @dev Shared tail for all three CCIP burn entrypoints: saturating-decrement, OZ `_burn`,

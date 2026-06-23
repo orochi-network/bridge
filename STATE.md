@@ -2,13 +2,14 @@
 
 _Last updated: 2026-06-23_
 
-## 2026-06-23 — wON redeployed (auto-unwrap + permissionless deposit)
+## 2026-06-23 — wON redeployed (permissionless deposit + UUPS proxy)
 
 `WrappedON` was updated to add:
-- **Auto-unwrap on BSC→ETH arrivals**: `mint` now checks whether `ON.balanceOf(wON) >= amount` and, if so, transfers native ON directly to the receiver instead of minting wON (emits `CCIPAutoUnwrapped`; does not increment `ccipMintHeadroomUsed`).
+- **BSC→ETH arrivals always mint wON**: `mint` mints `amount` wON (the registered token) to the receiver — EOA or contract — and emits `CCIPMinted`. It never reads the reserve or delivers native ON, so the delivered asset is deterministic and not front-runnable via the permissionless `deposit`/`withdraw` reserve (issue #48). A holder who wants native ON calls `withdraw`. (An earlier draft auto-unwrapped to native ON when the reserve covered the arrival; that was removed before redeploy — see issue #48.)
 - **Permissionless `deposit`**: the `LIQUIDITY_MANAGER_ROLE` gate on `deposit` was removed; anyone holding ETH-side ON can wrap 1:1 into wON.
+- **UUPS upgradeability**: wON is now an `ERC1967Proxy` → `WrappedON` (impl). Upgrades are gated by `UPGRADER_ROLE` held by a `TimelockController` (48h delay). Emergency `pause`/`unpause` is gated by `PAUSER_ROLE` (ops multisig post-handoff).
 
-Because wON is non-upgradeable, both ETH contracts (wON + `BurnMintTokenPool`) were redeployed. The existing BSC `LockReleaseTokenPool` was retained; only its ETH-lane config was updated (new remote pool + new wON address via script 05). Procedure: RUNBOOK §4.4.
+Because wON was previously non-upgradeable, both ETH contracts (wON proxy + `BurnMintTokenPool`) were redeployed. The existing BSC `LockReleaseTokenPool` was retained; only its ETH-lane config was updated (new remote pool + new wON proxy address via script 05). Procedure: RUNBOOK §4.4.
 
 The old on-chain wON (`0x98d6…606`) and old ETH pool (`0xE0b7…8A72`) were clean at redeploy time — no circulating holders, no reserve.
 
@@ -16,8 +17,10 @@ The old on-chain wON (`0x98d6…606`) and old ETH pool (`0xE0b7…8A72`) were cl
 
 | Contract | Address | Notes |
 |---|---|---|
-| wON (WrappedON) — NEW | _(PENDING post-broadcast)_ | Replaces `0x98d6…606` |
-| BurnMintTokenPool — NEW | _(PENDING post-broadcast)_ | Replaces `0xE0b7…8A72` |
+| wON proxy (ERC1967Proxy) — NEW | _(PENDING post-broadcast)_ | Stable token address; registered in CCIP TokenAdminRegistry. Replaces `0x98d6…606` |
+| wON implementation (WrappedON) — NEW | _(PENDING post-broadcast)_ | Behind the proxy; rotates on upgrade |
+| TimelockController — NEW | _(PENDING post-broadcast)_ | Holds `UPGRADER_ROLE`; 48h min delay |
+| BurnMintTokenPool — NEW | _(PENDING post-broadcast)_ | Paired with wON proxy; replaces `0xE0b7…8A72` |
 
 Snapshot of where the mainnet deployment stands. Verified by direct on-chain reads
 (`cast call`) this session. **Bridge is NOT yet operational** — see Blocker below.
@@ -41,12 +44,14 @@ Snapshot of where the mainnet deployment stands. Verified by direct on-chain rea
 
 > **SUPERSEDED 2026-06-23 — pending redeploy.** The addresses below are the pre-redeploy contracts (old wON + old ETH pool). New addresses will be written to `deployments/1.json` after broadcast and should replace this table.
 
-| Contract | Address | Notes |
-|---|---|---|
-| wON (WrappedON) | `0x98d6d288AfaB1EdC7A6d49502790FA517765E606` | **OLD — superseded.** Pre-auto-unwrap / pre-permissionless-deposit build. No holders, no reserve. |
-| BurnMintTokenPool | `0xE0b7Dcd123122aC50f47d4E97C8CaFD01BAc8A72` | **OLD — superseded.** Paired with the old wON. |
-| wON (WrappedON) — NEW | _(PENDING post-broadcast)_ | Auto-unwrap + permissionless deposit; replaces row above. |
-| BurnMintTokenPool — NEW | _(PENDING post-broadcast)_ | Paired with new wON; replaces row above. |
+| Contract | Artifact key | Address | Notes |
+|---|---|---|---|
+| wON (WrappedON) | `wrappedON` | `0x98d6d288AfaB1EdC7A6d49502790FA517765E606` | **OLD — superseded.** Non-upgradeable build (pre-UUPS). No holders, no reserve. |
+| BurnMintTokenPool | `pool` | `0xE0b7Dcd123122aC50f47d4E97C8CaFD01BAc8A72` | **OLD — superseded.** Paired with old wON. |
+| wON proxy (ERC1967Proxy) — NEW | `wrappedON` | _(PENDING post-broadcast)_ | Stable CCIP-registered token address. Replaces row above. |
+| wON implementation — NEW | `wrappedONImpl` | _(PENDING post-broadcast)_ | Upgradeable impl; rotates on upgrade. |
+| TimelockController — NEW | `wrappedONTimelock` | _(PENDING post-broadcast)_ | Holds `UPGRADER_ROLE`; 48h default delay. |
+| BurnMintTokenPool — NEW | `pool` | _(PENDING post-broadcast)_ | Paired with wON proxy. Replaces old pool row above. |
 
 ### BSC mainnet (chain id 56) — artifact `deployments/56.json`
 

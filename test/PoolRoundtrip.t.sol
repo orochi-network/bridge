@@ -16,6 +16,7 @@ import {
 } from "@chainlink/contracts/src/v0.8/vendor/openzeppelin-solidity/v4.8.3/contracts/token/ERC20/IERC20.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
+import {DeployWON} from "./helpers/DeployWON.sol";
 import {MockRouter} from "./mocks/MockRouter.sol";
 import {MockRMN} from "./mocks/MockRMN.sol";
 
@@ -74,10 +75,10 @@ contract PoolRoundtripTest is Test {
 
         // ── ETH side deploy ─────────────────────────────────────────────────
         // Need an ERC20 to back wON; for this isolated test it's never deposited so a
-        // placeholder ERC20 with no supply is fine (except in the auto-unwrap test).
+        // placeholder ERC20 with no supply is fine (except the covered-reserve mint test,
+        // which `deal`s onEth to alice to seed the reserve).
         onEth = new MockON("ON", 0, address(0xdead));
-        vm.prank(admin);
-        won = new WrappedON(IERC20(address(onEth)), admin);
+        won = DeployWON.deploy(IERC20(address(onEth)), admin, admin);
         ethPool = new BurnMintTokenPool(
             IBurnMintERC20(address(won)), 18, new address[](0), address(ethRmn), address(ethRouter)
         );
@@ -171,14 +172,14 @@ contract PoolRoundtripTest is Test {
         assertEq(won.totalSupply(), amount);
     }
 
-    /// @notice Issue #1 (pool-level): when the wON wrap reserve fully covers a BSC→ETH arrival,
-    ///         `mint` auto-unwraps — delivering native ON to the receiver and minting 0 wON.
-    ///         `totalSupply` is unchanged and `ccipMintHeadroomUsed` stays at zero.
+    /// @notice Issue #48 (pool-level): even when the wON wrap reserve fully covers a BSC→ETH
+    ///         arrival, the OffRamp→`mint` path delivers wON (the registered token) — never
+    ///         native ON. `totalSupply` grows by the bridged amount and `ccipMintHeadroomUsed`
+    ///         is incremented; the reserve is untouched.
     ///
-    ///         Differences from `test_BscToEth_LockAndMint`: alice seeds the reserve via
-    ///         `deposit` before the OffRamp call, a fresh `carol` receives the bridged amount,
-    ///         and the assertions check native ON rather than wON.
-    function test_BscToEth_AutoUnwrapWhenReserveCovers() public {
+    ///         Differences from `test_BscToEth_LockAndMint`: alice seeds a covering reserve via
+    ///         `deposit` before the OffRamp call, and a fresh `carol` receives the bridged wON.
+    function test_BscToEth_MintsWonEvenWhenReserveCovers() public {
         uint256 amount = 1000 ether;
         address carol = makeAddr("carol");
 
@@ -190,8 +191,9 @@ contract PoolRoundtripTest is Test {
         vm.stopPrank();
 
         // Capture state AFTER alice's deposit: totalSupply == amount (alice holds wON),
-        // reserve == amount. The auto-unwrap test will leave totalSupply unchanged.
+        // reserve == amount. The mint must grow totalSupply by `amount` and leave the reserve.
         uint256 supplyBefore = won.totalSupply();
+        uint256 reserveBefore = onEth.balanceOf(address(won));
         uint256 carolOnBefore = onEth.balanceOf(carol);
 
         // OffRamp delivers 1000 ON worth from BSC to carol on ETH.
@@ -210,10 +212,11 @@ contract PoolRoundtripTest is Test {
         Pool.ReleaseOrMintOutV1 memory outMint = ethPool.releaseOrMint(inMint);
 
         assertEq(outMint.destinationAmount, amount, "destinationAmount");
-        assertEq(onEth.balanceOf(carol), carolOnBefore + amount, "carol got native ON");
-        assertEq(won.balanceOf(carol), 0, "no wON minted to carol");
-        assertEq(won.totalSupply(), supplyBefore, "totalSupply unchanged (auto-unwrap)");
-        assertEq(won.ccipMintHeadroomUsed(), 0, "cap counter untouched");
+        assertEq(won.balanceOf(carol), amount, "carol got wON 1:1");
+        assertEq(onEth.balanceOf(carol), carolOnBefore, "carol got no native ON");
+        assertEq(won.totalSupply(), supplyBefore + amount, "totalSupply grew by bridged amount");
+        assertEq(onEth.balanceOf(address(won)), reserveBefore, "reserve untouched by mint");
+        assertEq(won.ccipMintHeadroomUsed(), amount, "cap counter incremented");
     }
 
     // ─── Direction 2: ETH → BSC (burn wON on ETH, release ON on BSC) ──────────

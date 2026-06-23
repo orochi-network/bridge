@@ -94,13 +94,14 @@ cast call $BSC_ON 'totalSupply()(uint256)' --rpc-url $BSC_RPC
 
 If any mint surface is present and gated to an address that could plausibly mint more, halt the deployment — the cap-vs-supply relationship is load-bearing for the entire CCIP-7 / cap-replenishment safety story.
 
-**Auto-unwrap on BSC→ETH arrivals.** When a BSC→ETH CCIP message arrives, `WrappedON.mint`
-first checks whether `ON.balanceOf(wON) >= amount` (the ETH-side reserve). If so, it
-transfers native ON directly to the receiver (all-or-nothing) and emits `CCIPAutoUnwrapped`
-without incrementing `ccipMintHeadroomUsed` — the receiver gets canonical ETH ON, not wON.
-If the reserve does not cover the full amount, it falls through to the standard wON mint
-path. Operators should expect `CCIPAutoUnwrapped` events during normal operation whenever
-the reserve holds sufficient ON; this is expected and benign.
+**BSC→ETH arrivals always deliver wON.** When a BSC→ETH CCIP message arrives, `WrappedON.mint`
+always mints `amount` wON (the registered token) to the receiver — EOA or contract — and emits
+`CCIPMinted`. It never reads the ETH-side reserve and never delivers native ON, so the asset a
+receiver gets is deterministic and not front-runnable via the permissionless `deposit`/`withdraw`
+reserve (issue #48). A holder who wants native ON calls `withdraw` against the reserve like any
+other holder. Consequence for monitoring: the reserve (`ON.balanceOf(wON)`) only ever decreases
+via `withdraw`, never via an inbound CCIP message — a reserve drop with no matching `Unwrapped`
+event is anomalous.
 
 **Incident response: an inbound CCIP message reverting with `CCIPMintCapExceeded`.** The mint
 cap makes `WrappedON.mint` — and therefore the offRamp's `releaseOrMint` — revert once
@@ -188,7 +189,7 @@ This step is a no-op on mainnet — Helper's `1` / `56` branches already point a
 make deploy-eth RPC=sepolia
 ```
 
-This runs 01 → 02 → 03 → 04 → 05 in sequence. Writes addresses to `deployments/11155111.json`.
+This runs 01 → 02 → 03 → 04 → 05 in sequence. Script 01 deploys three contracts: a `TimelockController` (48h delay), the `WrappedON` implementation, and an `ERC1967Proxy` that calls `initialize(onToken, deployer, timelock)`. Artifacts are written to `deployments/11155111.json` under keys `wrappedON` (proxy), `wrappedONImpl`, and `wrappedONTimelock`. All subsequent scripts (02–06) consume `wrappedON` (the proxy address).
 
 ### 1.2 BSC (testnet)
 
@@ -261,6 +262,7 @@ The single target runs the handoff sequentially against both chains with the sam
 Each per-chain invocation:
 - Calls `pool.transferOwnership(multisig)` (two-step Ownable).
 - (ETH only) Grants wON `DEFAULT_ADMIN_ROLE` to the multisig and proposes the new CCIP admin (two-step — multisig must call `acceptCCIPAdmin`). The deployer renounces `DEFAULT_ADMIN_ROLE` in 3.4. Note: `deposit` is permissionless — there is no `LIQUIDITY_MANAGER_ROLE` to grant or manage.
+- (ETH only) Grants multisig `PAUSER_ROLE` on wON and the `PROPOSER_ROLE` + `EXECUTOR_ROLE` + `CANCELLER_ROLE` on the `TimelockController`. The deployer keeps its own copies of these (alongside `DEFAULT_ADMIN_ROLE`) until the separate `RenounceDeployerAdmin` step in 3.4 — they are NOT renounced in `TransferOwnership`. `UPGRADER_ROLE` was set to the timelock at `initialize` and is never held by the deployer or the multisig.
 - Calls `TokenAdminRegistry.transferAdminRole(token, multisig)` (two-step).
 
 **Minimize the handoff window (`DEP-3` + `CCIP-1` — legacy audit tags H-2 + C-1).** Between the grant in 3.1 and the multisig accepts in 3.2, the deployer EOA still holds:
@@ -323,10 +325,12 @@ make renounce RPC=eth MULTISIG=0x<safe-address>
 
 The script now pre-asserts (`DEP-3` — legacy audit tag H-1):
 - Multisig holds `DEFAULT_ADMIN_ROLE` on wON.
+- Multisig holds `PAUSER_ROLE` on wON.
+- Multisig holds the `PROPOSER_ROLE` + `EXECUTOR_ROLE` + `CANCELLER_ROLE` on the `TimelockController`.
 - Multisig is `getCCIPAdmin()` (i.e. it called `acceptCCIPAdmin`).
-- The deployer still holds the role at call time.
+- The deployer still holds the roles at call time.
 
-Then calls `won.renounceRole(DEFAULT_ADMIN_ROLE, deployer)`. After this point, only the multisig can grant/revoke wON roles. `deposit` is permissionless — no liquidity-manager role exists. **Do not skip this step.**
+Then renounces the deployer's own `DEFAULT_ADMIN_ROLE` + `PAUSER_ROLE` on wON and `PROPOSER_ROLE` + `EXECUTOR_ROLE` + `CANCELLER_ROLE` on the `TimelockController`. After this point, only the multisig can grant/revoke wON roles, pause/unpause, or schedule upgrades; `UPGRADER_ROLE` remains on the timelock (never held by an EOA). `deposit` is permissionless — no liquidity-manager role exists. **Do not skip this step.**
 
 ---
 
@@ -386,7 +390,7 @@ These contracts are non-upgradeable. To replace a pool:
 
 ### 4.4 Redeploy (new wON)
 
-Use this procedure when the wON contract must be replaced (e.g. the 2026-06-23 redeploy for auto-unwrap + permissionless deposit). The existing BSC `LockReleaseTokenPool` stays in place; only the ETH side is redeployed.
+Use this procedure when the wON contract must be replaced (e.g. the 2026-06-23 redeploy for permissionless deposit + UUPS upgradeability). The existing BSC `LockReleaseTokenPool` stays in place; only the ETH side is redeployed.
 
 **Context for the 2026-06-23 redeploy.** The current on-chain wON (`0x98d6…606`) and its ETH `BurnMintTokenPool` (`0xE0b7…8A72`) are clean — no circulating wON holders, no reserve. The deployer EOA still owns both pools and holds `DEFAULT_ADMIN_ROLE` on wON (handoff not yet run). No reserve migration is needed.
 
@@ -488,6 +492,81 @@ the Ethereum side** — this is enforced operationally.
 4. Post-incident: lower the ETH→BSC rate-limit capacity (§4.1) so accepted
    outbound volume cannot again outrun BSC liquidity.
 
+### 4.6 Emergency pause
+
+The ops multisig holds `PAUSER_ROLE` on the wON proxy. Pause halts the value paths — `mint`, all `burn` overloads, `deposit`, and `withdraw` — while leaving plain ERC20 `transfer`/`transferFrom` live so existing wON holders can still move tokens.
+
+**Invoke from the multisig (Safe UI or SDK):**
+
+```
+Target: <wrappedON proxy address from deployments/1.json>
+Function: pause()
+```
+
+**To resume:**
+
+```
+Target: <wrappedON proxy address>
+Function: unpause()
+```
+
+Pause is a liveness tool, not a theft-prevention tool — it cannot prevent a compromised `MINTER_ROLE` pool from minting nor stop ERC20 transfers. A compromised `PAUSER_ROLE` can indefinitely halt value paths but cannot steal funds (griefing only). Treat any unexpected `Paused(address)` event as a Critical alert. Do not leave the bridge paused without a documented incident reason and a scheduled resume.
+
+### 4.7 Upgrading the wON implementation
+
+wON is UUPS-upgradeable via `upgradeToAndCall` on the proxy, gated by `UPGRADER_ROLE` (held by the `TimelockController` with a 48h default delay). The proxy address never changes; only the implementation slot rotates.
+
+**Before upgrading:**
+
+1. Verify the new implementation compiles cleanly: `forge build`.
+2. Check storage-layout compatibility manually — the new impl MUST NOT reorder or resize fields in the ERC-7201 `WrappedONStorage` struct. Adding new fields at the END of the struct is safe.
+3. Run the full test suite against the new impl: `make test`.
+
+**Upgrade procedure (multisig + timelock):**
+
+```bash
+# Step 1: deploy the new implementation (no proxy interaction yet)
+forge create src/WrappedON.sol:WrappedON \
+  --rpc-url eth \
+  --account deployer
+# Note the deployed implementation address: <newImpl>
+
+# Step 2: schedule the upgrade via the TimelockController (from the multisig)
+# calldata = abi.encodeCall(UUPSUpgradeable.upgradeToAndCall, (<newImpl>, ""))
+# Schedule with salt=0x0 and delay=172800 (48h in seconds)
+# From the Safe UI, call:
+#   Target: <wrappedONTimelock>
+#   Function: schedule(address target, uint256 value, bytes calldata data,
+#                      bytes32 predecessor, bytes32 salt, uint256 delay)
+#   Args: target=<wrappedON proxy>, value=0, data=<upgradeToAndCall calldata>,
+#         predecessor=0x0, salt=<chosen salt>, delay=172800
+```
+
+Wait 48 hours (the `TimelockController` enforces the delay on-chain; any attempt to execute before the delay elapses reverts `TimelockController: operation is not ready`).
+
+```bash
+# Step 3: execute the upgrade after the delay has elapsed (from the multisig)
+#   Target: <wrappedONTimelock>
+#   Function: execute(address target, uint256 value, bytes calldata data,
+#                     bytes32 predecessor, bytes32 salt)
+#   Args: target=<wrappedON proxy>, value=0, data=<same calldata>, predecessor=0x0, salt=<same salt>
+```
+
+**After upgrading:**
+
+```bash
+# Verify the implementation slot now points at <newImpl>:
+cast storage <wrappedON proxy> \
+  0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc \
+  --rpc-url eth
+# Should equal <newImpl> (left-padded to 32 bytes).
+
+# Run verify to confirm pool wiring is still intact:
+make verify-eth RPC=eth
+```
+
+Update `deployments/1.json` to record the new `wrappedONImpl` address.
+
 ---
 
 ## Trust model: BSC reserve custody
@@ -519,6 +598,8 @@ This means the multisig effectively has custody of the BSC-side locked-ON reserv
 | `CCIPMinted` cumulative > BSC `IERC20(ON).balanceOf(LockReleaseTokenPool)` | wON ↔ BSC pool | **Critical** |
 | `BSC_ON.balanceOf(BSC pool)` < ETH→BSC rate-limit capacity + buffer (M2 / CCIP-2 — stuck-transfer precursor; see §4.5) | BSC pool ↔ ETH pool config | High |
 | `CCIPAdminProposalCancelled` | wON | High |
+| `Upgraded(implementation)` (ERC1967) | wON proxy | **Critical** |
+| `Paused(account)` / `Unpaused(account)` | wON | High |
 | Outbound / inbound rate-limit bucket exhausted | both pools | Medium |
 
 **Rationale for the post-handoff additions (round-8 review):**

@@ -2,6 +2,7 @@
 pragma solidity 0.8.34;
 
 import {Script, console} from "forge-std/Script.sol";
+import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 
 import {WrappedON} from "../src/WrappedON.sol";
 import {Helper} from "./Helper.sol";
@@ -155,6 +156,51 @@ contract TransferOwnership is Script, Helper {
                 console.log("wON DEFAULT_ADMIN_ROLE granted to:", multisig);
             }
 
+            // Grant PAUSER_ROLE to the multisig so it can halt the bridge in an emergency.
+            // The deployer renounces its own PAUSER_ROLE in RenounceDeployerAdmin.
+            bytes32 pauserRole = won.PAUSER_ROLE();
+            if (won.hasRole(pauserRole, multisig)) {
+                console.log("wON PAUSER_ROLE already held by multisig - skipping grant.");
+            } else {
+                won.grantRole(pauserRole, multisig);
+                console.log("wON PAUSER_ROLE granted to:", multisig);
+            }
+
+            // ── TimelockController role handoff ──
+            // The deployer holds PROPOSER_ROLE + CANCELLER_ROLE + EXECUTOR_ROLE on the
+            // timelock (set at deploy time in script 01). Transfer them to the multisig
+            // so the multisig can propose, execute, and cancel upgrades. The deployer
+            // renounces its copies in RenounceDeployerAdmin. UPGRADER_ROLE stays on the
+            // timelock (set at wON initialize) — do not move it.
+            address timelockAddr = Deployments.tryReadAddress(block.chainid, "wrappedONTimelock");
+            require(
+                timelockAddr != address(0),
+                "wrappedONTimelock address not recorded in deployments JSON (run script 01 first)"
+            );
+            TimelockController tl = TimelockController(payable(timelockAddr));
+            bytes32 proposerRole = tl.PROPOSER_ROLE();
+            bytes32 executorRole = tl.EXECUTOR_ROLE();
+            bytes32 cancellerRole = tl.CANCELLER_ROLE();
+
+            if (tl.hasRole(proposerRole, multisig)) {
+                console.log("Timelock PROPOSER_ROLE already held by multisig - skipping grant.");
+            } else {
+                tl.grantRole(proposerRole, multisig);
+                console.log("Timelock PROPOSER_ROLE granted to:", multisig);
+            }
+            if (tl.hasRole(executorRole, multisig)) {
+                console.log("Timelock EXECUTOR_ROLE already held by multisig - skipping grant.");
+            } else {
+                tl.grantRole(executorRole, multisig);
+                console.log("Timelock EXECUTOR_ROLE granted to:", multisig);
+            }
+            if (tl.hasRole(cancellerRole, multisig)) {
+                console.log("Timelock CANCELLER_ROLE already held by multisig - skipping grant.");
+            } else {
+                tl.grantRole(cancellerRole, multisig);
+                console.log("Timelock CANCELLER_ROLE granted to:", multisig);
+            }
+
             // Two-step CCIP admin handoff (see WrappedON M-7): propose now; multisig must
             // call `acceptCCIPAdmin` to take possession. Keeps a typo'd MULTISIG from
             // permanently stranding the role.
@@ -234,13 +280,62 @@ contract RenounceDeployerAdmin is Script, Helper {
 
         address pool = Deployments.tryReadAddress(block.chainid, "pool");
 
-        _assertReadyToRenounce(won, multisig, deployer, pool, cfg.tokenAdminRegistry);
+        address timelockAddr = Deployments.tryReadAddress(block.chainid, "wrappedONTimelock");
+        require(
+            timelockAddr != address(0),
+            "wrappedONTimelock address not recorded in deployments JSON (run script 01 first)"
+        );
+        TimelockController tl = TimelockController(payable(timelockAddr));
+
+        // Includes the timelock-role lockout guard: the multisig must already hold the
+        // timelock's PROPOSER/EXECUTOR/CANCELLER roles before the deployer renounces its
+        // own copies below — otherwise the self-administered timelock is left with no
+        // proposer/executor and upgrades become permanently impossible.
+        _assertReadyToRenounce(won, multisig, deployer, pool, cfg.tokenAdminRegistry, timelockAddr);
 
         vm.startBroadcast();
-        won.renounceRole(adminRole, deployer);
+        if (won.hasRole(adminRole, deployer)) {
+            won.renounceRole(adminRole, deployer);
+        }
+
+        // Renounce the deployer's PAUSER_ROLE on wON (multisig already holds it from
+        // the _handoff step). Only renounce when held to avoid spurious reverts on
+        // re-runs where the deployer already renounced.
+        bytes32 pauserRole = won.PAUSER_ROLE();
+        if (won.hasRole(pauserRole, deployer)) {
+            won.renounceRole(pauserRole, deployer);
+            console.log("Deployer", deployer, "renounced PAUSER_ROLE on wON");
+        } else {
+            console.log("Deployer does not hold PAUSER_ROLE - skipping renounce (already renounced).");
+        }
+
+        // Renounce the deployer's timelock roles. The multisig already holds them from
+        // the _handoff step. The timelock itself retains DEFAULT_ADMIN_ROLE (self-admin)
+        // so the roles can still be managed via timelocked proposals.
+        bytes32 tlProposerRole = tl.PROPOSER_ROLE();
+        bytes32 tlExecutorRole = tl.EXECUTOR_ROLE();
+        bytes32 tlCancellerRole = tl.CANCELLER_ROLE();
+        if (tl.hasRole(tlProposerRole, deployer)) {
+            tl.renounceRole(tlProposerRole, deployer);
+            console.log("Deployer", deployer, "renounced PROPOSER_ROLE on timelock");
+        } else {
+            console.log("Deployer does not hold timelock PROPOSER_ROLE - skipping (already renounced).");
+        }
+        if (tl.hasRole(tlExecutorRole, deployer)) {
+            tl.renounceRole(tlExecutorRole, deployer);
+            console.log("Deployer", deployer, "renounced EXECUTOR_ROLE on timelock");
+        } else {
+            console.log("Deployer does not hold timelock EXECUTOR_ROLE - skipping (already renounced).");
+        }
+        if (tl.hasRole(tlCancellerRole, deployer)) {
+            tl.renounceRole(tlCancellerRole, deployer);
+            console.log("Deployer", deployer, "renounced CANCELLER_ROLE on timelock");
+        } else {
+            console.log("Deployer does not hold timelock CANCELLER_ROLE - skipping (already renounced).");
+        }
         vm.stopBroadcast();
 
-        require(!won.hasRole(adminRole, deployer), "renounce failed: deployer still has role");
+        require(!won.hasRole(adminRole, deployer), "renounce failed: deployer still has DEFAULT_ADMIN_ROLE");
         console.log("Deployer", deployer, "renounced DEFAULT_ADMIN_ROLE on wON");
         // SECURITY: DEP-3 — renounce is ETH-only; BSC pool ownership is enforced on a
         // separate chain. Remind the operator to independently verify the BSC handoff
@@ -261,14 +356,44 @@ contract RenounceDeployerAdmin is Script, Helper {
     ///      so an operator with the most common mistake (multisig hasn't accepted the
     ///      wON role grant) sees a precise message rather than a generic
     ///      pool/registry-not-handed-off error.
-    function _assertReadyToRenounce(WrappedON won, address multisig, address deployer, address pool, address registry)
-        internal
-        view
-    {
+    function _assertReadyToRenounce(
+        WrappedON won,
+        address multisig,
+        address deployer,
+        address pool,
+        address registry,
+        address timelock
+    ) internal view {
         bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
         require(won.hasRole(adminRole, deployer), "deployer does not hold admin role");
         require(won.hasRole(adminRole, multisig), "multisig does NOT hold admin role yet");
         require(won.getCCIPAdmin() == multisig, "wON ccipAdmin not yet accepted by multisig");
+        require(won.hasRole(won.PAUSER_ROLE(), multisig), "multisig does NOT hold PAUSER_ROLE yet");
+
+        // LOCKOUT GUARD: the timelock was deployed self-administered (admin=address(0) in
+        // script 01), so its PROPOSER/EXECUTOR/CANCELLER roles can only be added via a
+        // timelocked proposal. If the deployer renounces its copies (below in `run()`)
+        // while the multisig does NOT yet hold them, the timelock is left with no
+        // proposer/executor and the upgrade path is PERMANENTLY locked. Block the renounce
+        // until the multisig holds all three. Guarded on `timelock != address(0)` for the
+        // same reason the caller guards the timelock read — a missing entry surfaces its
+        // own diagnostic in `run()` before this is reached, and tests can drive the
+        // wON-only branch by passing address(0).
+        if (timelock != address(0)) {
+            TimelockController tl = TimelockController(payable(timelock));
+            require(
+                tl.hasRole(tl.PROPOSER_ROLE(), multisig),
+                "multisig does NOT hold timelock PROPOSER_ROLE yet (re-run TransferOwnership)"
+            );
+            require(
+                tl.hasRole(tl.EXECUTOR_ROLE(), multisig),
+                "multisig does NOT hold timelock EXECUTOR_ROLE yet (re-run TransferOwnership)"
+            );
+            require(
+                tl.hasRole(tl.CANCELLER_ROLE(), multisig),
+                "multisig does NOT hold timelock CANCELLER_ROLE yet (re-run TransferOwnership)"
+            );
+        }
 
         // Block the renounce until the pool and registry handoffs on THIS chain have
         // fully accepted into the multisig. wON itself is unaffected by either handoff
