@@ -4,6 +4,7 @@ pragma solidity 0.8.34;
 import {Test} from "forge-std/Test.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 
 import {RenounceDeployerAdmin} from "../script/06_TransferOwnership.s.sol";
 import {WrappedON} from "../src/WrappedON.sol";
@@ -56,9 +57,10 @@ contract RenounceDeployerAdminHarness is RenounceDeployerAdmin {
         address multisig,
         address deployer,
         address pool,
-        address registry
+        address registry,
+        address timelock
     ) external view {
-        _assertReadyToRenounce(won, multisig, deployer, pool, registry);
+        _assertReadyToRenounce(won, multisig, deployer, pool, registry, timelock);
     }
 }
 
@@ -79,6 +81,7 @@ contract Script06RenounceTest is Test {
     MockON internal onToken;
     MockOwnedPool internal pool;
     MockRegistry internal registry;
+    TimelockController internal timelock;
 
     address internal deployer = makeAddr("deployer");
     address internal multisig = makeAddr("multisig");
@@ -93,14 +96,30 @@ contract Script06RenounceTest is Test {
         pool = new MockOwnedPool();
         registry = new MockRegistry();
 
+        // Timelock mirroring script 01: deployer is the initial proposer/executor.
+        // The fixture uses `address(this)` as the timelock admin (rather than the
+        // self-administered address(0) of the real deploy) only so the test can grant the
+        // multisig's roles directly below — the lockout guard under test only reads
+        // `hasRole(PROPOSER/EXECUTOR/CANCELLER, multisig)`, which is unaffected by the
+        // admin choice.
+        address[] memory props = new address[](1);
+        props[0] = deployer;
+        timelock = new TimelockController(0, props, props, address(this));
+
         // Default state for the happy path: full handoff complete.
-        // wON: multisig has DEFAULT_ADMIN_ROLE; multisig is the ccipAdmin.
+        // wON: multisig has DEFAULT_ADMIN_ROLE + PAUSER_ROLE; multisig is the ccipAdmin.
         vm.startPrank(deployer);
         won.grantRole(won.DEFAULT_ADMIN_ROLE(), multisig);
+        won.grantRole(won.PAUSER_ROLE(), multisig);
         won.setCCIPAdmin(multisig); // proposes
         vm.stopPrank();
         vm.prank(multisig);
         won.acceptCCIPAdmin();
+
+        // Timelock: multisig holds all three handed-off roles (complete handoff).
+        timelock.grantRole(timelock.PROPOSER_ROLE(), multisig);
+        timelock.grantRole(timelock.EXECUTOR_ROLE(), multisig);
+        timelock.grantRole(timelock.CANCELLER_ROLE(), multisig);
 
         // Pool ownership: multisig.
         pool.setOwner(multisig);
@@ -110,7 +129,9 @@ contract Script06RenounceTest is Test {
     }
 
     function _call() internal view {
-        harness.exposeAssertReadyToRenounce(won, multisig, deployer, address(pool), address(registry));
+        harness.exposeAssertReadyToRenounce(
+            won, multisig, deployer, address(pool), address(registry), address(timelock)
+        );
     }
 
     // ─── Happy path ─────────────────────────────────────────────────────────────
@@ -155,11 +176,49 @@ contract Script06RenounceTest is Test {
         _call();
     }
 
+    function test_RevertsWhenMultisigLacksPauserRole() public {
+        // Revoke the PAUSER_ROLE grant set up in setUp.
+        bytes32 pauserRole = won.PAUSER_ROLE();
+        vm.prank(deployer);
+        won.revokeRole(pauserRole, multisig);
+
+        vm.expectRevert(bytes("multisig does NOT hold PAUSER_ROLE yet"));
+        _call();
+    }
+
+    // ─── Timelock-role lockout guard ─────────────────────────────────────────────
+
+    /// @notice LOCKOUT GUARD: the self-administered timelock (admin=address(0)) can only
+    ///         gain proposer/executor via a timelocked proposal. If the deployer renounces
+    ///         its timelock roles while the multisig lacks them, the upgrade path is
+    ///         PERMANENTLY locked. `_assertReadyToRenounce` must block this. Revoking the
+    ///         multisig's PROPOSER_ROLE (set up in setUp) must surface the typed message
+    ///         rather than letting the renounce proceed.
+    function test_RevertsWhenMultisigLacksTimelockRoles() public {
+        // Revoke the PROPOSER_ROLE grant set up in setUp (test contract is timelock admin).
+        timelock.revokeRole(timelock.PROPOSER_ROLE(), multisig);
+
+        vm.expectRevert(bytes("multisig does NOT hold timelock PROPOSER_ROLE yet (re-run TransferOwnership)"));
+        _call();
+    }
+
+    /// @notice The lockout guard is skipped when no timelock address is supplied (mirrors
+    ///         the script's `timelock != address(0)` guard). Even with the multisig lacking
+    ///         every timelock role, passing `address(0)` must let the wON-only checks pass.
+    function test_PassesWhenTimelockAddressZero() public {
+        timelock.revokeRole(timelock.PROPOSER_ROLE(), multisig);
+        timelock.revokeRole(timelock.EXECUTOR_ROLE(), multisig);
+        timelock.revokeRole(timelock.CANCELLER_ROLE(), multisig);
+
+        // Passing address(0) for the timelock skips the lockout guard entirely.
+        harness.exposeAssertReadyToRenounce(won, multisig, deployer, address(pool), address(registry), address(0));
+    }
+
     // ─── Pool ownership failures ────────────────────────────────────────────────
 
     function test_RevertsWhenPoolAddressMissing() public {
         vm.expectRevert(bytes("pool address not recorded in deployments JSON"));
-        harness.exposeAssertReadyToRenounce(won, multisig, deployer, address(0), address(registry));
+        harness.exposeAssertReadyToRenounce(won, multisig, deployer, address(0), address(registry), address(timelock));
     }
 
     function test_RevertsWhenPoolOwnerNotMultisig() public {

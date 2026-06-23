@@ -174,10 +174,11 @@ contract Script08VerifyTest is Test {
 
         WrappedON won = DeployWON.deploy(IERC20(address(on)), deployer, deployer);
         vm.startPrank(deployer);
-        // Simulate partial handoff: multisig holds the admin role, but deployer hasn't
-        // renounced yet. CCIP admin already transferred so the revert is on
-        // RoleNotRenounced rather than the ccipAdmin RoleMissing branch.
+        // Simulate partial handoff: multisig holds the admin role + PAUSER_ROLE, but
+        // deployer hasn't renounced yet. CCIP admin already transferred so the revert is
+        // on RoleNotRenounced rather than the ccipAdmin RoleMissing branch.
         won.grantRole(won.DEFAULT_ADMIN_ROLE(), multisig);
+        won.grantRole(won.PAUSER_ROLE(), multisig);
         won.setCCIPAdmin(multisig);
         vm.stopPrank();
         vm.prank(multisig);
@@ -252,6 +253,7 @@ contract Script08VerifyTest is Test {
         vm.startPrank(deployer);
         bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
         won.grantRole(adminRole, multisig);
+        won.grantRole(won.PAUSER_ROLE(), multisig);
         won.setCCIPAdmin(multisig);
         // OZ 5.x: `renounceRole(role, callerConfirmation)` requires callerConfirmation == _msgSender();
         // inside this `startPrank(deployer)` block _msgSender() is the deployer.
