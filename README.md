@@ -43,7 +43,7 @@ make build            # forge build --sizes
 ### 3. Run the test suite (no RPC needed)
 
 ```bash
-make test             # 130 tests, no fork (126 unit/integration + 4 stateful invariants)
+make test             # 139 tests, no fork (135 unit/integration + 4 stateful invariants)
 ```
 
 Targeted subsets:
@@ -56,7 +56,7 @@ make test-e2e         # everything except WrappedON unit tests and forks
 Fork tests (live mainnet RPCs required):
 
 ```bash
-make test-fork ETH_RPC=https://… BSC_RPC=https://…   # 9 tests
+make test-fork ETH_RPC=https://… BSC_RPC=https://…   # 10 tests
 ```
 
 Coverage summary:
@@ -96,7 +96,7 @@ make deploy-eth RPC=sepolia
 make deploy-bsc RPC=bsc_testnet
 ```
 
-Each script writes its outputs to `deployments/<chainId>.json` (key: `wrappedON`, `pool`). Subsequent scripts read from the same file, so order matters within a chain but the two chains can be deployed in either order.
+Script 01 (ETH) deploys three contracts in sequence: a `TimelockController` (48h delay), the `WrappedON` implementation, and an `ERC1967Proxy` that calls `initialize`. Artifacts are written to `deployments/<chainId>.json` under three keys: `wrappedON` (the proxy — this is the token registered with CCIP), `wrappedONImpl`, and `wrappedONTimelock`. All other scripts consume `wrappedON` (the proxy). Subsequent scripts read from the same file, so order matters within a chain but the two chains can be deployed in either order.
 
 > **Recovery after mid-sequence failure** (SECURITY: OPS-5). If any of the chained scripts in `make deploy-eth` / `make deploy-bsc` fails (RPC timeout, nonce collision, gas exhaustion), simply re-run the same `make` target. Every script is idempotent: 01/02 skip when their artifact entry exists; 03 skips role grants that already landed; 04 probes the registry state before broadcasting; 05 skips wiring that's already in place. Do NOT manually re-run individual scripts unless you have confirmed the deployment artifact JSON is consistent with on-chain state — manual recovery is the most common path to inconsistent state.
 
@@ -141,7 +141,7 @@ make handoff-all ETH_RPC=eth BSC_RPC=bsc MULTISIG=0x<safe-address>
 This runs the handoff sequentially against ETH then BSC. There is no atomic rollback — if the first leg succeeds and the second fails, the bridge is half-handed-off and you must re-run the second leg. The handoff steps are idempotent (multisig grants are no-ops if already in place; `transferOwnership` and `transferAdminRole` overwrite the pending acceptor), so re-running is safe. Each invocation:
 
 1. `pool.transferOwnership(multisig)` (two-step Ownable — multisig must `acceptOwnership` later).
-2. **ETH only**: grants wON `DEFAULT_ADMIN_ROLE` to the multisig, **proposes** the multisig as new CCIP admin (two-step — multisig must `acceptCCIPAdmin` later).
+2. **ETH only**: grants wON `DEFAULT_ADMIN_ROLE` to the multisig, **proposes** the multisig as new CCIP admin (two-step — multisig must `acceptCCIPAdmin` later). Also grants multisig `PAUSER_ROLE` on wON and the timelock's proposer/executor/canceller roles on the `TimelockController` (so the multisig can schedule and execute upgrades and use the emergency pause). The deployer keeps its own `PAUSER_ROLE` + timelock roles until the separate renounce step (step 10) — they are NOT renounced here.
 3. `TokenAdminRegistry.transferAdminRole(token, multisig)` (two-step — multisig must `acceptAdminRole` later).
 
 From the multisig, queue these transactions:
@@ -150,9 +150,11 @@ From the multisig, queue these transactions:
 |---|---|
 | ETH | `pool.acceptOwnership()` on the BurnMintTokenPool |
 | ETH | `registry.acceptAdminRole(wON)` on TokenAdminRegistry |
-| ETH | `wON.acceptCCIPAdmin()` on wON |
+| ETH | `wON.acceptCCIPAdmin()` on wON (proxy) |
 | BSC | `pool.acceptOwnership()` on the LockReleaseTokenPool |
 | BSC | `registry.acceptAdminRole(ON_BSC)` on TokenAdminRegistry |
+
+The multisig already holds `PAUSER_ROLE` on wON and the timelock proposer/executor/canceller roles after the `TransferOwnership` step completes — no accept step needed for those (they are direct `grantRole` calls from the deployer). The deployer's own copies of `PAUSER_ROLE` + the timelock roles (and `DEFAULT_ADMIN_ROLE`) are renounced later in the `RenounceDeployerAdmin` step (step 10 / `make renounce`), whose pre-flight gate first asserts the multisig holds all of them.
 
 Re-verify with `MULTISIG` set:
 
@@ -169,7 +171,7 @@ Only after step 9's `acceptCCIPAdmin` has landed:
 make renounce RPC=eth MULTISIG=0x<safe-address>
 ```
 
-The script pre-asserts that the multisig already holds `DEFAULT_ADMIN_ROLE` AND has accepted the CCIP-admin role. If either is missing, the script reverts before renouncing — preventing an admin-less, permanently-unmanageable contract.
+The `RenounceDeployerAdmin` script pre-asserts that the multisig already holds `DEFAULT_ADMIN_ROLE`, `PAUSER_ROLE`, the timelock proposer/executor/canceller roles, AND has accepted the CCIP-admin role. If any is missing, the script reverts before renouncing — preventing an admin-less, permanently-unmanageable contract. It then renounces the deployer's own `DEFAULT_ADMIN_ROLE` + `PAUSER_ROLE` on wON and proposer/executor/canceller on the `TimelockController` (the deployer never held `UPGRADER_ROLE` — that sits on the timelock from `initialize`).
 
 ### 11. Post-launch operations
 
@@ -183,7 +185,14 @@ The script pre-asserts that the multisig already holds `DEFAULT_ADMIN_ROLE` AND 
   INBOUND_CAPACITY=200000000000000000000000  INBOUND_RATE=20000000000000000  \
   make update-limits RPC=eth
   ```
-- **Monitor** the events listed in [`RUNBOOK.md`](RUNBOOK.md#trust-model-bsc-reserve-custody) — especially `LiquidityRemoved`, `setRebalancer`, and any `RoleGranted(MINTER_ROLE / BURNER_ROLE, …)` on wON.
+- **Emergency pause** (multisig, from Safe UI):
+  Call `wON.pause()` from the multisig (which holds `PAUSER_ROLE` post-handoff). This halts `mint`, `burn*`, `deposit`, and `withdraw` on the proxy; plain ERC20 transfers stay live. Resume with `wON.unpause()`. See RUNBOOK §4.6.
+- **wON upgrade** (multisig + timelock, 48h delay):
+  1. Deploy new implementation: `forge create src/WrappedON.sol:WrappedON --rpc-url eth --account deployer`.
+  2. From the multisig, call `timelock.schedule(proxy, 0, abi.encodeCall(proxy.upgradeToAndCall, (newImpl, "")), 0, salt, 172800)`.
+  3. Wait 48h, then call `timelock.execute(proxy, 0, abi.encodeCall(proxy.upgradeToAndCall, (newImpl, "")), 0, salt)`.
+  See RUNBOOK §4.7 for the full procedure including state-preservation verification.
+- **Monitor** the events listed in [`RUNBOOK.md`](RUNBOOK.md#trust-model-bsc-reserve-custody) — especially `LiquidityRemoved`, `setRebalancer`, any `RoleGranted(MINTER_ROLE / BURNER_ROLE, …)` on wON, and `Upgraded(implementation)` on the proxy.
 - **RMN curses** halt the lane automatically. Coordinate with Chainlink ops; no operator action required.
 
 ---

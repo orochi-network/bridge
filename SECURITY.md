@@ -992,6 +992,53 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 
 ---
 
+## Upgrade model (`UPG-*`)
+
+_Added 2026-06-23: wON became UUPS-upgradeable behind an ERC1967Proxy in branch
+`feat/won-upgradeable`. The "non-upgradeable by design" stance documented in an earlier
+version of this file is superseded. History: the original rationale was "migration path =
+redeploy + re-register"; that remains an option but is no longer the only path._
+
+### UPG-1: Upgrade authority is custody-grade
+
+- **Severity:** HIGH (by design — mitigated to DESIGN ACK)
+- **Status:** DESIGN ACK (mitigations documented below)
+- **Description:** `_authorizeUpgrade` is gated by `UPGRADER_ROLE`, held by the `TimelockController`. A TimelockController whose proposer/executor roles are held by a compromised multisig can schedule and execute an upgrade to a malicious implementation, which could drain the wON reserve, mint unbacked wON past `MAX_CCIP_MINTED`, or destroy any other state. This is a custody-grade risk analogous to the BSC pool's `setRebalancer` path.
+- **Mitigations:**
+  1. **48h mandatory delay** (the `TimelockController` default; `minDelay = 172800 seconds`). Any upgrade attempt is visible on-chain for 48 hours before it can execute. Monitoring on `CallScheduled` from the timelock gives the community and security team time to respond (revoke, cancel, or redeploy).
+  2. **Emergency pause** — the multisig's `PAUSER_ROLE` lets it halt value paths immediately if a malicious upgrade is in flight, limiting damage before the timelock executes.
+  3. **Two-step handoff** — `UPGRADER_ROLE` is set at `initialize` to the deployed `TimelockController`; it is never transferred or granted to an EOA.
+  4. **Implementation address monitoring** — `Upgraded(implementation)` on the proxy (ERC1967 standard event) must be a Critical alert in the monitoring table (RUNBOOK §Trust model).
+  5. **Storage hygiene** — state is in ERC-7201 namespaced storage; accidental collision from a future impl adding fields is prevented by the namespace isolation. Field ordering in `WrappedONStorage` must not change across upgrades.
+- **Residual risk:** A compromised multisig that also holds `PAUSER_ROLE` (post-handoff) could pause AND schedule an upgrade. The 48h window is the only mitigation after that point. Key management of the multisig signers is the load-bearing control.
+
+### UPG-2: `_disableInitializers` in constructor prevents impl takeover
+
+- **Severity:** HIGH (if absent) — mitigated by code
+- **Status:** FIXED (code; present in shipped `WrappedON.sol`)
+- **Description:** An implementation contract with an open `initialize` function can be taken over by a third party (anyone can call `initialize` on the bare implementation and set themselves as admin). OZ's standard mitigation is `_disableInitializers()` in the implementation constructor.
+- **Fix:** `WrappedON` constructor calls `_disableInitializers()` with the `@custom:oz-upgrades-unsafe-allow constructor` NatSpec. Test: `test_ImplCannotBeInitialized` (or equivalent).
+- **Impact if removed:** A third party could claim `DEFAULT_ADMIN_ROLE`, `PAUSER_ROLE`, and `s_ccipAdmin` on the bare implementation (not the proxy). The implementation holds no value, but registering it in `TokenAdminRegistry` or misleading integrators about the proxy's state would be an attack surface.
+
+### UPG-3: ERC-7201 storage namespace prevents slot collision
+
+- **Severity:** MEDIUM (if unaddressed) — mitigated by code
+- **Status:** DESIGN ACK (mitigated by ERC-7201 namespacing + documented invariant)
+- **Description:** UUPS upgrades that extend storage by inserting new fields in the middle of a struct break existing storage slot mappings for all fields that follow, causing silent data corruption.
+- **Mitigation:** All persistent state lives in a single `WrappedONStorage` struct at slot `0xc9356e8aa19da270b9a132fda93e9af24668c8487450db15f9b9e8baeb751900` (the ERC-7201 namespace for `orochi.storage.WrappedON`, verified against `cast index-erc7201`). New fields may only be **appended** to the end of `WrappedONStorage`. This constraint is enforced by convention (documented in RUNBOOK §4.7), not by on-chain checks. The foundry-upgrades FFI plugin was evaluated and intentionally NOT adopted to keep CI forge-only; the storage-preservation invariant is verified instead via the upgrade state-preservation test suite.
+- **Operator note:** Any upgrade PR must include a diff showing no existing field was moved or resized. Code review is the gate.
+
+### UPG-4: Pause is liveness-only — does not prevent theft by a compromised pool
+
+- **Severity:** MEDIUM (awareness / threat-model clarity)
+- **Status:** DESIGN ACK (documented)
+- **Description:** `pause()` halts `mint`, `burn*`, `deposit`, and `withdraw` — all four value paths carry `whenNotPaused` — but ERC20 `transfer`/`transferFrom` stay live. So a paused bridge DOES block even a compromised `MINTER_ROLE` pool from minting. Pause is nonetheless an emergency stop, not theft-prevention: the underlying exploit (compromised pool, bad upgrade, etc.) still exists and needs separate remediation while paused. A compromised `PAUSER_ROLE` can only grief — indefinitely halt the value paths — and cannot move funds, since transfers stay live and pause grants no spending authority.
+- **Impact (compromised pauser):** Griefing — `mint`/`burn` halted while CCIP messages queue; `deposit`/`withdraw` halted for ETH-side users. Resumable by any multisig signer calling `unpause`.
+- **Impact (compromised pool with `MINTER_ROLE`):** A paused bridge BLOCKS the compromised pool's mint path too — pause inadvertently provides partial mitigation against a compromised pool if the multisig can pause before the attacker mints.
+- **Residual risk:** A compromised multisig could unpause immediately after pausing; the 48h timelock does not cover `pause`/`unpause` (intentional — emergency response requires speed). Key management of the Safe signers and threshold is the load-bearing control.
+
+---
+
 # Closing note
 
 This review intentionally excludes vendor library audit findings — Chainlink CCIP
