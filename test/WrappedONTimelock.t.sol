@@ -23,7 +23,7 @@ contract WrappedONTimelockTest is Test {
     WrappedON internal won;
     TimelockController internal timelock;
     address internal multisig = makeAddr("multisig");
-    uint256 internal constant DELAY = 172800; // 48h
+    uint256 internal constant DELAY = 172_800; // 48h
 
     function setUp() public {
         on = new MockON();
