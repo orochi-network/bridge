@@ -93,11 +93,11 @@ on this repository.
 | Area  | CRITICAL | HIGH | MEDIUM | LOW | INFO | Total |
 |-------|---------:|-----:|-------:|----:|-----:|------:|
 | WON   |        0 |    0 |      3 |  10 |    7 |    20 |
-| DEP   |        0 |    2 |      4 |  12 |    4 |    22 |
+| DEP   |        0 |    3 |      5 |  12 |    4 |    24 |
 | CCIP  |        0 |    1 |      6 |   4 |    3 |    14 |
 | TEST  |        0 |    2 |      9 |   9 |    0 |    20 |
 | OPS   |        0 |    2 |      4 |  18 |    6 |    30 |
-| **Total** | **0** | **7** | **26** | **53** | **20** | **106** |
+| **Total** | **0** | **8** | **27** | **53** | **20** | **108** |
 
 **Headline:** no CRITICAL findings. The custom contract surface (`WrappedON.sol`)
 is clean — the three MEDIUM WON findings are all resolved (WON-19 reversed by
@@ -466,6 +466,22 @@ ON token admin path is concluded — see CLAUDE.md "Known open items") and `OPS-
 - **Description:** A filesystem-write-attack between script 02 broadcast and script 03 read could install a `FakePool { getToken() returns wON; drain() { wON.mint(attacker, 100M); } }` and harvest `MINTER_ROLE`/`BURNER_ROLE`. The CCIP-4 check was a real defence but raised the forgery cost by a constant; DEP-22 raises it meaningfully.
 - **Impact:** Up to 100M wON mint authority granted to a forged pool if all four checks are passed.
 - **Recommendation:** Multi-surface identity probe.
+
+### DEP-23: post-deploy verification (script 08) did not check the upgrade-authority wiring
+- **Severity:** MEDIUM
+- **Status:** FIXED — `08_PostDeployVerify` now verifies the full UUPS/timelock model. `_checkUpgradeAuthority` (ETH, always-on) asserts `UPGRADER_ROLE` is held by the deployed `TimelockController`, is **self-administered** (`getRoleAdmin(UPGRADER_ROLE) == UPGRADER_ROLE` — the UPG-1 mitigation #3 bypass-closure), that `PAUSER_ROLE` keeps its `DEFAULT_ADMIN_ROLE` admin, and that the timelock `minDelay` matches the deploy-time value (`TIMELOCK_DELAY`, default 48h). `_checkDeployerRenounced` is extended to assert `PAUSER_ROLE` moved to the multisig + was renounced by the deployer, and that the deployer never holds `UPGRADER_ROLE`. `_checkTimelockHandoff` asserts the multisig holds PROPOSER/EXECUTOR/CANCELLER and the deployer renounced those plus the setup `DEFAULT_ADMIN_ROLE` (DEP-24). Tests: `test_CheckUpgradeAuthority_*`, `test_CheckTimelockHandoff_*`, `test_CheckDeployerRenounced_*` (Script08Verify.t.sol).
+- **Location:** `script/08_PostDeployVerify.s.sol`.
+- **Description:** Script 08 was written for the pre-upgradeable model and only verified pool wiring, `MINTER`/`BURNER`, and the `DEFAULT_ADMIN`/`ccipAdmin` renounce. After wON became UUPS-upgradeable, the entire upgrade-authority surface (timelock holding `UPGRADER_ROLE`, the self-admin, `PAUSER`/timelock-role handoff, `minDelay`) went unverified — `make verify-eth` would print "All checks passed" even if a misconfiguration left the 48h timelock bypassable.
+- **Impact:** A custody-grade misconfiguration (e.g. `UPGRADER_ROLE` not self-administered, or `PAUSER` not handed off) could ship undetected.
+- **Recommendation:** (Implemented) verify the upgrade-authority wiring in script 08.
+
+### DEP-24: timelock-role handoff reverts — deployer lacks admin on the self-administered timelock
+- **Severity:** HIGH (deployment-blocking)
+- **Status:** FIXED — script 01 now deploys the `TimelockController` with `admin = deployer` (the OZ setup-admin pattern) instead of `address(0)`, so the deployer holds the timelock's `DEFAULT_ADMIN_ROLE` and can grant PROPOSER/EXECUTOR/CANCELLER to the multisig during the script 06 `_handoff`. `RenounceDeployerAdmin` then renounces the deployer's SETUP-ONLY timelock `DEFAULT_ADMIN_ROLE` (after the operational-role handoff), leaving the timelock fully self-administered. Tests: `Script06TimelockHandoffTest.test_HandoffAndRenounceSucceeds` (fixed flow) + `test_OldSelfAdministeredDeploy_HandoffReverts` (locks the bug); the masking fixture in `Script06Renounce.t.sol` is corrected to use `admin = deployer`.
+- **Location:** `script/01_DeployWrappedON.s.sol`, `script/06_TransferOwnership.s.sol`.
+- **Description:** Script 01 deployed the timelock with `admin = address(0)`, so only the timelock itself held `DEFAULT_ADMIN_ROLE`. Script 06's `_handoff` calls `tl.grantRole(PROPOSER_ROLE, multisig)` **as the deployer**, which is admin'd by `DEFAULT_ADMIN_ROLE` — so the call reverts `AccessControlUnauthorizedAccount(deployer, 0x00)`. The handoff (`make handoff-all`) would revert on the ETH side. The bug was masked by `Script06Renounce.t.sol` deploying the fixture timelock with `admin = address(this)`, and by no test exercising the actual `_handoff` grant.
+- **Impact:** The multisig handoff could not complete — the bridge could be deployed but never handed off to the ops multisig (deployer EOA stuck as the sole proposer/executor).
+- **Recommendation:** (Implemented) deploy the timelock with the deployer as setup-admin; renounce it after the operational-role handoff.
 
 ---
 

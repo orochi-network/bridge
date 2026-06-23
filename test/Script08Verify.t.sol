@@ -4,6 +4,7 @@ pragma solidity 0.8.34;
 import {Test} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 import {RateLimiter} from "@chainlink/contracts-ccip/libraries/RateLimiter.sol";
 
 import {PostDeployVerify} from "../script/08_PostDeployVerify.s.sol";
@@ -90,6 +91,16 @@ contract PostDeployVerifyHarness is PostDeployVerify {
         address expectedRemoteToken
     ) external view {
         _checkRemoteLink(pool, remoteSelector, expectedRemotePool, expectedRemoteToken);
+    }
+
+    /// @notice DEP-23/24: expose the upgrade-authority and timelock-handoff checks so each
+    ///         branch can be exercised against a real proxy + `TimelockController` fixture.
+    function exposeCheckUpgradeAuthority(WrappedON won, address timelock) external view {
+        _checkUpgradeAuthority(won, timelock);
+    }
+
+    function exposeCheckTimelockHandoff(address timelock, address multisig, address deployer) external view {
+        _checkTimelockHandoff(timelock, multisig, deployer);
     }
 }
 
@@ -248,8 +259,11 @@ contract Script08VerifyTest is Test {
         _MockON18 on = new _MockON18();
         address deployer = makeAddr("deployer");
         address multisig = makeAddr("multisig");
+        // Distinct timelock: UPGRADER_ROLE lands on it (not the deployer), so the new
+        // DEP-23 "deployer must not hold UPGRADER_ROLE" assertion is satisfied.
+        address timelock = makeAddr("timelock");
 
-        WrappedON won = DeployWON.deploy(IERC20(address(on)), deployer, deployer);
+        WrappedON won = DeployWON.deploy(IERC20(address(on)), deployer, timelock);
         vm.startPrank(deployer);
         bytes32 adminRole = won.DEFAULT_ADMIN_ROLE();
         won.grantRole(adminRole, multisig);
@@ -258,11 +272,116 @@ contract Script08VerifyTest is Test {
         // OZ 5.x: `renounceRole(role, callerConfirmation)` requires callerConfirmation == _msgSender();
         // inside this `startPrank(deployer)` block _msgSender() is the deployer.
         won.renounceRole(adminRole, deployer);
+        won.renounceRole(won.PAUSER_ROLE(), deployer); // DEP-23: deployer drops PAUSER too
         vm.stopPrank();
         vm.prank(multisig);
         won.acceptCCIPAdmin();
         assertFalse(won.hasRole(adminRole, deployer));
 
         h.exposeCheckDeployerRenounced(won, multisig, deployer);
+    }
+
+    // ─── DEP-23/24: upgrade-authority + timelock-handoff checks ─────────────────
+
+    /// @dev Deploy a real TimelockController mirroring fixed script 01: `admin = deployer`
+    ///      (setup-admin), deployer is the initial proposer/executor/canceller.
+    function _realTimelock(uint256 delay, address deployer) internal returns (TimelockController) {
+        address[] memory props = new address[](1);
+        props[0] = deployer;
+        return new TimelockController(delay, props, props, deployer);
+    }
+
+    /// @dev Deploy a timelock and drive the FULL fixed handoff: grant proposer/executor/
+    ///      canceller to the multisig, renounce all the deployer's roles incl. the setup-admin.
+    function _handoffTimelock(uint256 delay, address deployer, address multisig)
+        internal
+        returns (TimelockController tl)
+    {
+        tl = _realTimelock(delay, deployer);
+        vm.startPrank(deployer);
+        tl.grantRole(tl.PROPOSER_ROLE(), multisig);
+        tl.grantRole(tl.EXECUTOR_ROLE(), multisig);
+        tl.grantRole(tl.CANCELLER_ROLE(), multisig);
+        tl.renounceRole(tl.PROPOSER_ROLE(), deployer);
+        tl.renounceRole(tl.EXECUTOR_ROLE(), deployer);
+        tl.renounceRole(tl.CANCELLER_ROLE(), deployer);
+        tl.renounceRole(tl.DEFAULT_ADMIN_ROLE(), deployer);
+        vm.stopPrank();
+    }
+
+    /// @notice DEP-23 happy path: a correctly-wired proxy + timelock passes — UPGRADER on the
+    ///         timelock, self-administered, PAUSER admin == DEFAULT_ADMIN, minDelay == 48h.
+    function test_CheckUpgradeAuthority_PassesWhenWiredCorrectly() public {
+        _MockON18 on = new _MockON18();
+        address deployer = makeAddr("deployer");
+        uint256 delay = vm.envOr("TIMELOCK_DELAY", uint256(172_800));
+        TimelockController tl = _realTimelock(delay, deployer);
+        WrappedON won = DeployWON.deploy(IERC20(address(on)), deployer, address(tl));
+        h.exposeCheckUpgradeAuthority(won, address(tl));
+    }
+
+    /// @notice DEP-23: if UPGRADER_ROLE isn't on the given timelock, verify reverts.
+    function test_CheckUpgradeAuthority_RevertsWhenUpgraderNotOnTimelock() public {
+        _MockON18 on = new _MockON18();
+        address deployer = makeAddr("deployer");
+        TimelockController tl = _realTimelock(vm.envOr("TIMELOCK_DELAY", uint256(172_800)), deployer);
+        WrappedON won = DeployWON.deploy(IERC20(address(on)), deployer, address(tl));
+        address wrong = makeAddr("wrongTimelock");
+        vm.expectRevert(abi.encodeWithSelector(PostDeployVerify.RoleMissing.selector, "UPGRADER_ROLE", wrong));
+        h.exposeCheckUpgradeAuthority(won, wrong);
+    }
+
+    /// @notice DEP-23: a timelock whose minDelay != the deploy-time value is rejected.
+    function test_CheckUpgradeAuthority_RevertsOnWrongMinDelay() public {
+        _MockON18 on = new _MockON18();
+        address deployer = makeAddr("deployer");
+        uint256 expected = vm.envOr("TIMELOCK_DELAY", uint256(172_800));
+        uint256 wrong = expected + 1;
+        TimelockController tl = _realTimelock(wrong, deployer);
+        WrappedON won = DeployWON.deploy(IERC20(address(on)), deployer, address(tl));
+        vm.expectRevert(abi.encodeWithSelector(PostDeployVerify.TimelockDelayMismatch.selector, expected, wrong));
+        h.exposeCheckUpgradeAuthority(won, address(tl));
+    }
+
+    /// @notice DEP-24 happy path: after the full handoff the timelock-role check passes.
+    function test_CheckTimelockHandoff_PassesAfterHandoff() public {
+        address deployer = makeAddr("deployer");
+        address multisig = makeAddr("multisig");
+        TimelockController tl = _handoffTimelock(172_800, deployer, multisig);
+        h.exposeCheckTimelockHandoff(address(tl), multisig, deployer);
+    }
+
+    /// @notice DEP-24: a multisig missing a timelock operational role is caught (stranded
+    ///         upgrade path).
+    function test_CheckTimelockHandoff_RevertsWhenMultisigMissingRole() public {
+        address deployer = makeAddr("deployer");
+        address multisig = makeAddr("multisig");
+        TimelockController tl = _realTimelock(172_800, deployer); // no handoff
+        vm.expectRevert(
+            abi.encodeWithSelector(PostDeployVerify.RoleMissing.selector, "timelock PROPOSER_ROLE", multisig)
+        );
+        h.exposeCheckTimelockHandoff(address(tl), multisig, deployer);
+    }
+
+    /// @notice DEP-24: if the deployer kept its SETUP-ONLY timelock DEFAULT_ADMIN_ROLE, verify
+    ///         catches it — that residual admin is an out-of-band path to grant itself
+    ///         proposer/executor and drive an upgrade.
+    function test_CheckTimelockHandoff_RevertsWhenDeployerKeptSetupAdmin() public {
+        address deployer = makeAddr("deployer");
+        address multisig = makeAddr("multisig");
+        TimelockController tl = _realTimelock(172_800, deployer);
+        vm.startPrank(deployer);
+        tl.grantRole(tl.PROPOSER_ROLE(), multisig);
+        tl.grantRole(tl.EXECUTOR_ROLE(), multisig);
+        tl.grantRole(tl.CANCELLER_ROLE(), multisig);
+        tl.renounceRole(tl.PROPOSER_ROLE(), deployer);
+        tl.renounceRole(tl.EXECUTOR_ROLE(), deployer);
+        tl.renounceRole(tl.CANCELLER_ROLE(), deployer);
+        // Deployer deliberately does NOT renounce DEFAULT_ADMIN_ROLE — the DEP-24 gap.
+        vm.stopPrank();
+        vm.expectRevert(
+            abi.encodeWithSelector(PostDeployVerify.RoleNotRenounced.selector, "timelock DEFAULT_ADMIN_ROLE", deployer)
+        );
+        h.exposeCheckTimelockHandoff(address(tl), multisig, deployer);
     }
 }
