@@ -1,5 +1,5 @@
 .PHONY: help install patch-pragmas build test test-unit test-e2e test-fork fmt fmt-check coverage clean check-links \
-        precheck-helper validate-config validate-bsc-admin deploy-eth deploy-bsc verify-eth verify-bsc handoff handoff-all renounce update-limits
+        precheck-helper validate-config validate-bsc-admin deploy-eth deploy-eth-keystore deploy-bsc deploy-bsc-keystore verify-eth verify-bsc handoff handoff-all renounce update-limits
 
 # ─── Defaults ──────────────────────────────────────────────────────────────────
 SHELL := /bin/bash
@@ -140,6 +140,18 @@ deploy-eth: precheck-helper
 	forge script script/04_RegisterAdminAndPool.s.sol --rpc-url $(RPC) $(DEPLOY_FLAGS)
 	forge script script/05_ApplyChainUpdates.s.sol    --rpc-url $(RPC) $(DEPLOY_FLAGS)
 
+# Ethereum sequence signed by an encrypted keystore account instead of a raw private key
+# (RUNBOOK §0.3 — preferred for mainnet). No DEPLOYER_PK anywhere; forge prompts for the
+# keystore password per script. ACCOUNT defaults to `deployer`; --verify still needs
+# ETHERSCAN_API_KEY in the environment.
+deploy-eth-keystore: precheck-helper
+	@test -n "$(RPC)" || (echo "RPC=sepolia|eth required"; exit 1)
+	forge script script/01_DeployWrappedON.s.sol      --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
+	forge script script/02_DeployPools.s.sol          --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
+	forge script script/03_GrantRoles.s.sol           --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
+	forge script script/04_RegisterAdminAndPool.s.sol --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
+	forge script script/05_ApplyChainUpdates.s.sol    --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
+
 # BSC sequence (testnet or mainnet). Skips 01 and 03 (wON only exists on ETH).
 deploy-bsc: precheck-helper
 	@test -n "$(RPC)"         || (echo "RPC=bsc_testnet|bsc required"; exit 1)
@@ -147,6 +159,17 @@ deploy-bsc: precheck-helper
 	forge script script/02_DeployPools.s.sol          --rpc-url $(RPC) $(DEPLOY_FLAGS)
 	forge script script/04_RegisterAdminAndPool.s.sol --rpc-url $(RPC) $(DEPLOY_FLAGS)
 	forge script script/05_ApplyChainUpdates.s.sol    --rpc-url $(RPC) $(DEPLOY_FLAGS)
+
+# BSC sequence signed by an encrypted keystore account (RUNBOOK §0.3 — preferred for
+# mainnet). Mirrors deploy-bsc (02 + 04 + 05, no 01/03) with no DEPLOYER_PK; forge prompts
+# for the keystore password per script. ACCOUNT defaults to `deployer`. Note: on BSC mainnet
+# script 04 reverts CannotResolveCCIPAdmin (path-4) until the ON CCIP-admin is registered
+# out-of-band with Chainlink — see RUNBOOK §0.2.
+deploy-bsc-keystore: precheck-helper
+	@test -n "$(RPC)" || (echo "RPC=bsc_testnet|bsc required"; exit 1)
+	forge script script/02_DeployPools.s.sol          --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
+	forge script script/04_RegisterAdminAndPool.s.sol --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
+	forge script script/05_ApplyChainUpdates.s.sol    --rpc-url $(RPC) --broadcast --verify --account $(or $(ACCOUNT),deployer)
 
 # SECURITY: DEP-8 — the post-handoff renounce check needs the deployer EOA's address. In
 # view-only mode `forge script` resolves `msg.sender` to Foundry's default sender, so
@@ -165,11 +188,15 @@ verify-bsc:
 # SECURITY: DEP-2 — gate handoff and renounce on precheck-helper to surface unfilled
 # Helper placeholders BEFORE the deployer-EOA broadcast moves authority around.
 handoff: precheck-helper
-	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
-	@test -n "$(RPC)"         || (echo "RPC required"; exit 1)
-	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
-	MULTISIG=$(MULTISIG) forge script script/06_TransferOwnership.s.sol:TransferOwnership \
-	    --rpc-url $(RPC) $(DEPLOY_FLAGS) --sig "run()"
+	@echo "handoff is TEMPORARILY DISABLED (decision 2026-06-19, see STATE.md): keep the"; \
+	 echo "deployer EOA in control until the bridge is wired + verified end-to-end."; \
+	 echo "To re-enable: uncomment the lines below in the Makefile."; exit 1
+# --- TEMPORARILY DISABLED 2026-06-19 (do not hand off pre-operational; see STATE.md) ---
+#	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
+#	@test -n "$(RPC)"         || (echo "RPC required"; exit 1)
+#	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
+#	MULTISIG=$(MULTISIG) forge script script/06_TransferOwnership.s.sol:TransferOwnership \
+#	    --rpc-url $(RPC) $(DEPLOY_FLAGS) --sig "run()"
 
 # Two-chain handoff. Sequential, NOT atomic — if the BSC leg fails after the ETH leg
 # succeeds, the bridge is half-handed-off until the operator re-runs the BSC leg. The
@@ -177,20 +204,27 @@ handoff: precheck-helper
 # at the same operational environment (testnet pair OR mainnet pair) so the same MULTISIG
 # ends up wired on both sides.
 handoff-all:
-	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
-	@test -n "$(ETH_RPC)"     || (echo "ETH_RPC env var required"; exit 1)
-	@test -n "$(BSC_RPC)"     || (echo "BSC_RPC env var required"; exit 1)
-	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
-	$(MAKE) handoff MULTISIG=$(MULTISIG) RPC=$(ETH_RPC)
-	$(MAKE) handoff MULTISIG=$(MULTISIG) RPC=$(BSC_RPC)
+	@echo "handoff-all is TEMPORARILY DISABLED (decision 2026-06-19, see STATE.md)."; \
+	 echo "To re-enable: uncomment the lines below in the Makefile."; exit 1
+# --- TEMPORARILY DISABLED 2026-06-19 (do not hand off pre-operational; see STATE.md) ---
+#	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
+#	@test -n "$(ETH_RPC)"     || (echo "ETH_RPC env var required"; exit 1)
+#	@test -n "$(BSC_RPC)"     || (echo "BSC_RPC env var required"; exit 1)
+#	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
+#	$(MAKE) handoff MULTISIG=$(MULTISIG) RPC=$(ETH_RPC)
+#	$(MAKE) handoff MULTISIG=$(MULTISIG) RPC=$(BSC_RPC)
 
 # Final renounce — only after multisig has accepted everything on both chains.
 renounce: precheck-helper
-	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
-	@test -n "$(RPC)"         || (echo "RPC required"; exit 1)
-	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
-	MULTISIG=$(MULTISIG) forge script script/06_TransferOwnership.s.sol:RenounceDeployerAdmin \
-	    --rpc-url $(RPC) $(DEPLOY_FLAGS) --sig "run()"
+	@echo "renounce is TEMPORARILY DISABLED (decision 2026-06-19, see STATE.md): the deployer"; \
+	 echo "must keep its roles until the bridge is wired, verified, and handed off."; \
+	 echo "To re-enable: uncomment the lines below in the Makefile."; exit 1
+# --- TEMPORARILY DISABLED 2026-06-19 (do not renounce pre-handoff; see STATE.md) ---
+#	@test -n "$(MULTISIG)"    || (echo "MULTISIG env var required"; exit 1)
+#	@test -n "$(RPC)"         || (echo "RPC required"; exit 1)
+#	@test -n "$(DEPLOYER_PK)" || (echo "DEPLOYER_PK env var required"; exit 1)
+#	MULTISIG=$(MULTISIG) forge script script/06_TransferOwnership.s.sol:RenounceDeployerAdmin \
+#	    --rpc-url $(RPC) $(DEPLOY_FLAGS) --sig "run()"
 
 # SECURITY: OPS-2 — post-handoff, the deployer EOA is neither pool owner nor rate-limit
 # admin, so `--private-key $(DEPLOYER_PK)` would broadcast a tx that reverts on `onlyOwner`.
